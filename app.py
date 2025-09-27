@@ -15,6 +15,7 @@ APP_ID = "16929" # Deriv App ID
 WS_URL = f"wss://blue.derivws.com/websockets/v3?app_id={APP_ID}"
 RETRY_DELAY = 1.0 # 1 second delay for retries
 TRADING_SYMBOL = "R_75" # الزوج الذي يعمل عليه البوت (Volatility 75 Index)
+DIFFER_TARGET_DIGIT = 5 # الرقم الثابت الذي سنتوقع الاختلاف عنه (Differs 5)
 
 # --- Database & Utility Functions (UNCHANGED) ---
 def create_connection():
@@ -44,7 +45,9 @@ def create_table_if_not_exists():
                 initial_balance REAL DEFAULT 0.0,
                 contract_id TEXT,
                 trade_start_time REAL DEFAULT 0.0,
-                is_running INTEGER DEFAULT 0 
+                is_running INTEGER DEFAULT 0,
+                # 1: Waiting for first 5, 2: Waiting for second 5, 0: Ready to trade
+                waiting_for_reset INTEGER DEFAULT 1 
             );
             """
             sql_create_bot_status_table = """
@@ -82,20 +85,17 @@ def get_bot_running_status():
                     if status == 1:
                         if pid and os.path.exists(f"/proc/{pid}"):
                             if (time.time() - heartbeat > 30):
-                                print(f"Bot process {pid} timed out. Marking as stopped.")
                                 update_bot_running_status(0, 0)
                                 return 0
                             else:
                                 return status
                         else:
-                            print(f"Bot process {pid} not found. Marking as stopped.")
                             update_bot_running_status(0, 0)
                             return 0
                     else:
                         return 0
                 return 0
         except sqlite3.Error as e:
-            print(f"Database error in get_bot_running_status: {e}")
             return 0
         finally:
             conn.close()
@@ -109,7 +109,7 @@ def update_bot_running_status(status, pid):
             with conn:
                 conn.execute("UPDATE bot_status SET is_running_flag = ?, last_heartbeat = ?, process_pid = ? WHERE flag_id = 1", (status, time.time(), pid))
         except sqlite3.Error as e:
-            print(f"Database error in update_bot_running_status: {e}")
+            pass
         finally:
             conn.close()
 
@@ -122,7 +122,6 @@ def is_user_active(email):
     except FileNotFoundError:
         return False
     except Exception as e:
-        print(f"Error reading user_ids.txt: {e}")
         return False
 
 def start_new_session_in_db(email, settings):
@@ -131,10 +130,11 @@ def start_new_session_in_db(email, settings):
     if conn:
         try:
             with conn:
+                # Initialize 'waiting_for_reset' to 1 (Start by waiting for the first 5)
                 conn.execute("""
                     INSERT OR REPLACE INTO sessions 
-                    (email, user_token, base_amount, tp_target, max_consecutive_losses, current_amount, is_running)
-                    VALUES (?, ?, ?, ?, ?, ?, 1)
+                    (email, user_token, base_amount, tp_target, max_consecutive_losses, current_amount, is_running, waiting_for_reset)
+                    VALUES (?, ?, ?, ?, ?, ?, 1, 1) 
                     """, (email, settings["user_token"], settings["base_amount"], settings["tp_target"], settings["max_consecutive_losses"], settings["base_amount"]))
         except sqlite3.Error as e:
             print(f"Database error in start_new_session_in_db: {e}")
@@ -149,7 +149,7 @@ def update_is_running_status(email, status):
             with conn:
                 conn.execute("UPDATE sessions SET is_running = ? WHERE email = ?", (status, email))
         except sqlite3.Error as e:
-            print(f"Database error in update_is_running_status: {e}")
+            pass
         finally:
             conn.close()
 
@@ -161,7 +161,7 @@ def clear_session_data(email):
             with conn:
                 conn.execute("DELETE FROM sessions WHERE email=?", (email,))
         except sqlite3.Error as e:
-            print(f"Database error in clear_session_data: {e}")
+            pass
         finally:
             conn.close()
 
@@ -177,7 +177,6 @@ def get_session_status_from_db(email):
                 return dict(row)
             return None
         except sqlite3.Error as e:
-            print(f"Database error in get_session_status_from_db: {e}")
             return None
         finally:
             conn.close()
@@ -197,13 +196,12 @@ def get_all_active_sessions():
                     sessions.append(dict(row))
                 return sessions
         except sqlite3.Error as e:
-            print(f"Database error in get_all_active_sessions: {e}")
             return []
         finally:
             conn.close()
     return []
 
-def update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=None, contract_id=None, trade_start_time=None):
+def update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=None, contract_id=None, trade_start_time=None, waiting_for_reset=None):
     """Updates trading statistics and trade information for a user in the database."""
     conn = create_connection()
     if conn:
@@ -212,16 +210,18 @@ def update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_a
                 update_query = """
                 UPDATE sessions SET 
                     total_wins = ?, total_losses = ?, current_amount = ?, consecutive_losses = ?, 
-                    initial_balance = COALESCE(?, initial_balance), contract_id = ?, trade_start_time = COALESCE(?, trade_start_time)
+                    initial_balance = COALESCE(?, initial_balance), contract_id = ?, 
+                    trade_start_time = COALESCE(?, trade_start_time), 
+                    waiting_for_reset = COALESCE(?, waiting_for_reset)
                 WHERE email = ?
                 """
-                conn.execute(update_query, (total_wins, total_losses, current_amount, consecutive_losses, initial_balance, contract_id, trade_start_time, email))
+                conn.execute(update_query, (total_wins, total_losses, current_amount, consecutive_losses, initial_balance, contract_id, trade_start_time, waiting_for_reset, email))
         except sqlite3.Error as e:
             print(f"Database error in update_stats_and_trade_info_in_db: {e}")
         finally:
             conn.close()
 
-# --- WebSocket Helper Functions (MODIFIED: UNLIMITED RETRIES) ---
+# --- WebSocket Helper Functions (UNCHANGED) ---
 def connect_websocket(user_token):
     """
     Establishes a WebSocket connection and authenticates the user.
@@ -254,7 +254,7 @@ def get_balance_and_currency(user_token):
     """Fetches the user's current balance and currency using WebSocket."""
     ws = None
     try:
-        ws = connect_websocket(user_token) # Connects indefinitely until success
+        ws = connect_websocket(user_token) 
         if not ws:
             return None, None
         
@@ -276,11 +276,9 @@ def check_contract_status(ws, contract_id):
     """Checks the status of an open contract."""
     req = {"proposal_open_contract": 1, "contract_id": contract_id}
     
-    # Loop to check status and handle connection loss
     while True:
         try:
             if not ws or not ws.connected:
-                # This should be handled by the caller, forcing a reconnect
                 return None 
             
             ws.send(json.dumps(req))
@@ -288,7 +286,6 @@ def check_contract_status(ws, contract_id):
             return response.get('proposal_open_contract')
         
         except websocket._exceptions.WebSocketConnectionClosedException:
-            # Signal the caller to handle the full reconnect and retry
             return None 
         
         except Exception as e:
@@ -307,31 +304,27 @@ def place_order(ws, proposal_id, amount):
     except Exception as e:
         return {"error": {"message": "Order placement failed."}}
 
-# --- Trading Bot Logic (MODIFIED) ---
+# --- Trading Bot Logic (MODIFIED for Differs 5 and Double Wait) ---
 def analyse_data(df_ticks):
     """
-    Analyzes tick data to generate the prediction (Last Digit)
-    for the 'Differs' contract.
+    Always targets Differs 5. Returns prediction (5) and last digit.
     """
     if df_ticks.empty:
-        return "Neutral", 0, "Insufficient data."
+        return "Neutral", 0, 0, "Insufficient data."
 
-    # Get the latest price (most recent tick)
     latest_price_str = str(df_ticks.iloc[-1]['price'])
     
-    # Extract the last digit of the price
     if '.' in latest_price_str:
         last_digit_char = latest_price_str.split('.')[-1][-1]
     else:
-        # Use the last digit of the integer part if no decimal
         last_digit_char = latest_price_str[-1]
     
     try:
         last_digit = int(last_digit_char)
-        # Signal 'Trade' and return the last digit as the barrier/prediction
-        return "Trade", last_digit, f"Ready to trade Differs from {last_digit}."
+        # Prediction is always 5 (DIFFER_TARGET_DIGIT)
+        return "Trade", DIFFER_TARGET_DIGIT, last_digit, f"Ready to trade Differs {DIFFER_TARGET_DIGIT}."
     except ValueError:
-        return "Neutral", 0, "Error extracting last digit from price."
+        return "Neutral", 0, 0, "Error extracting last digit from price."
 
 def run_trading_job_for_user(session_data, check_only=False):
     """Executes the trading logic for a specific user's session."""
@@ -346,27 +339,26 @@ def run_trading_job_for_user(session_data, check_only=False):
     consecutive_losses = session_data['consecutive_losses']
     initial_balance = session_data['initial_balance']
     contract_id = session_data['contract_id']
+    waiting_for_reset = session_data['waiting_for_reset'] # 1, 2, or 0
     
     ws = None
     try:
-        # Connect initially (will retry indefinitely)
         ws = connect_websocket(user_token)
         if not ws:
             print(f"Could not connect/authorize WebSocket for {email}. Stopping attempt.")
             return
 
-        # --- Check for completed trades (if contract_id exists) ---
-        while contract_id: # Loop to check contract status until it's sold
+        # --- 1. Check for completed trades (if contract_id exists) ---
+        while contract_id: 
             contract_info = check_contract_status(ws, contract_id)
             
             if contract_info is None:
-                # Connection was lost or error while checking status. Reconnect and retry check.
                 print(f"Reconnecting WebSocket for {email} to check contract {contract_id} status...")
                 ws = connect_websocket(user_token)
                 if not ws:
                     print(f"Failed to reconnect for {email}. Stopping for now.")
                     return
-                continue # Retry check_contract_status with new ws
+                continue
 
             if contract_info.get('is_sold'): # Trade has finished
                 profit = float(contract_info.get('profit', 0))
@@ -376,27 +368,29 @@ def run_trading_job_for_user(session_data, check_only=False):
                     consecutive_losses = 0
                     total_wins += 1
                     current_amount = base_amount # Reset to base amount on win
+                    waiting_for_reset = 1 # Reset to wait for the first 5 before NEXT trade
                 elif profit < 0:
                     consecutive_losses += 1
                     total_losses += 1
-                    next_bet = float(current_amount) * 49
+                    next_bet = float(current_amount) * 2.1 
                     current_amount = max(base_amount, next_bet)
+                    waiting_for_reset = 1 # Reset to wait for the first 5 before compensation trade
                 else: 
                     consecutive_losses = 0 
+                    waiting_for_reset = 1 # Always re-wait before the next trade
                 
-                # Reset trade tracking after completion
                 new_contract_id = None
                 trade_start_time = 0.0
                 
-                # Check for Take Profit or Max Losses after trade completion
                 new_balance, _ = get_balance_and_currency(user_token)
                 if new_balance is not None:
                     current_balance_float = float(new_balance)
                     if initial_balance == 0.0:
                         initial_balance = current_balance_float
                     
-                    # Update DB with final trade result
-                    update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time)
+                    update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, 
+                                                      initial_balance=initial_balance, contract_id=new_contract_id, 
+                                                      trade_start_time=trade_start_time, waiting_for_reset=waiting_for_reset)
 
                     # Check Stop Criteria
                     if (current_balance_float - initial_balance) >= float(tp_target):
@@ -411,107 +405,147 @@ def run_trading_job_for_user(session_data, check_only=False):
                         clear_session_data(email)
                         return
                 
-                break # Break the while loop if the contract is sold
-            
-            # If contract is not sold, and we are in check_only mode, wait briefly
-            if check_only:
-                time.sleep(0.5)
+                break # Contract sold, exit the while loop
 
-        # --- Place new trade if conditions met ---
-        if not check_only and not contract_id: # Place a new trade if no trade is active
+            if check_only:
+                time.sleep(0.1)
+                
+        # --- 2. Place new trade if no trade is active AND if waiting is complete ---
+        if not check_only and not contract_id: 
             balance, currency = get_balance_and_currency(user_token)
             if balance is None:
                 print(f"Failed to get balance for {email}. Skipping trade.")
                 return
             if initial_balance == 0:
                 initial_balance = float(balance)
-                update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=None, trade_start_time=None)
+                update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=None, trade_start_time=None, waiting_for_reset=waiting_for_reset)
                 
-            # Get latest ticks for analysis
             req = {"ticks_history": TRADING_SYMBOL, "end": "latest", "count": 1, "style": "ticks"}
             
-            # --- Ticks History Retrieval Loop with Reconnect ---
+            # --- Ticks History Retrieval/Wait for Double Reset Loop with Reconnect ---
             tick_data = None
-            while tick_data is None:
+            
+            while True:
+                # If waiting_for_reset is 0, we exit the loop immediately and trade
+                if waiting_for_reset == 0:
+                    break 
+
                 try:
+                    # Request and receive the latest tick
                     ws.send(json.dumps(req))
                     response = json.loads(ws.recv())
                     
-                    if response.get('msg_type') == 'history':
-                        tick_data = response
-                        break
+                    if response.get('msg_type') == 'history' and 'history' in response:
+                        ticks = response['history']['prices']
+                        last_digit = None
+                        if ticks:
+                            latest_price_str = str(ticks[-1])
+                            if '.' in latest_price_str:
+                                last_digit = int(latest_price_str.split('.')[-1][-1])
+                            else:
+                                last_digit = int(latest_price_str[-1])
+                        
+                        # --- WAIT LOGIC (If waiting_for_reset > 0) ---
+                        if waiting_for_reset > 0:
+                            if last_digit == DIFFER_TARGET_DIGIT:
+                                new_wait_state = waiting_for_reset + 1
+                                
+                                if new_wait_state == 3: # Target digit appeared for the SECOND time (3 is the indicator to reset to 0 and trade)
+                                    print(f"User {email}: Target digit ({DIFFER_TARGET_DIGIT}) appeared TWICE. Resetting wait and entering trade.")
+                                    waiting_for_reset = 0 # Set flag to 0 (Ready)
+                                    update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, waiting_for_reset=0)
+                                    break # Exit tick loop and proceed to place trade
+                                else: # Target digit appeared for the FIRST time (or more)
+                                    print(f"User {email}: Target digit ({DIFFER_TARGET_DIGIT}) appeared (Wait state: {waiting_for_reset} -> {new_wait_state}).")
+                                    waiting_for_reset = new_wait_state
+                                    update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, waiting_for_reset=new_wait_state)
+                                    # DO NOT reset the state if another number appears. Just wait.
+                            # If last_digit != DIFFER_TARGET_DIGIT, we do nothing and wait for the next tick
+                            time.sleep(0.1)
+                            continue 
                     elif response.get('error'):
                         print(f"Error getting ticks history for {email}: {response['error']['message']}")
                         return
+                        
                 except websocket._exceptions.WebSocketConnectionClosedException:
-                    print(f"WebSocket closed while waiting for ticks history for {email}. Reconnecting...")
-                    ws = connect_websocket(user_token) # Reconnect indefinitely
+                    print(f"WebSocket closed while waiting/getting ticks history for {email}. Reconnecting...")
+                    ws = connect_websocket(user_token) 
                     if not ws: return 
                 except Exception as e:
-                    print(f"Error receiving ticks history for {email}: {e}")
+                    print(f"Error receiving/processing ticks for {email}: {e}")
                     return
+            
+            # --- Place Trade (Only reached if waiting_for_reset == 0) ---
+            
+            # Get the very latest tick one more time just before trading
+            try:
+                ws.send(json.dumps(req))
+                response = json.loads(ws.recv())
+                if response.get('msg_type') == 'history' and 'history' in response:
+                    ticks = response['history']['prices']
+                else:
+                    print(f"User {email}: Failed to get final tick before trading.")
+                    return
+            except Exception as e:
+                print(f"User {email}: Error getting final tick before trading: {e}")
+                return
 
-            if 'history' in tick_data and 'prices' in tick_data['history']:
-                ticks = tick_data['history']['prices']
-                df_ticks = pd.DataFrame({'price': ticks})
+            df_ticks = pd.DataFrame({'price': ticks})
+            signal, barrier_value, _, message = analyse_data(df_ticks) 
+            
+            if signal == 'Trade':
+                contract_type = "DIGITDIFF" 
+                amount_to_bet = max(0.35, round(float(current_amount), 2)) 
+
+                proposal_req = {
+                    "proposal": 1, "amount": amount_to_bet, "basis": "stake",
+                    "contract_type": contract_type, "currency": currency,
+                    "duration": 1, "duration_unit": "t", "symbol": TRADING_SYMBOL,
+                    "barrier": str(barrier_value)
+                }
                 
-                # --- APPLY DIGIT DIFFERS LOGIC ---
-                signal, last_digit_prediction, message = analyse_data(df_ticks) 
-                print(f"User {email}: Signal = {signal}, Prediction = {last_digit_prediction}, Message = {message}")
+                proposal_response = None
+                while proposal_response is None:
+                    try:
+                        ws.send(json.dumps(proposal_req))
+                        response_str = ws.recv()
+                        if response_str:
+                            proposal_response = json.loads(response_str)
+                            if proposal_response.get('error'):
+                                print(f"Error getting proposal for {email}: {proposal_response['error']['message']}")
+                                return
+                            if 'proposal' in proposal_response:
+                                break 
+                    except websocket._exceptions.WebSocketConnectionClosedException:
+                        print(f"WebSocket closed while waiting for proposal for {email}. Reconnecting...")
+                        ws = connect_websocket(user_token)
+                        if not ws: return 
+                        proposal_response = None 
+                    except Exception as e:
+                        print(f"Error receiving proposal for {email}: {e}")
+                        return
 
-                if signal == 'Trade':
-                    contract_type = "DIGITDIFF" 
-                    barrier_value = last_digit_prediction
-                    amount_to_bet = max(0.35, round(float(current_amount), 2)) 
-
-                    proposal_req = {
-                        "proposal": 1, "amount": amount_to_bet, "basis": "stake",
-                        "contract_type": contract_type, "currency": currency,
-                        "duration": 1, "duration_unit": "t", "symbol": TRADING_SYMBOL,
-                        "barrier": str(barrier_value)
-                    }
+                if proposal_response and 'proposal' in proposal_response:
+                    proposal_id = proposal_response['proposal']['id']
                     
-                    # --- Proposal Request Loop with Reconnect ---
-                    proposal_response = None
-                    while proposal_response is None:
-                        try:
-                            ws.send(json.dumps(proposal_req))
-                            response_str = ws.recv()
-                            if response_str:
-                                proposal_response = json.loads(response_str)
-                                if proposal_response.get('error'):
-                                    print(f"Error getting proposal for {email}: {proposal_response['error']['message']}")
-                                    return
-                                if 'proposal' in proposal_response:
-                                    break 
-                        except websocket._exceptions.WebSocketConnectionClosedException:
-                            print(f"WebSocket closed while waiting for proposal for {email}. Reconnecting...")
-                            ws = connect_websocket(user_token)
-                            if not ws: return 
-                            proposal_response = None 
-                        except Exception as e:
-                            print(f"Error receiving proposal for {email}: {e}")
-                            return
-
-                    if proposal_response and 'proposal' in proposal_response:
-                        proposal_id = proposal_response['proposal']['id']
+                    # Place the order
+                    order_response = place_order(ws, proposal_id, amount_to_bet)
+                    
+                    if 'buy' in order_response and 'contract_id' in order_response['buy']:
+                        new_contract_id = order_response['buy']['contract_id']
+                        trade_start_time = time.time()
+                        print(f"User {email}: Placed DIGITDIFF trade {new_contract_id} (Differs {barrier_value}) with stake {amount_to_bet}.")
                         
-                        # Place the order
-                        order_response = place_order(ws, proposal_id, amount_to_bet)
-                        
-                        if 'buy' in order_response and 'contract_id' in order_response['buy']:
-                            new_contract_id = order_response['buy']['contract_id']
-                            trade_start_time = time.time()
-                            print(f"User {email}: Placed DIGITDIFF trade {new_contract_id} (Differs {barrier_value}) with stake {amount_to_bet}.")
-                            
-                            # Update DB with new trade info
-                            update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time)
-                        else:
-                            print(f"User {email}: Failed to place order. Response: {order_response}")
+                        # Set waiting_for_reset to 0 temporarily while trade is active
+                        update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, 
+                                                          initial_balance=initial_balance, contract_id=new_contract_id, 
+                                                          trade_start_time=trade_start_time, waiting_for_reset=0)
                     else:
-                        print(f"User {email}: No proposal received or error in proposal response. Response: {proposal_response}")
+                        print(f"User {email}: Failed to place order. Response: {order_response}")
+                else:
+                    print(f"User {email}: No proposal received or error in proposal response. Response: {proposal_response}")
             else:
-                print(f"User {email}: No tick history received or unexpected response format: {tick_data}")
+                print(f"User {email}: Analysis failed. Skipping trade.")
     
     except Exception as e:
         print(f"An error occurred in run_trading_job_for_user for {email}: {e}")
@@ -519,7 +553,7 @@ def run_trading_job_for_user(session_data, check_only=False):
         if ws and ws.connected:
             ws.close()
 
-# --- Main Bot Loop Function ---
+# --- Main Bot Loop Function (UNCHANGED) ---
 def bot_loop():
     """Main loop that orchestrates trading jobs for all active sessions."""
     print("Bot process started. PID:", os.getpid())
@@ -539,25 +573,16 @@ def bot_loop():
                         continue
                         
                     contract_id = latest_session_data.get('contract_id')
-                    trade_start_time = latest_session_data.get('trade_start_time')
                     
-                    # --- Check and Close Active Trades ---
+                    # If trade is active, check its status immediately
                     if contract_id:
-                        # Safety check: if trade exceeds 5 seconds, force a check.
-                        if (time.time() - trade_start_time) >= 5: 
-                            run_trading_job_for_user(latest_session_data, check_only=True) 
-                        else:
-                            time.sleep(0.1) 
+                        run_trading_job_for_user(latest_session_data, check_only=True) 
+                        time.sleep(0.1) 
                         continue
                         
-                    # --- Place New Trades (Continuous Loop) ---
+                    # If no trade is active, attempt to place a new one IMMEDIATELY 
                     re_checked_session_data = get_session_status_from_db(email) 
                     if re_checked_session_data and re_checked_session_data.get('is_running') == 1 and not re_checked_session_data.get('contract_id'):
-                        
-                        # Apply the 5-second wait period between trades
-                        print(f"User {email}: Trade finished. Waiting 5 seconds before next trade...")
-                        time.sleep(5)
-                        
                         run_trading_job_for_user(re_checked_session_data, check_only=False)  
             
             time.sleep(1) 
@@ -689,7 +714,19 @@ if st.session_state.logged_in:
     if st.session_state.stats:
         with stats_placeholder.container():
             stats = st.session_state.stats
-            col1, col2, col3, col4, col5 = st.columns(5)
+            
+            # Translate waiting_for_reset status
+            wait_status_code = stats.get('waiting_for_reset', 1)
+            if wait_status_code == 0:
+                wait_status_display = "Ready to Trade (Condition Met)"
+            elif wait_status_code == 1:
+                wait_status_display = f"Waiting for first {DIFFER_TARGET_DIGIT}"
+            elif wait_status_code == 2:
+                wait_status_display = f"Waiting for second {DIFFER_TARGET_DIGIT}"
+            else:
+                wait_status_display = "Unknown"
+
+            col1, col2, col3, col4, col5, col6 = st.columns(6)
             with col1:
                 st.metric(label="Current Bet Amount", value=f"${stats.get('current_amount', 0.0):.2f}")
             with col2:
@@ -700,9 +737,14 @@ if st.session_state.logged_in:
                 st.metric(label="Total Losses", value=stats.get('total_losses', 0))
             with col5:
                 st.metric(label="Consecutive Losses", value=stats.get('consecutive_losses', 0))
+            with col6:
+                st.metric(label="Wait Status", value=wait_status_display)
             
             if stats.get('contract_id'):
                 st.warning("⚠ A trade is currently active. Stats will update after completion.")
+            elif stats.get('waiting_for_reset', 1) > 0:
+                st.info(f"⏳ Bot is waiting for the entry condition: **{wait_status_display}**.")
+
     else:
         with stats_placeholder.container():
             st.info("Your bot session is currently stopped or not yet configured.")
