@@ -12,12 +12,12 @@ import multiprocessing
 # --- Strategy Configuration (NEW) ---
 TRADING_SYMBOL = "R_100"       # Volatility 100 Index
 CONTRACT_TYPE = "DIGITDIFF"    # نوع العقد: يختلف عن الرقم المستهدف
-CONTRACT_DURATION = 1          # 1 tick
+CONTRACT_DURATION = 2         # 1 tick
 CONTRACT_DURATION_UNIT = 't'   # 't' for tick
 DIFFER_TARGET_DIGIT = 5        # الرقم المستهدف للعقد (يجب أن يكون من 0 إلى 9)
 
 # --- SQLite Database Configuration ---
-DB_FILE = "trading_data0099.db"
+DB_FILE = "trading_data551.db"
 
 # --- Database & Utility Functions ---
 def create_connection():
@@ -333,7 +333,7 @@ def run_trading_job_for_user(session_data, check_only=False):
             if contract_info and contract_info.get('is_sold'):
                 
                 print(f"User {email}: Trade {contract_id} completed. Waiting 5s before next step.")
-                time.sleep(5) 
+                time.sleep(10) 
                 
                 profit = float(contract_info.get('profit', 0))
                 
@@ -345,7 +345,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                 elif profit < 0:
                     consecutive_losses += 1
                     total_losses += 1
-                    next_bet = float(current_amount) * 2.1 
+                    next_bet = float(current_amount) * 16 
                     current_amount = max(base_amount, next_bet)
                     print(f"User {email}: LOSS! Consecutive losses: {consecutive_losses}. Next bet: {current_amount:.2f}")
                 else: 
