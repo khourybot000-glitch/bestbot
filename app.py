@@ -10,15 +10,14 @@ from datetime import datetime
 import multiprocessing
 
 # --- Strategy Configuration (NEW) ---
-# ستظل هذه المتغيرات كما هي لتحديد نوع العقد
-SYMBOL = "R_100" # Volatility 100 Index
-CONTRACT_TYPE = "DIGITDIFF" 
-CONTRACT_DURATION = 1 # 1 tick
-CONTRACT_DURATION_UNIT = 't' # 't' for tick
-TARGET_DIGIT = 5 # الرقم الهدف لـ DIGITDIFF (Differ from 5)
+TRADING_SYMBOL = "R_100"       # Volatility 100 Index
+CONTRACT_TYPE = "DIGITDIFF"    # نوع العقد: يختلف عن الرقم المستهدف
+CONTRACT_DURATION = 1          # 1 tick
+CONTRACT_DURATION_UNIT = 't'   # 't' for tick
+DIFFER_TARGET_DIGIT = 5        # الرقم المستهدف للعقد (يجب أن يكون من 0 إلى 9)
 
 # --- SQLite Database Configuration ---
-DB_FILE = "trading_data112.db"
+DB_FILE = "trading_data0099.db"
 
 # --- Database & Utility Functions ---
 def create_connection():
@@ -91,8 +90,6 @@ def get_bot_running_status():
                             print(f"Bot process {pid} timed out. Marking as stopped.")
                             update_bot_running_status(0, 0)
                             return 0
-                        # Note: Simple PID check for existence might be OS specific and removed for simplicity, 
-                        # relying primarily on heartbeat.
                         return status
                     else:
                         return 0
@@ -153,18 +150,6 @@ def update_is_running_status(email, status):
                 conn.execute("UPDATE sessions SET is_running = ? WHERE email = ?", (status, email))
         except sqlite3.Error as e:
             print(f"Database error in update_is_running_status: {e}")
-        finally:
-            conn.close()
-
-def clear_session_data(email):
-    """Deletes a user's session data from the database."""
-    conn = create_connection()
-    if conn:
-        try:
-            with conn:
-                conn.execute("DELETE FROM sessions WHERE email=?", (email,))
-        except sqlite3.Error as e:
-            print(f"Database error in clear_session_data: {e}")
         finally:
             conn.close()
 
@@ -229,7 +214,6 @@ def connect_websocket(user_token):
     """Establishes a WebSocket connection and authenticates the user."""
     ws = websocket.WebSocket()
     try:
-        # Use a reliable Deriv endpoint
         ws.connect("wss://blue.derivws.com/websockets/v3?app_id=16929") 
         auth_req = {"authorize": user_token}
         ws.send(json.dumps(auth_req))
@@ -298,7 +282,6 @@ def place_order(ws, proposal_id, amount):
     """Places a trade order on Deriv."""
     if not ws or not ws.connected:
         return {"error": {"message": "WebSocket not connected."}}
-    # Ensure amount is correctly formatted for Deriv API
     amount_decimal = decimal.Decimal(str(amount)).quantize(decimal.Decimal('0.01'), rounding=decimal.ROUND_HALF_UP)
     req = {"buy": proposal_id, "price": float(amount_decimal)}
     try:
@@ -317,31 +300,6 @@ def place_order(ws, proposal_id, amount):
 
 # --- Trading Bot Logic ---
 
-# **ملاحظة:** تم حذف دالة analyse_data لعدم الحاجة لها في استراتيجية الدخول الفوري
-
-def get_current_tick_price(ws):
-    """Fetches the current tick price for use in proposal (or any immediate need)."""
-    if not ws or not ws.connected:
-        return None
-    req = {"ticks_history": SYMBOL, "end": "latest", "count": 1, "subscribe": 0}
-    
-    try:
-        ws.send(json.dumps(req))
-        while True:
-            response_str = ws.recv()
-            response = json.loads(response_str)
-            if response.get('msg_type') == 'history' and 'prices' in response.get('history', {}):
-                return response['history']['prices'][0]
-            elif response.get('error'):
-                print(f"Error getting current price: {response['error']['message']}")
-                return None
-            # Handle other messages if they arrive
-            elif response.get('msg_type') != 'tick':
-                 continue
-    except Exception as e:
-        print(f"Error fetching current tick price: {e}")
-        return None
-
 def run_trading_job_for_user(session_data, check_only=False):
     """Executes the trading logic for a specific user's session."""
     email = session_data['email']
@@ -358,7 +316,6 @@ def run_trading_job_for_user(session_data, check_only=False):
     
     ws = None
     try:
-        # **تعزيز الاتصال الفوري**
         for _ in range(3): 
              ws = connect_websocket(user_token)
              if ws:
@@ -369,13 +326,12 @@ def run_trading_job_for_user(session_data, check_only=False):
             print(f"Could not connect WebSocket for {email} after multiple retries. Skipping trade job.")
             return
 
-        # --- Check for completed trades (if contract_id exists) ---
-        if contract_id: # Trade is open/in progress or just finished
+        # --- 1. Check for completed trades (if contract_id exists) ---
+        if contract_id: 
             contract_info = check_contract_status(ws, contract_id)
             
-            if contract_info and contract_info.get('is_sold'): # Trade has finished
+            if contract_info and contract_info.get('is_sold'):
                 
-                # We wait 5 seconds only after a win/loss is confirmed to ensure API stability
                 print(f"User {email}: Trade {contract_id} completed. Waiting 5s before next step.")
                 time.sleep(5) 
                 
@@ -384,17 +340,15 @@ def run_trading_job_for_user(session_data, check_only=False):
                 if profit > 0:
                     consecutive_losses = 0
                     total_wins += 1
-                    current_amount = base_amount # Reset to base amount on win
+                    current_amount = base_amount 
                     print(f"User {email}: WIN! Profit: {profit:.2f}. Resetting bet to {current_amount:.2f}")
                 elif profit < 0:
                     consecutive_losses += 1
                     total_losses += 1
-                    # Martingale logic
                     next_bet = float(current_amount) * 2.1 
                     current_amount = max(base_amount, next_bet)
                     print(f"User {email}: LOSS! Consecutive losses: {consecutive_losses}. Next bet: {current_amount:.2f}")
                 else: 
-                    # Should not happen in 1-tick trades, but safety reset
                     consecutive_losses = 0 
                 
                 # Reset trade tracking after completion
@@ -421,10 +375,9 @@ def run_trading_job_for_user(session_data, check_only=False):
                         update_is_running_status(email, 0)
                         return
             
-            # If contract is still open, just return (Wait for next bot_loop check)
             return
         
-        # --- Immediate Entry Logic (If no trade is active and not in check_only mode) ---
+        # --- 2. Immediate Entry Logic (If no trade is active and not in check_only mode) ---
         if not check_only and not contract_id: 
             balance, currency = get_balance_and_currency(user_token)
             if balance is None:
@@ -436,19 +389,19 @@ def run_trading_job_for_user(session_data, check_only=False):
             
             amount_to_bet = max(0.35, round(float(current_amount), 2))
                              
-            # 1. Get a proposal for the trade (We don't need a live tick stream here, just proposal)
+            # **التعديل هنا: استخدام "barrier" بدلاً من "target"**
             proposal_req = {
                 "proposal": 1, "amount": amount_to_bet, "basis": "stake",
                 "contract_type": CONTRACT_TYPE, "currency": currency,
                 "duration": CONTRACT_DURATION, "duration_unit": CONTRACT_DURATION_UNIT, 
-                "symbol": SYMBOL,
-                "target": TARGET_DIGIT 
+                "symbol": TRADING_SYMBOL,
+                "barrier": str(DIFFER_TARGET_DIGIT) # **تم التعديل**
             }
             ws.send(json.dumps(proposal_req))
             
-            # 2. Wait for proposal response
+            # Wait for proposal response
             proposal_response = None
-            for i in range(5): # Wait up to 5 seconds for proposal
+            for i in range(5):
                 try:
                     response_str = ws.recv()
                     if response_str:
@@ -468,18 +421,15 @@ def run_trading_job_for_user(session_data, check_only=False):
             if proposal_response and 'proposal' in proposal_response:
                 proposal_id = proposal_response['proposal']['id']
                 
-                # 3. Place the order
+                # Place the order
                 order_response = place_order(ws, proposal_id, amount_to_bet)
                 
                 if 'buy' in order_response and 'contract_id' in order_response['buy']:
                     new_contract_id = order_response['buy']['contract_id']
                     trade_start_time = time.time()
-                    print(f"User {email}: Placed trade {new_contract_id} (Differ 5). Stake: {amount_to_bet:.2f}")
+                    print(f"User {email}: Placed trade {new_contract_id} (Differ {DIFFER_TARGET_DIGIT}). Stake: {amount_to_bet:.2f}")
                     
-                    # 4. Update DB
                     update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time)
-                    
-                    # **لا ننتظر هنا، بل نخرج مباشرة ليقوم bot_loop بتشغيل check_only=True**
                 else:
                     print(f"User {email}: Failed to place order. Response: {order_response}")
             else:
@@ -513,15 +463,12 @@ def bot_loop():
                         
                     contract_id = latest_session_data.get('contract_id')
                     
-                    # 1. Logic to check and close active trades
+                    # 1. Check and close active trades
                     if contract_id:
-                        # check_only=True: يتحقق من النتيجة ويطبق قاعدة Martingale و TP/SL
-                        # (سيقوم هذا الجزء أيضاً بانتظار 5 ثواني بعد التأكد من انتهاء الصفقة)
                         run_trading_job_for_user(latest_session_data, check_only=True)
                     
-                    # 2. Logic to place new trades (فوري)
+                    # 2. Place new trades (Immediate Entry)
                     elif not contract_id:
-                        # check_only=False: يحاول وضع صفقة فورية جديدة
                         run_trading_job_for_user(latest_session_data, check_only=False) 
             
             time.sleep(1) # Wait for 1 second before the next iteration of the loop
