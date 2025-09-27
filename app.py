@@ -17,13 +17,15 @@ RETRY_DELAY = 1.0 # 1 second delay for retries
 TRADING_SYMBOL = "R_75" # الزوج الذي يعمل عليه البوت (Volatility 75 Index)
 DIFFER_TARGET_DIGIT = 5 # الرقم الثابت الذي سنتوقع الاختلاف عنه (Differs 5)
 
-# --- Database & Utility Functions (UNCHANGED) ---
+# --- Database & Utility Functions ---
 def create_connection():
     """Create a database connection to the SQLite database specified by DB_FILE"""
     try:
         conn = sqlite3.connect(DB_FILE)
         return conn
     except sqlite3.Error as e:
+        # For debugging purposes only
+        # print(f"Error creating database connection: {e}") 
         return None
 
 def create_table_if_not_exists():
@@ -31,6 +33,7 @@ def create_table_if_not_exists():
     conn = create_connection()
     if conn:
         try:
+            # FIX: Using '--' for comments in SQL statements.
             sql_create_sessions_table = """
             CREATE TABLE IF NOT EXISTS sessions (
                 email TEXT PRIMARY KEY,
@@ -46,7 +49,7 @@ def create_table_if_not_exists():
                 contract_id TEXT,
                 trade_start_time REAL DEFAULT 0.0,
                 is_running INTEGER DEFAULT 0,
-                # 1: Waiting for first 5, 2: Waiting for second 5, 0: Ready to trade
+                -- 1: Waiting for first 5, 2: Waiting for second 5, 0: Ready to trade
                 waiting_for_reset INTEGER DEFAULT 1 
             );
             """
@@ -116,12 +119,15 @@ def update_bot_running_status(status, pid):
 def is_user_active(email):
     """Checks if a user's email exists in the user_ids.txt file."""
     try:
+        # Assuming user_ids.txt contains one email per line
         with open("user_ids.txt", "r") as file:
             active_users = [line.strip() for line in file.readlines()]
         return email in active_users
     except FileNotFoundError:
+        print("user_ids.txt not found.")
         return False
     except Exception as e:
+        print(f"Error reading user_ids.txt: {e}")
         return False
 
 def start_new_session_in_db(email, settings):
@@ -448,19 +454,22 @@ def run_trading_job_for_user(session_data, check_only=False):
                         # --- WAIT LOGIC (If waiting_for_reset > 0) ---
                         if waiting_for_reset > 0:
                             if last_digit == DIFFER_TARGET_DIGIT:
+                                # Found the target digit '5'
                                 new_wait_state = waiting_for_reset + 1
                                 
-                                if new_wait_state == 3: # Target digit appeared for the SECOND time (3 is the indicator to reset to 0 and trade)
-                                    print(f"User {email}: Target digit ({DIFFER_TARGET_DIGIT}) appeared TWICE. Resetting wait and entering trade.")
+                                if new_wait_state == 3: # Target digit appeared for the SECOND time
+                                    print(f"User {email}: Target digit ({DIFFER_TARGET_DIGIT}) appeared TWICE. Entering trade.")
                                     waiting_for_reset = 0 # Set flag to 0 (Ready)
                                     update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, waiting_for_reset=0)
                                     break # Exit tick loop and proceed to place trade
-                                else: # Target digit appeared for the FIRST time (or more)
+                                else: # Target digit appeared for the FIRST time (or advanced state)
                                     print(f"User {email}: Target digit ({DIFFER_TARGET_DIGIT}) appeared (Wait state: {waiting_for_reset} -> {new_wait_state}).")
                                     waiting_for_reset = new_wait_state
                                     update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, waiting_for_reset=new_wait_state)
-                                    # DO NOT reset the state if another number appears. Just wait.
-                            # If last_digit != DIFFER_TARGET_DIGIT, we do nothing and wait for the next tick
+                                    # State remains 2 (waiting for second 5) until the condition is met. 
+                                    # If the next digit is also 5, it will hit new_wait_state == 3 and break immediately, fulfilling the consecutive condition.
+                            
+                            # If last_digit != DIFFER_TARGET_DIGIT, we do nothing and the state remains (1 or 2).
                             time.sleep(0.1)
                             continue 
                     elif response.get('error'):
@@ -561,6 +570,7 @@ def bot_loop():
     
     while True:
         try:
+            # Heartbeat check
             update_bot_running_status(1, os.getpid())
             active_sessions = get_all_active_sessions()
             
@@ -574,13 +584,13 @@ def bot_loop():
                         
                     contract_id = latest_session_data.get('contract_id')
                     
-                    # If trade is active, check its status immediately
+                    # 1. Check open contract status
                     if contract_id:
                         run_trading_job_for_user(latest_session_data, check_only=True) 
                         time.sleep(0.1) 
                         continue
                         
-                    # If no trade is active, attempt to place a new one IMMEDIATELY 
+                    # 2. Place a new trade if ready (contract_id is None)
                     re_checked_session_data = get_session_status_from_db(email) 
                     if re_checked_session_data and re_checked_session_data.get('is_running') == 1 and not re_checked_session_data.get('contract_id'):
                         run_trading_job_for_user(re_checked_session_data, check_only=False)  
@@ -618,6 +628,7 @@ if bot_status_from_db == 0:
     except Exception as e:
         st.error(f"❌ Error starting bot process: {e}")
 else:
+    # This message will only appear if the bot successfully started and updated the DB status
     print("Bot process is already running (status from DB).")
 
 # --- Login Section ---
@@ -749,5 +760,6 @@ if st.session_state.logged_in:
         with stats_placeholder.container():
             st.info("Your bot session is currently stopped or not yet configured.")
             
+    # Auto-rerun to update status periodically
     time.sleep(2)
     st.rerun()
