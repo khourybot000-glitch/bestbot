@@ -18,7 +18,7 @@ MAX_CONSECUTIVE_LOSSES = 3
 CONTRACT_EXPECTED_DURATION = 5 
 
 # --- SQLite Database Configuration ---
-DB_FILE = "trading_data_unique_martingale_balance.db" # تم تغيير اسم الملف لتجنب التضارب مع الإصدارات السابقة
+DB_FILE = "trading_data_unique_martingale_balance.db" 
 
 # --- Database & Utility Functions ---
 def create_connection():
@@ -52,7 +52,7 @@ def create_table_if_not_exists():
                 under_contract_id TEXT,  
                 over_contract_id TEXT,   
                 trade_start_time REAL DEFAULT 0.0,
-                balance_before_trade REAL DEFAULT 0.0,  -- الحقل الجديد
+                balance_before_trade REAL DEFAULT 0.0,
                 is_running INTEGER DEFAULT 0,
                 trade_count INTEGER DEFAULT 0, 
                 cycle_net_profit REAL DEFAULT 0.0 
@@ -76,7 +76,7 @@ def create_table_if_not_exists():
                  conn.execute("ALTER TABLE sessions ADD COLUMN under_contract_id TEXT")
             if 'over_contract_id' not in columns:
                  conn.execute("ALTER TABLE sessions ADD COLUMN over_contract_id TEXT")
-            if 'balance_before_trade' not in columns: # التحقق وإضافة حقل الرصيد
+            if 'balance_before_trade' not in columns: 
                  conn.execute("ALTER TABLE sessions ADD COLUMN balance_before_trade REAL DEFAULT 0.0")
             
             cursor = conn.execute("SELECT COUNT(*) FROM bot_status WHERE flag_id = 1")
@@ -226,41 +226,73 @@ def update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_u
         finally:
             conn.close()
 
-# --- WebSocket Helper Functions ---
+# --- WebSocket Helper Functions (Updated to be more robust) ---
 def connect_websocket(user_token):
     ws = websocket.WebSocket()
     try:
-        ws.connect("wss://blue.derivws.com/websockets/v3?app_id=16929") 
+        # A smaller timeout to allow quicker retry
+        ws.connect("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=1) 
         auth_req = {"authorize": user_token}
         ws.send(json.dumps(auth_req))
-        while True:
-            auth_response = json.loads(ws.recv())
-            if auth_response.get('msg_type') == 'authorize' or auth_response.get('error'): break
+        # Wait up to 3 seconds for auth response
+        for _ in range(30):
+            try:
+                auth_response_str = ws.recv()
+                if auth_response_str:
+                    auth_response = json.loads(auth_response_str)
+                    if auth_response.get('msg_type') == 'authorize' or auth_response.get('error'): break
+            except websocket.WebSocketTimeoutException:
+                time.sleep(0.1)
+                continue
+            except Exception:
+                break
+        
         if auth_response.get('error'):
             ws.close()
             return None
         return ws
     except Exception: 
-        time.sleep(0.1) 
+        if ws and ws.connected: ws.close()
         return None
 
 def get_balance_and_currency(user_token):
-    ws = None
-    try:
-        ws = connect_websocket(user_token)
-        if not ws: return None, None
-        balance_req = {"balance": 1}
-        ws.send(json.dumps(balance_req))
-        while True:
-            balance_response = json.loads(ws.recv())
-            if balance_response.get('msg_type') == 'balance' or balance_response.get('error'): break
-        if balance_response.get('msg_type') == 'balance':
-            balance_info = balance_response.get('balance', {})
-            return balance_info.get('balance'), balance_info.get('currency')
-        return None, None
-    except Exception: return None, None
-    finally:
-        if ws and ws.connected: ws.close()
+    # نستخدم 3 محاولات لجلب الرصيد لزيادة المتانة
+    for attempt in range(3):
+        ws = None
+        try:
+            ws = connect_websocket(user_token)
+            if not ws: 
+                time.sleep(0.5)
+                continue # فشل الاتصال، نجرب مرة أخرى
+
+            balance_req = {"balance": 1}
+            ws.send(json.dumps(balance_req))
+            
+            balance_response = None
+            # انتظار لرد API مع توقيت قصير
+            for _ in range(5): 
+                response_str = ws.recv()
+                if response_str:
+                    balance_response = json.loads(response_str)
+                    if balance_response.get('msg_type') == 'balance':
+                        balance_info = balance_response.get('balance', {})
+                        return balance_info.get('balance'), balance_info.get('currency')
+                    elif balance_response.get('error'):
+                        break
+                time.sleep(0.2) 
+            
+            # إذا لم نحصل على رد صالح، نغلق الاتصال ونعيد المحاولة
+            if ws and ws.connected: ws.close()
+            time.sleep(0.5)
+
+        except Exception: 
+            if ws and ws.connected: ws.close()
+            time.sleep(0.5)
+            continue
+        finally:
+            if ws and ws.connected: ws.close()
+            
+    return None, None # بعد 3 محاولات فاشلة، نرجع None
 
 def place_order(ws, contract_type, amount, currency, barrier):
     if not ws or not ws.connected: return {"error": {"message": "WebSocket not connected."}}
@@ -305,7 +337,7 @@ def place_order(ws, contract_type, amount, currency, barrier):
     return {"error": {"message": "Order placement failed or proposal missing."}}
 
 
-# --- Trading Bot Logic (The Core Logic - Balance Check FINAL) ---
+# --- Trading Bot Logic (The Core Logic - Max Robustness) ---
 
 def run_trading_job_for_user(session_data, check_only=False):
     email = session_data['email']
@@ -322,42 +354,49 @@ def run_trading_job_for_user(session_data, check_only=False):
     trade_count = session_data['trade_count']
     cycle_net_profit = session_data['cycle_net_profit'] 
     initial_balance = session_data['initial_balance']
-    under_contract_id = session_data['under_contract_id']
-    over_contract_id = session_data['over_contract_id']
     trade_start_time = session_data['trade_start_time']
-    balance_before_trade = session_data['balance_before_trade'] # جلب الرصيد الأولي
+    balance_before_trade = session_data['balance_before_trade']
     
     ws = None
     try:
-        for _ in range(2): 
-             ws = connect_websocket(user_token)
-             if ws: break
-             time.sleep(0.1) 
+        # اتصال WebSocket - يجب أن يكون ناجحاً قبل كل صفقة
+        ws = connect_websocket(user_token)
+        # إذا فشل الاتصال في أي مرحلة، نخرج ونعيد المحاولة لاحقاً
         if not ws: return 
 
         # 🌟 المرحلة 1: التحقق من النتيجة عبر الرصيد (trade_count = 1)
         if trade_count == 1:
             current_time = time.time()
             
-            # الانتظار للمدة الزمنية + ثانية تأخير لضمان تسجيل النتيجة في الرصيد
+            # 1. إذا لم يمر وقت الصفقة، ننتظر
             if current_time - trade_start_time < CONTRACT_EXPECTED_DURATION + 1: 
                 return 
+            
+            # ******** منطق التحقق والإغلاق الحاسم *********
+            
+            current_balance = None
+            
+            # 2. محاولة جلب الرصيد - محمية بـ try/except و تتضمن 3 محاولات داخلية
+            try:
+                current_balance, currency = get_balance_and_currency(user_token)
+            except Exception:
+                # إذا فشل الاتصال، فإن current_balance ستبقى None
+                pass 
 
-            # 1. جلب الرصيد الحالي
-            current_balance, _ = get_balance_and_currency(user_token)
-            if current_balance is None: return 
+            # 3. حساب النتيجة الصافية للدورة بناءً على الرصيد
+            if current_balance is not None:
+                # إذا نجحنا في جلب الرصيد: نحسب النتيجة الحقيقية
+                balance_diff = float(current_balance) - float(balance_before_trade)
+                cycle_net_profit = round(balance_diff, 2)
+                
+                # تحديث الـ Wins/Losses (فقط إذا نجحنا في جلب الرصيد)
+                if cycle_net_profit != 0.0:
+                     total_wins += 1 
+                     total_losses += 1 
+            else:
+                 # 🛑 إذا فشل جلب الرصيد (بعد مرور الوقت): نفترض خسارة الدورة لضمان المضاعفة وعدم التوقف
+                 cycle_net_profit = -round(current_under_amount + current_over_amount, 2)
             
-            # 2. حساب النتيجة الصافية للدورة بناءً على الرصيد
-            balance_diff = float(current_balance) - float(balance_before_trade)
-            
-            # 3. استنتاج الربح والخسارة الإجمالية للدورة
-            cycle_net_profit = round(balance_diff, 2)
-            
-            # هنا نفترض صفقة واحدة رابحة وأخرى خاسرة (هو الأقرب للحقيقة في الـ simultaneous)
-            if cycle_net_profit != 0.0:
-                 total_wins += 1 # ربح صفقة
-                 total_losses += 1 # خسارة صفقة
-
             # 4. منطق المضاعفة على الخسارة الصافية للدورة
             if cycle_net_profit < 0:
                 consecutive_net_losses += 1
@@ -378,61 +417,72 @@ def run_trading_job_for_user(session_data, check_only=False):
                 return 
 
             # 🌟 التحديث النهائي: إعادة تهيئة الدورة الجديدة
-            # يتم مسح كل شيء (IDs و الرصيد الأولي) والانتقال لـ trade_count=0 فورا
+            # الانتقال لـ trade_count=0 فورا (Guaranteed Reset)
             update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, 
                                               trade_count=0, cycle_net_profit=cycle_net_profit, initial_balance=initial_balance, 
                                               under_contract_id=None, over_contract_id=None, trade_start_time=0.0, balance_before_trade=0.0)
             
-            return 
+            return # انتهت المرحلة 1 بنجاح (سواء بالربح أو المضاعفة)
         
         # 🌟 المرحلة 2: الدخول في صفقات جديدة (trade_count = 0)
         elif trade_count == 0 and not check_only: 
             
-            # 1. جلب الرصيد قبل الصفقة
+            # 1. جلب الرصيد والتحقق من TP
+            # نعتمد على دالة قوية تجلب الرصيد
             balance, currency = get_balance_and_currency(user_token)
-            if balance is None: return
+            if balance is None: return # إذا فشل الاتصال، نخرج ونعيد المحاولة فورا
             
             if initial_balance == 0:
                 initial_balance = float(balance)
                 update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, trade_count, cycle_net_profit, initial_balance=initial_balance)
             
-            # 2. التحقق من هدف الربح (TP)
             current_profit_vs_initial = float(balance) - initial_balance
             if current_profit_vs_initial >= tp_target and initial_balance != 0:
                  update_is_running_status(email, 0)
                  return
             
-            # 3. تخزين الرصيد الأولي قبل الدخول (مهم جداً للتحقق لاحقاً)
+            # 2. تخزين الرصيد الأولي قبل الدخول
             balance_before_trade = float(balance) 
             
-            # --- 4. تنفيذ صفقة Under 3 ---
-            amount_under = max(0.35, round(float(current_under_amount), 2))
-            order_response_under = place_order(ws, "DIGITUNDER", amount_under, currency, 3)
+            order_success = False
             
-            if 'buy' not in order_response_under: return 
+            try:
+                # --- 3. تنفيذ صفقة Under 3 ---
+                amount_under = max(0.35, round(float(current_under_amount), 2))
+                order_response_under = place_order(ws, "DIGITUNDER", amount_under, currency, 3)
+                
+                # --- 4. تنفيذ صفقة Over 3 ---
+                amount_over = max(0.35, round(float(current_over_amount), 2))
+                order_response_over = place_order(ws, "DIGITOVER", amount_over, currency, 3)
+                
+                # التحقق من نجاح الصفقتين
+                if 'buy' in order_response_under and 'buy' in order_response_over:
+                    order_success = True
 
-            # --- 5. تنفيذ صفقة Over 3 ---
-            amount_over = max(0.35, round(float(current_over_amount), 2))
-            order_response_over = place_order(ws, "DIGITOVER", amount_over, currency, 3)
+            except Exception:
+                pass 
 
-            if 'buy' not in order_response_over: return 
-
-            # --- 6. حفظ بيانات الصفقتين وبدء المراقبة ---
-            trade_start_time = time.time() 
+            if order_success:
+                # --- 5. حفظ بيانات الصفقتين وبدء المراقبة ---
+                trade_start_time = time.time() 
+                
+                # الانتقال لـ trade_count=1
+                update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, 
+                                                  trade_count=1, cycle_net_profit=0.0, 
+                                                  initial_balance=initial_balance, under_contract_id="Active", over_contract_id="Active", trade_start_time=trade_start_time,
+                                                  balance_before_trade=balance_before_trade)
             
-            # لا نحفظ IDs فعلية، بل نضع "Active" ونسجل الرصيد الأولي
-            update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, 
-                                              trade_count=1, cycle_net_profit=0.0, 
-                                              initial_balance=initial_balance, under_contract_id="Active", over_contract_id="Active", trade_start_time=trade_start_time,
-                                              balance_before_trade=balance_before_trade)
+            # إذا فشلت الصفقة (order_success=False)، فإن trade_count ستبقى 0، وسيحاول الدخول فورا في دورة الحلقة التالية.
             return 
 
         else: 
             return 
 
-    except Exception as e:
+    except Exception:
+        # في حال حدوث خطأ عام 
         return
     finally:
+        # إغلاق الاتصال بعد الانتهاء
         if ws and ws.connected:
             ws.close()
 
@@ -559,6 +609,7 @@ if st.session_state.logged_in:
             stats = st.session_state.stats
             
             initial_balance = stats.get('initial_balance', 0.0)
+            # نستخدم الدالة القوية لجلب الرصيد للعرض
             balance, _ = get_balance_and_currency(stats.get('user_token'))
             current_profit = 0.0
             if balance is not None and initial_balance != 0.0:
@@ -575,17 +626,13 @@ if st.session_state.logged_in:
             if balance is not None:
                  st.metric(label="Current Balance", value=f"${float(balance):.2f}")
             
-            under_id = stats.get('under_contract_id')
-            over_id = stats.get('over_contract_id')
             trade_count_status = stats.get('trade_count', 0)
-
-            if trade_count_status == 0:
-                 st.success(f"✅ Cycle complete. Starting new Cycle (Simultaneous).")
-            elif trade_count_status == 1:
-                if under_id and over_id: # الآن سيظهر "Active" هنا
-                    st.warning("⚠ Monitoring active trades: Cycle is Active.")
-                else: 
-                    st.info(f"⏳ Cycle trades finished. Calculating result...")
+            
+            # العرض يعتمد فقط على trade_count لضمان عدم التعليق في الواجهة
+            if trade_count_status == 1:
+                st.warning("⚠ Monitoring active trades: Cycle is Active. (Check Balance in 6 seconds)")
+            else: 
+                st.success(f"✅ Cycle complete. Starting new Cycle (Simultaneous).")
             
     else:
         with stats_placeholder.container():
