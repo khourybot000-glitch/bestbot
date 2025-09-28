@@ -12,9 +12,9 @@ TRADING_SYMBOL = "R_100"
 CONTRACT_DURATION = 1          
 CONTRACT_DURATION_UNIT = 't'   
 MIN_CHECK_DELAY_SECONDS = 5    
-NET_LOSS_MULTIPLIER = 6.0      
-BASE_OVER_MULTIPLIER = 2.0     
-MAX_CONSECUTIVE_LOSSES = 3     
+NET_LOSS_MULTIPLIER = 6.0      # المضاعف: x6
+BASE_OVER_MULTIPLIER = 2.0     # مضاعف Over 3: x2
+MAX_CONSECUTIVE_LOSSES = 3     # وقف الخسارة: 3 خسائر صافية
 
 # --- SQLite Database Configuration ---
 DB_FILE = "trading_data_unique_martingale_final.db" 
@@ -275,21 +275,20 @@ def place_order(ws, proposal_id, amount):
     except Exception: return {"error": {"message": "Order placement failed."}}
 
 
-# --- Trading Bot Logic (Corrected Multiplier Logic) ---
+# --- Trading Bot Logic (Final Corrected Multiplier Logic) ---
 
 def run_trading_job_for_user(session_data, check_only=False):
     email = session_data['email']
     user_token = session_data['user_token']
     
-    # 🌟 يتم تمرير البيانات كمتغيرات قابلة للتعديل داخل الدالة
     tp_target = session_data['tp_target']
     max_consecutive_losses = session_data['max_consecutive_losses']
     total_wins = session_data['total_wins']
     total_losses = session_data['total_losses']
-    base_under_amount = session_data['base_under_amount']
-    base_over_amount = session_data['base_over_amount']
-    current_under_amount = session_data['current_under_amount']
-    current_over_amount = session_data['current_over_amount']
+    base_under_amount = session_data['base_under_amount'] # المبلغ الأساسي الثابت للدخول الأول
+    base_over_amount = session_data['base_over_amount'] # المبلغ الأساسي الثابت للدخول الثاني
+    current_under_amount = session_data['current_under_amount'] # المبلغ الحالي للدخول الأول
+    current_over_amount = session_data['current_over_amount'] # المبلغ الحالي للدخول الثاني
     consecutive_net_losses = session_data['consecutive_net_losses']
     trade_count = session_data['trade_count']
     cycle_net_profit = session_data['cycle_net_profit'] 
@@ -322,10 +321,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                     
                     
                     if trade_count == 1: # End of Trade 1 (Under 3)
-                        # 🌟 لا تغيير في current_under_amount أو current_over_amount هنا
-                        # لأننا نعتمد على قيمة الـ current_over_amount المحفوظة مسبقاً للدخول
-                        # وهذه القيمة هي التي تم حسابها في نهاية الدورة السابقة (أو القيمة الأساسية)
-                        
+                        # يتم الانتقال مباشرة للصفقة الثانية دون تغيير قيم current_under/over
                         update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, 
                                                           trade_count=2, cycle_net_profit=cycle_net_profit, 
                                                           initial_balance=initial_balance, contract_id=None, trade_start_time=0.0)
@@ -334,27 +330,28 @@ def run_trading_job_for_user(session_data, check_only=False):
                         trade_count = 2
                         continue # انتقال فوري لـ Trade 2
 
-                    elif trade_count == 2: # End of Trade 2 (Over 3) - Cycle Finished
+                    elif trade_count == 2: # End of Trade 2 (Over 3) - Cycle Finished (Decision Point)
                         
                         if cycle_net_profit < 0:
+                            # 🌟 خسارة صافية للدورة: نزيد عداد الخسائر ونضاعف للمرة القادمة
                             consecutive_net_losses += 1
-                            # 🌟 تطبيق المضاعف الجديد (x6)
-                            next_under_bet = base_under_amount * (NET_LOSS_MULTIPLIER ** consecutive_net_losses)
                             
-                            # نضمن أن يتم الدخول في الصفقة الأولى بالمبلغ الجديد
-                            current_under_amount = max(base_under_amount, next_under_bet)
+                            # حساب المبلغ الجديد للصفقة الأولى (Under 3) بناءً على المضاعف (x6)
+                            # نستخدم base_under_amount لتجنب التراكم الخاطئ، مع رفعها لأس عدد الخسائر المتتالية
+                            new_under_bet = base_under_amount * (NET_LOSS_MULTIPLIER ** consecutive_net_losses)
                             
-                            # نضمن أن تكون الصفقة الثانية مضاعف للصفقة الأولى (x2)
-                            current_over_amount = current_under_amount * BASE_OVER_MULTIPLIER
+                            current_under_amount = round(max(base_under_amount, new_under_bet), 2)
                             
-                            # ملاحظة: تم تعديل طريقة حساب المبلغ للمضاعفة لتجنب التراكم الخاطئ
+                            # حساب المبلغ الجديد للصفقة الثانية (Over 3) بناءً على current_under_amount الجديدة (x2)
+                            current_over_amount = round(current_under_amount * BASE_OVER_MULTIPLIER, 2)
                             
-                        else: # ربح صافي أو تعادل
+                        else: 
+                            # 🌟 ربح صافي أو تعادل: إعادة تعيين إلى المبلغ الأساسي
                             consecutive_net_losses = 0
                             current_under_amount = base_under_amount 
                             current_over_amount = base_over_amount
                         
-                        # 🛑 شرط وقف الخسارة 
+                        # 🛑 شرط وقف الخسارة (Stop Loss Check) 
                         if consecutive_net_losses >= max_consecutive_losses:
                             update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, trade_count=0, cycle_net_profit=0.0, initial_balance=initial_balance)
                             update_is_running_status(email, 0)
@@ -392,17 +389,17 @@ def run_trading_job_for_user(session_data, check_only=False):
                 if trade_count == 0:
                     new_contract_type = "DIGITUNDER"
                     new_trade_count = 1
-                    amount_to_bet = current_under_amount 
+                    amount_to_bet = current_under_amount # المبلغ الأساسي أو المضاعف
                 elif trade_count == 2: 
                     new_contract_type = "DIGITOVER"
                     new_trade_count = 2
-                    amount_to_bet = current_over_amount 
+                    amount_to_bet = current_over_amount # المبلغ (x2) من المبلغ الحالي
                 else:
                     return 
 
                 amount_to_bet = max(0.35, round(float(amount_to_bet), 2))
                                  
-                # 1. Proposal
+                # 1. Proposal & Buy Order... (Logic Unchanged)
                 proposal_req = {
                     "proposal": 1, "amount": amount_to_bet, "basis": "stake",
                     "contract_type": new_contract_type,  
@@ -413,7 +410,6 @@ def run_trading_job_for_user(session_data, check_only=False):
                 }
                 ws.send(json.dumps(proposal_req))
                 
-                # 2. Await Proposal Response 
                 proposal_response = None
                 for i in range(5):
                     try:
@@ -428,7 +424,6 @@ def run_trading_job_for_user(session_data, check_only=False):
                 if proposal_response and 'proposal' in proposal_response:
                     proposal_id = proposal_response['proposal']['id']
                     
-                    # 3. Buy Order
                     order_response = place_order(ws, proposal_id, amount_to_bet)
                     
                     if 'buy' in order_response and 'contract_id' in order_response['buy']:
