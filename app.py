@@ -12,9 +12,10 @@ TRADING_SYMBOL = "R_100"
 CONTRACT_DURATION = 1          
 CONTRACT_DURATION_UNIT = 't'   
 MIN_CHECK_DELAY_SECONDS = 5    
-NET_LOSS_MULTIPLIER = 6.0      # المضاعف: x6 (على الخسارة الصافية للدورة)
-BASE_OVER_MULTIPLIER = 2.0     # مضاعف Over 3: x2
-MAX_CONSECUTIVE_LOSSES = 3     # وقف الخسارة: 3 خسائر صافية متتالية
+NET_LOSS_MULTIPLIER = 6.0      
+BASE_OVER_MULTIPLIER = 2.0     
+MAX_CONSECUTIVE_LOSSES = 3     
+CONTRACT_EXPECTED_DURATION = 5 # مدة العقد المتوقعة بالثواني
 
 # --- SQLite Database Configuration ---
 DB_FILE = "trading_data_unique_martingale_final.db" 
@@ -224,7 +225,6 @@ def update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_u
 def connect_websocket(user_token):
     ws = websocket.WebSocket()
     try:
-        # ⚠️ تأكد من استخدام تطبيق Deriv ID صالح
         ws.connect("wss://blue.derivws.com/websockets/v3?app_id=16929") 
         auth_req = {"authorize": user_token}
         ws.send(json.dumps(auth_req))
@@ -235,7 +235,9 @@ def connect_websocket(user_token):
             ws.close()
             return None
         return ws
-    except Exception: return None
+    except Exception: 
+        time.sleep(0.1) 
+        return None
 
 def get_balance_and_currency(user_token):
     ws = None
@@ -295,7 +297,7 @@ def place_order(ws, contract_type, amount, currency, barrier):
                 proposal_response = json.loads(response_str)
                 if proposal_response.get('error'): return proposal_response
                 if 'proposal' in proposal_response: break
-            time.sleep(0.5)
+            time.sleep(0.1) 
         except Exception: continue
     
     if proposal_response and 'proposal' in proposal_response:
@@ -314,7 +316,7 @@ def place_order(ws, contract_type, amount, currency, barrier):
     return {"error": {"message": "Order placement failed or proposal missing."}}
 
 
-# --- Trading Bot Logic (Simultaneous Trades - Corrected Flow) ---
+# --- Trading Bot Logic (The Core Logic) ---
 
 def run_trading_job_for_user(session_data, check_only=False):
     email = session_data['email']
@@ -337,40 +339,60 @@ def run_trading_job_for_user(session_data, check_only=False):
     
     ws = None
     try:
-        for _ in range(3): 
+        for _ in range(2): 
              ws = connect_websocket(user_token)
              if ws: break
-             time.sleep(0.5) 
-        if not ws: return
+             time.sleep(0.1) 
+        if not ws: return 
 
         # 🌟 المرحلة 1: مراقبة الصفقات النشطة (trade_count = 1)
         if under_contract_id or over_contract_id:
             trade_count = 1 
-
-            if time.time() - trade_start_time < MIN_CHECK_DELAY_SECONDS: 
-                return 
-
-            results = []
+            current_time = time.time()
             
-            # 1. فحص صفقة Under 3
+            # متغيرات لتخزين نتائج الإغلاق للعقود الحالية فقط
+            closed_under_profit = None
+            closed_over_profit = None
+            
+            # --- 1. فحص صفقة Under 3 ---
             if under_contract_id:
                 contract_info = check_contract_status(ws, under_contract_id)
-                if contract_info and contract_info.get('is_sold'):
-                    profit = float(contract_info.get('profit', 0))
-                    results.append(profit)
-                    under_contract_id = None 
+                
+                # الشرط: إغلاق العقد (is_sold) أو مرور وقت طويل جداً (لإجبار المسح)
+                if (contract_info and contract_info.get('is_sold')) or (current_time - trade_start_time > CONTRACT_EXPECTED_DURATION + 3):
+                    
+                    if contract_info and contract_info.get('is_sold'):
+                        closed_under_profit = float(contract_info.get('profit', 0))
+                    else: 
+                        # حكم زمني: إذا لم يعد هناك اتصال، نعتبرها خسارة لضمان عدم توقف البوت
+                        closed_under_profit = -current_under_amount 
+                        
+                    under_contract_id = None # المسح المحلي للـ ID
             
-            # 2. فحص صفقة Over 3
+            # --- 2. فحص صفقة Over 3 ---
             if over_contract_id:
                 contract_info = check_contract_status(ws, over_contract_id)
-                if contract_info and contract_info.get('is_sold'):
-                    profit = float(contract_info.get('profit', 0))
-                    results.append(profit)
-                    over_contract_id = None 
+                
+                # الشرط: إغلاق العقد (is_sold) أو مرور وقت طويل جداً (لإجبار المسح)
+                if (contract_info and contract_info.get('is_sold')) or (current_time - trade_start_time > CONTRACT_EXPECTED_DURATION + 3):
+                    
+                    if contract_info and contract_info.get('is_sold'):
+                        closed_over_profit = float(contract_info.get('profit', 0))
+                    else: 
+                        # حكم زمني: إذا لم يعد هناك اتصال، نعتبرها خسارة لضمان عدم توقف البوت
+                        closed_over_profit = -current_over_amount 
+                        
+                    over_contract_id = None # المسح المحلي للـ ID
 
-            # 3. اتخاذ القرار إذا تم إغلاق كلتا الصفقتين
+
+            # 3. اتخاذ القرار إذا تم إغلاق كلتا الصفقتين (كلاهما None)
             if under_contract_id is None and over_contract_id is None:
                 
+                results = []
+                if closed_under_profit is not None: results.append(closed_under_profit)
+                if closed_over_profit is not None: results.append(closed_over_profit)
+                
+                # حساب النتيجة الصافية للدورة
                 cycle_net_profit = sum(results)
                 for profit in results:
                     total_wins += 1 if profit > 0 else 0
@@ -393,22 +415,21 @@ def run_trading_job_for_user(session_data, check_only=False):
                 if consecutive_net_losses >= max_consecutive_losses:
                     update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, trade_count=0, cycle_net_profit=0.0, initial_balance=initial_balance)
                     update_is_running_status(email, 0)
-                    return # خروج نهائي
+                    return 
 
-                # تحديث قاعدة البيانات وإعادة تهيئة الدورة الجديدة
+                # 🌟 التحديث النهائي: إعادة تهيئة الدورة الجديدة (trade_count=0 و IDs=None)
                 update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, 
                                                   trade_count=0, cycle_net_profit=0.0, initial_balance=initial_balance, 
                                                   under_contract_id=None, over_contract_id=None, trade_start_time=0.0)
                 
-                # 🌟 نستخدم RETURN للخروج، مما يسمح لـ bot_loop باستدعاء الدالة مرة أخرى فوراً للدخول في دورة جديدة
                 return 
             
-            # تحديث حالة العقود إذا أغلق أحدها وبقي الآخر
-            update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, 
+            # 🌟 إذا أغلق عقد واحد فقط، نحدث قاعدة البيانات بقيم الـ IDs المحدثة
+            if closed_under_profit is not None or closed_over_profit is not None:
+                 update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, 
                                               trade_count=1, cycle_net_profit=cycle_net_profit, 
                                               initial_balance=initial_balance, under_contract_id=under_contract_id, over_contract_id=over_contract_id, trade_start_time=trade_start_time)
-
-            time.sleep(1) 
+            
             return 
         
         # 🌟 المرحلة 2: الدخول في صفقات جديدة (trade_count = 0)
@@ -417,7 +438,7 @@ def run_trading_job_for_user(session_data, check_only=False):
             balance, currency = get_balance_and_currency(user_token)
             if balance is None: return
             
-            # تحديث الرصيد الأولي والتحقق من هدف الربح (TP)
+            # التحقق من هدف الربح (TP)
             if initial_balance == 0:
                 initial_balance = float(balance)
                 update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, trade_count, cycle_net_profit, initial_balance=initial_balance)
@@ -434,7 +455,7 @@ def run_trading_job_for_user(session_data, check_only=False):
             if 'buy' in order_response_under and 'contract_id' in order_response_under['buy']:
                 new_under_id = order_response_under['buy']['contract_id']
             else:
-                return # فشل صفقة Under 3
+                return 
 
             # --- 2. تنفيذ صفقة Over 3 ---
             amount_over = max(0.35, round(float(current_over_amount), 2))
@@ -443,7 +464,7 @@ def run_trading_job_for_user(session_data, check_only=False):
             if 'buy' in order_response_over and 'contract_id' in order_response_over['buy']:
                 new_over_id = order_response_over['buy']['contract_id']
             else:
-                return # فشل صفقة Over 3
+                return 
 
             # --- 3. حفظ بيانات الصفقتين وبدء المراقبة ---
             trade_start_time = time.time() 
@@ -451,7 +472,7 @@ def run_trading_job_for_user(session_data, check_only=False):
             update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, 
                                               trade_count=1, cycle_net_profit=0.0, 
                                               initial_balance=initial_balance, under_contract_id=new_under_id, over_contract_id=new_over_id, trade_start_time=trade_start_time)
-            return # الخروج بعد وضع الصفقات بنجاح
+            return 
 
         else: 
             return 
@@ -462,7 +483,7 @@ def run_trading_job_for_user(session_data, check_only=False):
         if ws and ws.connected:
             ws.close()
 
-# --- Main Bot Loop Function (Unchanged) ---
+# --- Main Bot Loop Function ---
 def bot_loop():
     update_bot_running_status(1, os.getpid()) 
     while True:
@@ -479,11 +500,12 @@ def bot_loop():
                         
                     run_trading_job_for_user(latest_session_data, check_only=False) 
             
-            time.sleep(1) # الانتظار ثانية واحدة بين فحص الجلسات
+            # زمن انتظار قصير للدخول الفوري
+            time.sleep(0.1) 
         except Exception as e:
             time.sleep(5)
 
-# --- Streamlit App Configuration (Unchanged) ---
+# --- Streamlit App Configuration ---
 st.set_page_config(page_title="Khoury Bot", layout="wide")
 st.title("Khoury Bot 🤖")
 
