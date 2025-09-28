@@ -349,9 +349,9 @@ def analyse_data(tick_prices):
     
     # المقارنة بين الأول والأخير
     if last_tick > first_tick:
-        return "PUT", f"Price went UP over the last {ANALYSE_TICKS_COUNT} ticks ({first_tick} -> {last_tick}). Entering CALL."
+        return "CALL", f"Price went UP over the last {ANALYSE_TICKS_COUNT} ticks ({first_tick} -> {last_tick}). Entering CALL."
     elif last_tick < first_tick:
-        return "CALL", f"Price went DOWN over the last {ANALYSE_TICKS_COUNT} ticks ({first_tick} -> {last_tick}). Entering PUT."
+        return "PUT", f"Price went DOWN over the last {ANALYSE_TICKS_COUNT} ticks ({first_tick} -> {last_tick}). Entering PUT."
     else:
         return "Wait", f"Price remained SAME over the last {ANALYSE_TICKS_COUNT} ticks ({first_tick} == {last_tick})."
 
