@@ -7,20 +7,19 @@ import decimal
 import sqlite3
 import multiprocessing
 
-# --- Strategy Configuration ---
+# --- Strategy Configuration (Updated) ---
 TRADING_SYMBOL = "R_100"       
 CONTRACT_DURATION = 1          
 CONTRACT_DURATION_UNIT = 't'   
 MIN_CHECK_DELAY_SECONDS = 5    
-NET_LOSS_MULTIPLIER = 2.0      
-BASE_OVER_MULTIPLIER = 3.0     
-# 🌟 القيمة الثابتة ل Stop Loss: 4 خسائر دورة صافية متتالية
-MAX_CONSECUTIVE_LOSSES = 4 
+NET_LOSS_MULTIPLIER = 6.0      # 🌟 مضاعف الخسارة الصافية الجديد: x6
+BASE_OVER_MULTIPLIER = 2.0     # 🌟 مضاعف Over 3 الجديد: x2
+MAX_CONSECUTIVE_LOSSES = 3     # 🌟 وقف الخسارة الثابت الجديد: 3 خسائر صافية
 
 # --- SQLite Database Configuration ---
-DB_FILE = "trading_data_unique_martingale_final.db" # تم تغيير اسم قاعدة البيانات لتجنب تضارب السكيما
+DB_FILE = "trading_data_unique_martingale_final.db" 
 
-# --- Database & Utility Functions (Adjusted for fixed SL) ---
+# --- Database & Utility Functions (Unchanged Logic) ---
 def create_connection():
     try:
         conn = sqlite3.connect(DB_FILE)
@@ -38,7 +37,7 @@ def create_table_if_not_exists():
                 user_token TEXT NOT NULL,
                 base_amount REAL NOT NULL, 
                 tp_target REAL NOT NULL,
-                max_consecutive_losses INTEGER NOT NULL, -- القيمة الثابتة 4 مسجلة هنا
+                max_consecutive_losses INTEGER NOT NULL, 
                 total_wins INTEGER DEFAULT 0,
                 total_losses INTEGER DEFAULT 0,
                 
@@ -126,10 +125,10 @@ def start_new_session_in_db(email, settings):
     if conn:
         try:
             base_under = settings["base_under_amount_input"]
+            # 🌟 استخدام BASE_OVER_MULTIPLIER الجديد (x2)
             base_over = base_under * BASE_OVER_MULTIPLIER 
             
-            # 🌟 استخدام قيمة SL الثابتة
-            max_losses = MAX_CONSECUTIVE_LOSSES 
+            max_losses = settings.get("max_consecutive_losses", MAX_CONSECUTIVE_LOSSES) 
             tp_target = settings.get("tp_target", 100.0)
             
             with conn:
@@ -277,13 +276,14 @@ def place_order(ws, proposal_id, amount):
     except Exception: return {"error": {"message": "Order placement failed."}}
 
 
-# --- Trading Bot Logic (SL Check Uses Fixed Value) ---
+# --- Trading Bot Logic (Immediate Cycle Restart and Multiplier Update) ---
 
 def run_trading_job_for_user(session_data, check_only=False):
     email = session_data['email']
     user_token = session_data['user_token']
+    
     tp_target = session_data['tp_target']
-    max_consecutive_losses = session_data['max_consecutive_losses'] # 🌟 يتم قراءة القيمة 4 من قاعدة البيانات
+    max_consecutive_losses = session_data['max_consecutive_losses']
     total_wins = session_data['total_wins']
     total_losses = session_data['total_losses']
     base_under_amount = session_data['base_under_amount']
@@ -305,12 +305,13 @@ def run_trading_job_for_user(session_data, check_only=False):
              time.sleep(0.5) 
         if not ws: return
 
-        # --- 1. Check for completed trades ---
-        if contract_id: 
-            elapsed_time = time.time() - trade_start_time
-            if elapsed_time < MIN_CHECK_DELAY_SECONDS: return 
+        while True: 
             
-            while True:
+            # --- 1. Check for completed trades ---
+            if contract_id: 
+                elapsed_time = time.time() - trade_start_time
+                if elapsed_time < MIN_CHECK_DELAY_SECONDS: return 
+                
                 contract_info = check_contract_status(ws, contract_id)
                 
                 if contract_info and contract_info.get('is_sold'): 
@@ -324,108 +325,124 @@ def run_trading_job_for_user(session_data, check_only=False):
                         update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, 
                                                           trade_count=2, cycle_net_profit=cycle_net_profit, 
                                                           initial_balance=initial_balance, contract_id=None, trade_start_time=0.0)
-                        return 
+                        
+                        contract_id = None 
+                        trade_count = 2
+                        continue # انتقال فوري لـ Trade 2
 
                     elif trade_count == 2: # End of Trade 2 (Over 3) - Cycle Finished
                         
                         if cycle_net_profit < 0:
                             consecutive_net_losses += 1
+                            # 🌟 تطبيق المضاعف الجديد (x6)
                             next_under_bet = float(current_under_amount) * NET_LOSS_MULTIPLIER 
-                            next_over_bet = float(current_over_amount) * NET_LOSS_MULTIPLIER
+                            # 🌟 تطبيق مضاعف Over 3 الجديد (x2)
+                            next_over_bet = next_under_bet * BASE_OVER_MULTIPLIER 
+                            
+                            # نستخدم base_under_amount كحد أدنى للدخول الأول
                             current_under_amount = max(base_under_amount, next_under_bet)
+                            # نستخدم base_over_amount كحد أدنى للدخول الثاني
                             current_over_amount = max(base_over_amount, next_over_bet)
                         else:
                             consecutive_net_losses = 0
                             current_under_amount = base_under_amount 
                             current_over_amount = base_over_amount
                         
-                        # 🛑 شرط وقف الخسارة (Stop Loss Check) 
+                        # 🛑 شرط وقف الخسارة 
                         if consecutive_net_losses >= max_consecutive_losses:
                             update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, trade_count=0, cycle_net_profit=0.0, initial_balance=initial_balance)
                             update_is_running_status(email, 0)
-                            return
+                            return # خروج نهائي
 
-                        # Update DB and prepare for new cycle (trade_count = 0, contract_id = None)
+                        # تحديث قاعدة البيانات وإعادة تهيئة الدورة الجديدة
                         update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, 
                                                           trade_count=0, cycle_net_profit=0.0, initial_balance=initial_balance, 
                                                           contract_id=None, trade_start_time=0.0)
-                        return 
+                        
+                        contract_id = None 
+                        trade_count = 0
+                        cycle_net_profit = 0.0
+                        continue # انتقال فوري لبدء دورة جديدة
                 
                 time.sleep(1)
-
-
-        # --- 2. Entry Logic (If no trade is active and trade_count is 0 or 1) ---
-        if not check_only and not contract_id: 
-            
-            balance, currency = get_balance_and_currency(user_token)
-            if balance is None: return
-            if initial_balance == 0:
-                initial_balance = float(balance)
-                update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, trade_count, cycle_net_profit, initial_balance=initial_balance)
-            
-            # Check for Take Profit Target
-            current_profit = float(balance) - initial_balance
-            if current_profit >= tp_target and initial_balance != 0:
-                 update_is_running_status(email, 0)
-                 return
-            
-            
-            if trade_count == 0:
-                new_contract_type = "DIGITUNDER"
-                new_trade_count = 1
-                amount_to_bet = current_under_amount 
-            elif trade_count == 1:
-                new_contract_type = "DIGITOVER"
-                new_trade_count = 2
-                amount_to_bet = current_over_amount 
-            else:
                 return 
 
-            amount_to_bet = max(0.35, round(float(amount_to_bet), 2))
-                             
-            # 1. Proposal
-            proposal_req = {
-                "proposal": 1, "amount": amount_to_bet, "basis": "stake",
-                "contract_type": new_contract_type,  
-                "currency": currency,
-                "duration": CONTRACT_DURATION, "duration_unit": CONTRACT_DURATION_UNIT, 
-                "symbol": TRADING_SYMBOL,
-                "barrier": 3 
-            }
-            ws.send(json.dumps(proposal_req))
-            
-            # 2. Await Proposal Response 
-            proposal_response = None
-            for i in range(5):
-                try:
-                    response_str = ws.recv()
-                    if response_str:
-                        proposal_response = json.loads(response_str)
-                        if proposal_response.get('error'): return
-                        if 'proposal' in proposal_response: break
-                    time.sleep(0.5)
-                except Exception: continue
-            
-            if proposal_response and 'proposal' in proposal_response:
-                proposal_id = proposal_response['proposal']['id']
+            # --- 2. Entry Logic (If no trade is active) ---
+            elif not contract_id and not check_only: 
                 
-                # 3. Buy Order
-                order_response = place_order(ws, proposal_id, amount_to_bet)
+                balance, currency = get_balance_and_currency(user_token)
+                if balance is None: return
+                if initial_balance == 0:
+                    initial_balance = float(balance)
+                    update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, trade_count, cycle_net_profit, initial_balance=initial_balance)
                 
-                if 'buy' in order_response and 'contract_id' in order_response['buy']:
-                    new_contract_id = order_response['buy']['contract_id']
-                    trade_start_time = time.time() 
-                    
-                    update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, 
-                                                      trade_count=new_trade_count, cycle_net_profit=cycle_net_profit, 
-                                                      initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time)
+                # Check for Take Profit Target
+                current_profit = float(balance) - initial_balance
+                if current_profit >= tp_target and initial_balance != 0:
+                     update_is_running_status(email, 0)
+                     return
+                
+                
+                if trade_count == 0:
+                    new_contract_type = "DIGITUNDER"
+                    new_trade_count = 1
+                    amount_to_bet = current_under_amount 
+                elif trade_count == 2: 
+                    new_contract_type = "DIGITOVER"
+                    new_trade_count = 2
+                    amount_to_bet = current_over_amount 
                 else:
-                    pass
-            else:
-                 pass
+                    return 
+
+                amount_to_bet = max(0.35, round(float(amount_to_bet), 2))
+                                 
+                # 1. Proposal
+                proposal_req = {
+                    "proposal": 1, "amount": amount_to_bet, "basis": "stake",
+                    "contract_type": new_contract_type,  
+                    "currency": currency,
+                    "duration": CONTRACT_DURATION, "duration_unit": CONTRACT_DURATION_UNIT, 
+                    "symbol": TRADING_SYMBOL,
+                    "barrier": 3 
+                }
+                ws.send(json.dumps(proposal_req))
+                
+                # 2. Await Proposal Response 
+                proposal_response = None
+                for i in range(5):
+                    try:
+                        response_str = ws.recv()
+                        if response_str:
+                            proposal_response = json.loads(response_str)
+                            if proposal_response.get('error'): return
+                            if 'proposal' in proposal_response: break
+                        time.sleep(0.5)
+                    except Exception: continue
+                
+                if proposal_response and 'proposal' in proposal_response:
+                    proposal_id = proposal_response['proposal']['id']
+                    
+                    # 3. Buy Order
+                    order_response = place_order(ws, proposal_id, amount_to_bet)
+                    
+                    if 'buy' in order_response and 'contract_id' in order_response['buy']:
+                        new_contract_id = order_response['buy']['contract_id']
+                        trade_start_time = time.time() 
+                        
+                        update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, 
+                                                          trade_count=new_trade_count, cycle_net_profit=cycle_net_profit, 
+                                                          initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time)
+                        return # الخروج بعد وضع الصفقة بنجاح
+                    else:
+                        return # فشل وضع الأمر
+                else:
+                     return # فشل جلب العرض (Proposal)
+            
+            else: 
+                return 
 
     except Exception as e:
-        pass
+        return
     finally:
         if ws and ws.connected:
             ws.close()
@@ -445,19 +462,13 @@ def bot_loop():
                     if not latest_session_data or latest_session_data.get('is_running') == 0:
                         continue
                         
-                    contract_id = latest_session_data.get('contract_id')
-                    
-                    if contract_id:
-                        run_trading_job_for_user(latest_session_data, check_only=True)
-                    
-                    elif not contract_id:
-                        run_trading_job_for_user(latest_session_data, check_only=False) 
+                    run_trading_job_for_user(latest_session_data, check_only=False) 
             
             time.sleep(1) 
         except Exception as e:
             time.sleep(5)
 
-# --- Streamlit App Configuration (Simplified: Only API, Stake, TP) ---
+# --- Streamlit App Configuration (Updated Caption) ---
 st.set_page_config(page_title="Khoury Bot", layout="wide")
 st.title("Khoury Bot 🤖")
 
@@ -508,7 +519,7 @@ if st.session_state.logged_in:
         
         user_token_val = ""
         base_under_amount_val = 0.35 
-        tp_target_val = 100.0 # قيمة افتراضية للـ TP
+        tp_target_val = 100.0
         
         if st.session_state.stats:
             user_token_val = st.session_state.stats.get('user_token', '')
@@ -517,14 +528,12 @@ if st.session_state.logged_in:
         
         user_token = st.text_input("Deriv API Token", type="password", value=user_token_val, disabled=is_user_bot_running_in_db)
         
-        # الإدخال الأساسي الوحيد للمستخدم
         base_under_amount_input = st.number_input("Base Bet Amount for **Under 3** (min $0.35)", min_value=0.35, value=base_under_amount_val, step=0.1, disabled=is_user_bot_running_in_db)
         
-        # إدخال Take Profit
         tp_target = st.number_input("Take Profit Target ($)", min_value=10.0, value=tp_target_val, step=10.0, disabled=is_user_bot_running_in_db)
         
-        # 🌟 يتم استخدام قيمة SL الثابتة في الخلفية 
-        st.caption(f"Strategy: 1 Tick, Over 3 bet is {BASE_OVER_MULTIPLIER}x the Under 3 bet. Martingale $\times {NET_LOSS_MULTIPLIER}$ on Net Cycle Loss. **Stop Loss (SL) is fixed at {MAX_CONSECUTIVE_LOSSES} consecutive net cycles loss.**")
+        # 🌟 تحديث رسالة الشرح
+        st.caption(f"Strategy: 1 Tick, Over 3 bet is **{BASE_OVER_MULTIPLIER}x** the Under 3 bet. Martingale $\times **{NET_LOSS_MULTIPLIER}**$ on Net Cycle Loss. **Stop Loss (SL) is fixed at {MAX_CONSECUTIVE_LOSSES} consecutive net cycles loss.**")
         
         col_start, col_stop = st.columns(2)
         with col_start:
@@ -535,7 +544,6 @@ if st.session_state.logged_in:
     if start_button:
         if not user_token: st.error("Please enter a Deriv API Token to start the bot.")
         else:
-            # يتم تمرير القيمة الثابتة للـ SL هنا مع الـ TP
             settings = {"user_token": user_token, "base_under_amount_input": base_under_amount_input, "tp_target": tp_target, "max_consecutive_losses": MAX_CONSECUTIVE_LOSSES}
             start_new_session_in_db(st.session_state.user_email, settings)
             st.success("✅ Bot session started successfully!")
@@ -561,7 +569,6 @@ if st.session_state.logged_in:
         with stats_placeholder.container():
             stats = st.session_state.stats
             
-            # حساب إجمالي الربح
             initial_balance = stats.get('initial_balance', 0.0)
             balance, _ = get_balance_and_currency(stats.get('user_token'))
             current_profit = 0.0
@@ -576,17 +583,15 @@ if st.session_state.logged_in:
             with col3:
                 st.metric(label="Total Profit ($)", value=f"${current_profit:.2f}")
 
-            # عرض الرصيد الحالي
             if balance is not None:
                  st.metric(label="Current Balance", value=f"${float(balance):.2f}")
             
-            # رسالة حالة بسيطة
             if stats.get('contract_id'):
                 trade_type = "Under 3" if stats.get('trade_count', 0) == 1 else "Over 3"
                 st.warning(f"⚠ Monitoring active trade: **{trade_type}**.")
-            elif stats.get('trade_count') == 1:
+            elif stats.get('trade_count') == 2 and not stats.get('contract_id'):
                  st.info(f"✅ Trade 1 complete. Preparing for Trade 2 (**Over 3**).")
-            elif stats.get('trade_count') == 0:
+            elif stats.get('trade_count') == 0 and not stats.get('contract_id'):
                  st.success(f"✅ Cycle complete. Starting new Cycle (**Under 3**).")
             
     else:
