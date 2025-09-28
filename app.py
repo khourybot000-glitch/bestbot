@@ -12,14 +12,14 @@ TRADING_SYMBOL = "R_100"
 CONTRACT_DURATION = 1          
 CONTRACT_DURATION_UNIT = 't'   
 MIN_CHECK_DELAY_SECONDS = 5    
-NET_LOSS_MULTIPLIER = 6.0      # المضاعف: x6
+NET_LOSS_MULTIPLIER = 6.0      # المضاعف: x6 (على الخسارة الصافية)
 BASE_OVER_MULTIPLIER = 2.0     # مضاعف Over 3: x2
 MAX_CONSECUTIVE_LOSSES = 3     # وقف الخسارة: 3 خسائر صافية
 
 # --- SQLite Database Configuration ---
 DB_FILE = "trading_data_unique_martingale_final.db" 
 
-# --- Database & Utility Functions (Unchanged) ---
+# --- Database & Utility Functions (Added field for the second contract ID) ---
 def create_connection():
     try:
         conn = sqlite3.connect(DB_FILE)
@@ -48,7 +48,8 @@ def create_table_if_not_exists():
                 consecutive_net_losses INTEGER DEFAULT 0, 
                 
                 initial_balance REAL DEFAULT 0.0,
-                contract_id TEXT,
+                under_contract_id TEXT,  -- 🌟 Contract ID for Under 3
+                over_contract_id TEXT,   -- 🌟 Contract ID for Over 3
                 trade_start_time REAL DEFAULT 0.0,
                 is_running INTEGER DEFAULT 0,
                 trade_count INTEGER DEFAULT 0, 
@@ -65,6 +66,14 @@ def create_table_if_not_exists():
             """
             conn.execute(sql_create_sessions_table)
             conn.execute(sql_create_bot_status_table)
+            
+            # Update sessions table if the new columns don't exist
+            cursor = conn.execute("PRAGMA table_info(sessions)")
+            columns = [col[1] for col in cursor.fetchall()]
+            if 'under_contract_id' not in columns:
+                 conn.execute("ALTER TABLE sessions ADD COLUMN under_contract_id TEXT")
+            if 'over_contract_id' not in columns:
+                 conn.execute("ALTER TABLE sessions ADD COLUMN over_contract_id TEXT")
             
             cursor = conn.execute("SELECT COUNT(*) FROM bot_status WHERE flag_id = 1")
             if cursor.fetchone()[0] == 0:
@@ -135,8 +144,8 @@ def start_new_session_in_db(email, settings):
                     INSERT OR REPLACE INTO sessions 
                     (email, user_token, base_amount, tp_target, max_consecutive_losses, 
                      base_under_amount, base_over_amount, current_under_amount, current_over_amount,
-                     is_running, consecutive_net_losses, trade_count, cycle_net_profit)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 0, 0.0)
+                     is_running, consecutive_net_losses, trade_count, cycle_net_profit, under_contract_id, over_contract_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 0, 0.0, NULL, NULL)
                     """, (email, settings["user_token"], base_under, tp_target, 
                           max_losses, base_under, base_over, 
                           base_under, base_over))
@@ -190,7 +199,7 @@ def get_all_active_sessions():
             conn.close()
     return []
 
-def update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, trade_count, cycle_net_profit, initial_balance=None, contract_id=None, trade_start_time=None):
+def update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, trade_count, cycle_net_profit, initial_balance=None, under_contract_id=None, over_contract_id=None, trade_start_time=None):
     conn = create_connection()
     if conn:
         try:
@@ -200,12 +209,12 @@ def update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_u
                     total_wins = ?, total_losses = ?, current_under_amount = ?, current_over_amount = ?, 
                     consecutive_net_losses = ?, trade_count = ?, cycle_net_profit = ?, 
                     initial_balance = COALESCE(?, initial_balance), 
-                    contract_id = ?, trade_start_time = COALESCE(?, trade_start_time)
+                    under_contract_id = ?, over_contract_id = ?, trade_start_time = COALESCE(?, trade_start_time)
                 WHERE email = ?
                 """
                 conn.execute(update_query, (total_wins, total_losses, current_under_amount, current_over_amount, 
                                             consecutive_net_losses, trade_count, cycle_net_profit, 
-                                            initial_balance, contract_id, trade_start_time, email))
+                                            initial_balance, under_contract_id, over_contract_id, trade_start_time, email))
         except sqlite3.Error as e:
             print(f"Database error in update_stats_and_trade_info_in_db: {e}")
         finally:
@@ -246,7 +255,7 @@ def get_balance_and_currency(user_token):
         if ws and ws.connected: ws.close()
 
 def check_contract_status(ws, contract_id):
-    if not ws or not ws.connected: return None
+    if not ws or not ws.connected or not contract_id: return None
     req = {"proposal_open_contract": 1, "contract_id": contract_id}
     try:
         ws.send(json.dumps(req))
@@ -261,21 +270,50 @@ def check_contract_status(ws, contract_id):
         return None
     except Exception: return None
 
-def place_order(ws, proposal_id, amount):
+def place_order(ws, contract_type, amount, currency, barrier):
     if not ws or not ws.connected: return {"error": {"message": "WebSocket not connected."}}
     amount_decimal = decimal.Decimal(str(amount)).quantize(decimal.Decimal('0.01'), rounding=decimal.ROUND_HALF_UP)
-    req = {"buy": proposal_id, "price": float(amount_decimal)}
-    try:
-        ws.send(json.dumps(req))
+    
+    # 1. Proposal
+    proposal_req = {
+        "proposal": 1, "amount": float(amount_decimal), "basis": "stake",
+        "contract_type": contract_type,  
+        "currency": currency,
+        "duration": CONTRACT_DURATION, "duration_unit": CONTRACT_DURATION_UNIT, 
+        "symbol": TRADING_SYMBOL,
+        "barrier": barrier 
+    }
+    ws.send(json.dumps(proposal_req))
+    
+    # 2. Await Proposal Response 
+    proposal_response = None
+    for i in range(5):
+        try:
+            response_str = ws.recv()
+            if response_str:
+                proposal_response = json.loads(response_str)
+                if proposal_response.get('error'): return proposal_response
+                if 'proposal' in proposal_response: break
+            time.sleep(0.5)
+        except Exception: continue
+    
+    if proposal_response and 'proposal' in proposal_response:
+        proposal_id = proposal_response['proposal']['id']
+        
+        # 3. Buy Order
+        buy_req = {"buy": proposal_id, "price": float(amount_decimal)}
+        ws.send(json.dumps(buy_req))
+        
         while True:
             response_str = ws.recv()
             response = json.loads(response_str)
             if response.get('msg_type') == 'buy': return response
             elif response.get('error'): return response
-    except Exception: return {"error": {"message": "Order placement failed."}}
+    
+    return {"error": {"message": "Order placement failed or proposal missing."}}
 
 
-# --- Trading Bot Logic (Final Corrected Multiplier Logic) ---
+# --- Trading Bot Logic (Simultaneous Trades) ---
 
 def run_trading_job_for_user(session_data, check_only=False):
     email = session_data['email']
@@ -285,15 +323,15 @@ def run_trading_job_for_user(session_data, check_only=False):
     max_consecutive_losses = session_data['max_consecutive_losses']
     total_wins = session_data['total_wins']
     total_losses = session_data['total_losses']
-    base_under_amount = session_data['base_under_amount'] # المبلغ الأساسي الثابت للدخول الأول
-    base_over_amount = session_data['base_over_amount'] # المبلغ الأساسي الثابت للدخول الثاني
-    current_under_amount = session_data['current_under_amount'] # المبلغ الحالي للدخول الأول
-    current_over_amount = session_data['current_over_amount'] # المبلغ الحالي للدخول الثاني
+    base_under_amount = session_data['base_under_amount']
+    current_under_amount = session_data['current_under_amount']
+    current_over_amount = session_data['current_over_amount']
     consecutive_net_losses = session_data['consecutive_net_losses']
     trade_count = session_data['trade_count']
     cycle_net_profit = session_data['cycle_net_profit'] 
     initial_balance = session_data['initial_balance']
-    contract_id = session_data['contract_id']
+    under_contract_id = session_data['under_contract_id']
+    over_contract_id = session_data['over_contract_id']
     trade_start_time = session_data['trade_start_time']
     
     ws = None
@@ -304,143 +342,128 @@ def run_trading_job_for_user(session_data, check_only=False):
              time.sleep(0.5) 
         if not ws: return
 
-        while True: 
+        # 🌟 المرحلة 1: مراقبة الصفقات النشطة (trade_count = 1)
+        if under_contract_id or over_contract_id:
+            trade_count = 1 # نضمن أن الـ trade_count = 1 أثناء المراقبة
+
+            if time.time() - trade_start_time < MIN_CHECK_DELAY_SECONDS: 
+                return 
+
+            # مصفوفة لتخزين الأرباح/الخسائر بعد الإغلاق
+            results = []
             
-            # --- 1. Check for completed trades ---
-            if contract_id: 
-                elapsed_time = time.time() - trade_start_time
-                if elapsed_time < MIN_CHECK_DELAY_SECONDS: return 
-                
-                contract_info = check_contract_status(ws, contract_id)
-                
-                if contract_info and contract_info.get('is_sold'): 
+            # 1. فحص صفقة Under 3
+            if under_contract_id:
+                contract_info = check_contract_status(ws, under_contract_id)
+                if contract_info and contract_info.get('is_sold'):
                     profit = float(contract_info.get('profit', 0))
-                    cycle_net_profit += profit
+                    results.append(profit)
+                    under_contract_id = None # إزالة العقد من المراقبة
+            
+            # 2. فحص صفقة Over 3
+            if over_contract_id:
+                contract_info = check_contract_status(ws, over_contract_id)
+                if contract_info and contract_info.get('is_sold'):
+                    profit = float(contract_info.get('profit', 0))
+                    results.append(profit)
+                    over_contract_id = None # إزالة العقد من المراقبة
+
+            # 3. اتخاذ القرار إذا تم إغلاق كلتا الصفقتين
+            if under_contract_id is None and over_contract_id is None:
+                
+                # تحديث الإحصائيات والأرباح
+                cycle_net_profit = sum(results)
+                for profit in results:
                     total_wins += 1 if profit > 0 else 0
                     total_losses += 1 if profit < 0 else 0
+                
+                # --- منطق المضاعفة على الخسارة الصافية للدورة ---
+                if cycle_net_profit < 0:
+                    # خسارة صافية للدورة: نزيد عداد الخسائر ونضاعف للمرة القادمة
+                    consecutive_net_losses += 1
                     
+                    # حساب المبلغ الجديد للصفقة الأولى (Under 3)
+                    new_under_bet = base_under_amount * (NET_LOSS_MULTIPLIER ** consecutive_net_losses)
+                    current_under_amount = round(max(base_under_amount, new_under_bet), 2)
                     
-                    if trade_count == 1: # End of Trade 1 (Under 3)
-                        # يتم الانتقال مباشرة للصفقة الثانية دون تغيير قيم current_under/over
-                        update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, 
-                                                          trade_count=2, cycle_net_profit=cycle_net_profit, 
-                                                          initial_balance=initial_balance, contract_id=None, trade_start_time=0.0)
-                        
-                        contract_id = None 
-                        trade_count = 2
-                        continue # انتقال فوري لـ Trade 2
-
-                    elif trade_count == 2: # End of Trade 2 (Over 3) - Cycle Finished (Decision Point)
-                        
-                        if cycle_net_profit < 0:
-                            # 🌟 خسارة صافية للدورة: نزيد عداد الخسائر ونضاعف للمرة القادمة
-                            consecutive_net_losses += 1
-                            
-                            # حساب المبلغ الجديد للصفقة الأولى (Under 3) بناءً على المضاعف (x6)
-                            # نستخدم base_under_amount لتجنب التراكم الخاطئ، مع رفعها لأس عدد الخسائر المتتالية
-                            new_under_bet = base_under_amount * (NET_LOSS_MULTIPLIER ** consecutive_net_losses)
-                            
-                            current_under_amount = round(max(base_under_amount, new_under_bet), 2)
-                            
-                            # حساب المبلغ الجديد للصفقة الثانية (Over 3) بناءً على current_under_amount الجديدة (x2)
-                            current_over_amount = round(current_under_amount * BASE_OVER_MULTIPLIER, 2)
-                            
-                        else: 
-                            # 🌟 ربح صافي أو تعادل: إعادة تعيين إلى المبلغ الأساسي
-                            consecutive_net_losses = 0
-                            current_under_amount = base_under_amount 
-                            current_over_amount = base_over_amount
-                        
-                        # 🛑 شرط وقف الخسارة (Stop Loss Check) 
-                        if consecutive_net_losses >= max_consecutive_losses:
-                            update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, trade_count=0, cycle_net_profit=0.0, initial_balance=initial_balance)
-                            update_is_running_status(email, 0)
-                            return # خروج نهائي
-
-                        # تحديث قاعدة البيانات وإعادة تهيئة الدورة الجديدة
-                        update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, 
-                                                          trade_count=0, cycle_net_profit=0.0, initial_balance=initial_balance, 
-                                                          contract_id=None, trade_start_time=0.0)
-                        
-                        contract_id = None 
-                        trade_count = 0
-                        cycle_net_profit = 0.0
-                        continue # انتقال فوري لبدء دورة جديدة
-                
-                time.sleep(1)
-                return 
-
-            # --- 2. Entry Logic (If no trade is active) ---
-            elif not contract_id and not check_only: 
-                
-                balance, currency = get_balance_and_currency(user_token)
-                if balance is None: return
-                if initial_balance == 0:
-                    initial_balance = float(balance)
-                    update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, trade_count, cycle_net_profit, initial_balance=initial_balance)
-                
-                # Check for Take Profit Target
-                current_profit = float(balance) - initial_balance
-                if current_profit >= tp_target and initial_balance != 0:
-                     update_is_running_status(email, 0)
-                     return
-                
-                
-                if trade_count == 0:
-                    new_contract_type = "DIGITUNDER"
-                    new_trade_count = 1
-                    amount_to_bet = current_under_amount # المبلغ الأساسي أو المضاعف
-                elif trade_count == 2: 
-                    new_contract_type = "DIGITOVER"
-                    new_trade_count = 2
-                    amount_to_bet = current_over_amount # المبلغ (x2) من المبلغ الحالي
-                else:
-                    return 
-
-                amount_to_bet = max(0.35, round(float(amount_to_bet), 2))
-                                 
-                # 1. Proposal & Buy Order... (Logic Unchanged)
-                proposal_req = {
-                    "proposal": 1, "amount": amount_to_bet, "basis": "stake",
-                    "contract_type": new_contract_type,  
-                    "currency": currency,
-                    "duration": CONTRACT_DURATION, "duration_unit": CONTRACT_DURATION_UNIT, 
-                    "symbol": TRADING_SYMBOL,
-                    "barrier": 3 
-                }
-                ws.send(json.dumps(proposal_req))
-                
-                proposal_response = None
-                for i in range(5):
-                    try:
-                        response_str = ws.recv()
-                        if response_str:
-                            proposal_response = json.loads(response_str)
-                            if proposal_response.get('error'): return
-                            if 'proposal' in proposal_response: break
-                        time.sleep(0.5)
-                    except Exception: continue
-                
-                if proposal_response and 'proposal' in proposal_response:
-                    proposal_id = proposal_response['proposal']['id']
+                    # حساب المبلغ الجديد للصفقة الثانية (Over 3) (x2)
+                    current_over_amount = round(current_under_amount * BASE_OVER_MULTIPLIER, 2)
                     
-                    order_response = place_order(ws, proposal_id, amount_to_bet)
-                    
-                    if 'buy' in order_response and 'contract_id' in order_response['buy']:
-                        new_contract_id = order_response['buy']['contract_id']
-                        trade_start_time = time.time() 
-                        
-                        update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, 
-                                                          trade_count=new_trade_count, cycle_net_profit=cycle_net_profit, 
-                                                          initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time)
-                        return 
-                    else:
-                        return 
-                else:
-                     return 
+                else: 
+                    # ربح صافي أو تعادل: إعادة تعيين إلى المبلغ الأساسي
+                    consecutive_net_losses = 0
+                    current_under_amount = base_under_amount 
+                    current_over_amount = base_over_amount
+                
+                # 🛑 شرط وقف الخسارة 
+                if consecutive_net_losses >= max_consecutive_losses:
+                    update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, trade_count=0, cycle_net_profit=0.0, initial_balance=initial_balance)
+                    update_is_running_status(email, 0)
+                    return # خروج نهائي
+
+                # تحديث قاعدة البيانات وإعادة تهيئة الدورة الجديدة
+                update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, 
+                                                  trade_count=0, cycle_net_profit=0.0, initial_balance=initial_balance, 
+                                                  under_contract_id=None, over_contract_id=None, trade_start_time=0.0)
+                
+                trade_count = 0
+                cycle_net_profit = 0.0
+                continue # انتقال فوري لبدء دورة جديدة (للوصول للمرحلة 2)
             
-            else: 
+            # تحديث حالة العقود إذا أغلق أحدها وبقي الآخر
+            update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, 
+                                              trade_count=1, cycle_net_profit=cycle_net_profit, 
+                                              initial_balance=initial_balance, under_contract_id=under_contract_id, over_contract_id=over_contract_id, trade_start_time=trade_start_time)
+
+            time.sleep(1) 
+            return # الخروج للمراقبة لاحقاً
+        
+        # 🌟 المرحلة 2: الدخول في صفقات جديدة (trade_count = 0)
+        elif trade_count == 0 and not check_only: 
+            
+            balance, currency = get_balance_and_currency(user_token)
+            if balance is None: return
+            
+            if initial_balance == 0:
+                initial_balance = float(balance)
+                update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, trade_count, cycle_net_profit, initial_balance=initial_balance)
+            
+            # Check for Take Profit Target
+            current_profit = float(balance) - initial_balance
+            if current_profit >= tp_target and initial_balance != 0:
+                 update_is_running_status(email, 0)
+                 return
+            
+            # --- 1. تنفيذ صفقة Under 3 ---
+            amount_under = max(0.35, round(float(current_under_amount), 2))
+            order_response_under = place_order(ws, "DIGITUNDER", amount_under, currency, 3)
+            
+            if 'buy' in order_response_under and 'contract_id' in order_response_under['buy']:
+                new_under_id = order_response_under['buy']['contract_id']
+            else:
+                return # فشل صفقة Under 3
+
+            # --- 2. تنفيذ صفقة Over 3 ---
+            amount_over = max(0.35, round(float(current_over_amount), 2))
+            order_response_over = place_order(ws, "DIGITOVER", amount_over, currency, 3)
+
+            if 'buy' in order_response_over and 'contract_id' in order_response_over['buy']:
+                new_over_id = order_response_over['buy']['contract_id']
+            else:
+                # إذا فشلت الصفقة الثانية، نلغي الأولى أو نخرج 
+                # (لغرض البساطة، سنخرج ونعتمد على الدورة التالية)
                 return 
+
+            # --- 3. حفظ بيانات الصفقتين وبدء المراقبة ---
+            trade_start_time = time.time() 
+            
+            update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, 
+                                              trade_count=1, cycle_net_profit=0.0, 
+                                              initial_balance=initial_balance, under_contract_id=new_under_id, over_contract_id=new_over_id, trade_start_time=trade_start_time)
+            return # الخروج بعد وضع الصفقات بنجاح
+
+        else: 
+            return 
 
     except Exception as e:
         return
@@ -469,7 +492,7 @@ def bot_loop():
         except Exception as e:
             time.sleep(5)
 
-# --- Streamlit App Configuration (Unchanged) ---
+# --- Streamlit App Configuration (Updated to show 2 contracts) ---
 st.set_page_config(page_title="Khoury Bot", layout="wide")
 st.title("Khoury Bot 🤖")
 
@@ -533,7 +556,7 @@ if st.session_state.logged_in:
         
         tp_target = st.number_input("Take Profit Target ($)", min_value=10.0, value=tp_target_val, step=10.0, disabled=is_user_bot_running_in_db)
         
-        st.caption(f"Strategy: 1 Tick, Over 3 bet is **{BASE_OVER_MULTIPLIER}x** the Under 3 bet. Martingale $\times **{NET_LOSS_MULTIPLIER}**$ on **Net Cycle Loss**. **Stop Loss (SL) is fixed at {MAX_CONSECUTIVE_LOSSES} consecutive net cycles loss.**")
+        st.caption(f"Strategy: **Simultaneous** Trades. Over 3 bet is **{BASE_OVER_MULTIPLIER}x** the Under 3 bet. Martingale $\times **{NET_LOSS_MULTIPLIER}**$ on **Net Cycle Loss**. **Stop Loss (SL) is fixed at {MAX_CONSECUTIVE_LOSSES} consecutive net cycles loss.**")
         
         col_start, col_stop = st.columns(2)
         with col_start:
@@ -586,13 +609,18 @@ if st.session_state.logged_in:
             if balance is not None:
                  st.metric(label="Current Balance", value=f"${float(balance):.2f}")
             
-            if stats.get('contract_id'):
-                trade_type = "Under 3" if stats.get('trade_count', 0) == 1 else "Over 3"
-                st.warning(f"⚠ Monitoring active trade: **{trade_type}**.")
-            elif stats.get('trade_count') == 2 and not stats.get('contract_id'):
-                 st.info(f"✅ Trade 1 complete. Preparing for Trade 2 (**Over 3**).")
-            elif stats.get('trade_count') == 0 and not stats.get('contract_id'):
-                 st.success(f"✅ Cycle complete. Starting new Cycle (**Under 3**).")
+            under_id = stats.get('under_contract_id')
+            over_id = stats.get('over_contract_id')
+
+            if under_id or over_id:
+                status_message = "⚠ Monitoring active trades: "
+                if under_id: status_message += "Under 3 is Active. "
+                if over_id: status_message += "Over 3 is Active."
+                st.warning(status_message)
+            elif stats.get('trade_count') == 1 and not under_id and not over_id:
+                 st.success(f"✅ Cycle trades finished. Calculating result...")
+            elif stats.get('trade_count') == 0:
+                 st.success(f"✅ Cycle complete. Starting new Cycle (Simultaneous).")
             
     else:
         with stats_placeholder.container():
