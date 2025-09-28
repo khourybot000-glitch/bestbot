@@ -9,15 +9,15 @@ import pandas as pd
 from datetime import datetime
 import multiprocessing
 
-# --- Strategy Configuration (NEW) ---
+# --- Strategy Configuration (Call/Put 5 Ticks) ---
 TRADING_SYMBOL = "R_100"       # Volatility 100 Index
-CONTRACT_TYPE = "DIGITDIFF"    # نوع العقد: يختلف عن الرقم المستهدف
-CONTRACT_DURATION = 2         # 1 tick
+CONTRACT_DURATION = 5          # 5 ticks (مدة الصفقة)
 CONTRACT_DURATION_UNIT = 't'   # 't' for tick
-DIFFER_TARGET_DIGIT = 5        # الرقم المستهدف للعقد (يجب أن يكون من 0 إلى 9)
+ANALYSE_TICKS_COUNT = 5        # التحليل يتم على آخر 5 تيكات
+MIN_CHECK_DELAY_SECONDS = 12   # الحد الأدنى للانتظار قبل بدء الفحص المستمر
 
 # --- SQLite Database Configuration ---
-DB_FILE = "trading_data551.db"
+DB_FILE = "trading_data0099.db"
 
 # --- Database & Utility Functions ---
 def create_connection():
@@ -266,14 +266,23 @@ def check_contract_status(ws, contract_id):
     try:
         ws.send(json.dumps(req))
         # Receive until we get the contract status response
-        while True:
-            response_str = ws.recv()
-            response = json.loads(response_str)
-            if response.get('msg_type') == 'proposal_open_contract':
-                return response.get('proposal_open_contract')
-            elif response.get('error'):
-                print(f"Error checking contract status: {response['error']['message']}")
-                return None
+        response = None
+        for _ in range(3): # Try to receive a response up to 3 times
+            try:
+                response_str = ws.recv()
+                response = json.loads(response_str)
+                if response.get('msg_type') == 'proposal_open_contract' or response.get('error'):
+                    break
+            except Exception:
+                time.sleep(0.1)
+                continue
+
+        if response and response.get('msg_type') == 'proposal_open_contract':
+            return response.get('proposal_open_contract')
+        elif response and response.get('error'):
+            print(f"Error checking contract status: {response['error']['message']}")
+            return None
+        return None
     except Exception as e:
         print(f"Error checking contract status: {e}")
         return None
@@ -298,7 +307,58 @@ def place_order(ws, proposal_id, amount):
         print(f"Error placing order: {e}")
         return {"error": {"message": "Order placement failed."}}
 
+def get_ticks_history(ws, count=ANALYSE_TICKS_COUNT):
+    """Fetches the last 'count' ticks history. Must be called sparingly."""
+    if not ws or not ws.connected:
+        return None
+    req = {"ticks_history": TRADING_SYMBOL, "end": "latest", "count": count, "subscribe": 0}
+    
+    try:
+        ws.send(json.dumps(req))
+        while True:
+            response_str = ws.recv()
+            response = json.loads(response_str)
+            if response.get('msg_type') == 'history' and 'prices' in response.get('history', {}):
+                return response['history']['prices']
+            elif response.get('error'):
+                print(f"Error getting ticks history: {response['error']['message']}")
+                return None
+            elif response.get('msg_type') == 'tick':
+                 continue
+    except Exception as e:
+        print(f"Error fetching ticks history: {e}")
+        return None
+
 # --- Trading Bot Logic ---
+
+def analyse_data(tick_prices):
+    """
+    Analyzes the last 5 tick prices to determine the trend.
+    Signal: 'CALL' if the last 5 ticks were strictly increasing (Price[i+1] > Price[i]).
+            'PUT' if the last 5 ticks were strictly decreasing (Price[i+1] < Price[i]).
+            'Wait' otherwise.
+    """
+    if not tick_prices or len(tick_prices) < ANALYSE_TICKS_COUNT:
+        return "Wait", f"Not enough data (less than {ANALYSE_TICKS_COUNT} ticks)."
+    
+    is_up_trend = True
+    is_down_trend = True
+    
+    # التحقق من 4 مقارنات (بين 5 تيكات)
+    for i in range(len(tick_prices) - 1):
+        # للتأكد من صعود متتال (Strictly Increasing)
+        if float(tick_prices[i+1]) <= float(tick_prices[i]):
+            is_up_trend = False 
+        # للتأكد من هبوط متتال (Strictly Decreasing)
+        if float(tick_prices[i+1]) >= float(tick_prices[i]):
+            is_down_trend = False 
+            
+    if is_up_trend:
+        return "CALL", f"{ANALYSE_TICKS_COUNT} consecutive ticks were strictly UP. Entering CALL."
+    elif is_down_trend:
+        return "PUT", f"{ANALYSE_TICKS_COUNT} consecutive ticks were strictly DOWN. Entering PUT."
+    else:
+        return "Wait", "Trend not clear (not 5 consecutive strictly UP or DOWN)."
 
 def run_trading_job_for_user(session_data, check_only=False):
     """Executes the trading logic for a specific user's session."""
@@ -313,6 +373,7 @@ def run_trading_job_for_user(session_data, check_only=False):
     consecutive_losses = session_data['consecutive_losses']
     initial_balance = session_data['initial_balance']
     contract_id = session_data['contract_id']
+    trade_start_time = session_data['trade_start_time']
     
     ws = None
     try:
@@ -328,57 +389,75 @@ def run_trading_job_for_user(session_data, check_only=False):
 
         # --- 1. Check for completed trades (if contract_id exists) ---
         if contract_id: 
-            contract_info = check_contract_status(ws, contract_id)
             
-            if contract_info and contract_info.get('is_sold'):
-                
-                print(f"User {email}: Trade {contract_id} completed. Waiting 5s before next step.")
-                time.sleep(10) 
-                
-                profit = float(contract_info.get('profit', 0))
-                
-                if profit > 0:
-                    consecutive_losses = 0
-                    total_wins += 1
-                    current_amount = base_amount 
-                    print(f"User {email}: WIN! Profit: {profit:.2f}. Resetting bet to {current_amount:.2f}")
-                elif profit < 0:
-                    consecutive_losses += 1
-                    total_losses += 1
-                    next_bet = float(current_amount) * 16 
-                    current_amount = max(base_amount, next_bet)
-                    print(f"User {email}: LOSS! Consecutive losses: {consecutive_losses}. Next bet: {current_amount:.2f}")
-                else: 
-                    consecutive_losses = 0 
-                
-                # Reset trade tracking after completion
-                new_contract_id = None
-                trade_start_time = 0.0
-                update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time)
-
-                # Check for Stop Criteria (TP/Max Losses)
-                new_balance, _ = get_balance_and_currency(user_token)
-                if new_balance is not None:
-                    current_balance_float = float(new_balance)
-                    
-                    if initial_balance == 0.0:
-                         initial_balance = current_balance_float
-                         update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time)
-
-                    if (current_balance_float - initial_balance) >= float(tp_target):
-                        print(f"User {email} reached Take Profit target. Stopping session.")
-                        update_is_running_status(email, 0) 
-                        return
-                    
-                    if consecutive_losses >= max_consecutive_losses:
-                        print(f"User {email} reached Max Consecutive Losses. Stopping session.")
-                        update_is_running_status(email, 0)
-                        return
+            elapsed_time = time.time() - trade_start_time
             
-            return
-        
-        # --- 2. Immediate Entry Logic (If no trade is active and not in check_only mode) ---
+            # 1.1 الانتظار الإجباري: العودة إذا لم يتم بلوغ الـ 12 ثانية بعد
+            if elapsed_time < MIN_CHECK_DELAY_SECONDS:
+                print(f"User {email}: Trade {contract_id} active. Elapsed time: {elapsed_time:.2f}s. Waiting for {MIN_CHECK_DELAY_SECONDS}s minimum threshold.")
+                return 
+            
+            # 1.2 المراقبة الدقيقة بعد تجاوز 12 ثانية
+            print(f"User {email}: Trade {contract_id} exceeded {MIN_CHECK_DELAY_SECONDS}s threshold ({elapsed_time:.2f}s). Starting continuous check.")
+            
+            # حلقة الفحص المتكرر (كل 1 ثانية)
+            while True:
+                contract_info = check_contract_status(ws, contract_id)
+                
+                if contract_info and contract_info.get('is_sold'): # الصفقة أغلقت
+                    
+                    print(f"User {email}: Trade {contract_id} completed. Processing result NOW.")
+                    
+                    profit = float(contract_info.get('profit', 0))
+                    
+                    if profit > 0:
+                        consecutive_losses = 0
+                        total_wins += 1
+                        current_amount = base_amount 
+                        print(f"User {email}: WIN! Profit: {profit:.2f}. Resetting bet to {current_amount:.2f}")
+                    elif profit < 0:
+                        consecutive_losses += 1
+                        total_losses += 1
+                        next_bet = float(current_amount) * 2.1 
+                        current_amount = max(base_amount, next_bet)
+                        print(f"User {email}: LOSS! Consecutive losses: {consecutive_losses}. Next bet: {current_amount:.2f}")
+                    else: 
+                        consecutive_losses = 0 
+                    
+                    new_contract_id = None
+                    trade_start_time = 0.0
+
+                    new_balance, _ = get_balance_and_currency(user_token)
+                    if new_balance is not None:
+                        current_balance_float = float(new_balance)
+                        
+                        if initial_balance == 0.0:
+                            initial_balance = current_balance_float
+
+                        if (current_balance_float - initial_balance) >= float(tp_target):
+                            print(f"User {email} reached Take Profit target. Stopping session.")
+                            update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time)
+                            update_is_running_status(email, 0) 
+                            return
+                        
+                        if consecutive_losses >= max_consecutive_losses:
+                            print(f"User {email} reached Max Consecutive Losses. Stopping session.")
+                            update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time)
+                            update_is_running_status(email, 0)
+                            return
+
+                    # تحديث قاعدة البيانات والسماح بالدخول الفوري في الدورة التالية
+                    update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time)
+                    return # الخروج من الدالة والسماح لـ bot_loop بالدخول فورا
+                
+                # إذا لم تغلق، انتظر ثانية واحدة وكرر الفحص
+                print(f"User {email}: Trade {contract_id} still open after check at {time.time():.2f}. Sleeping 1s for next check.")
+                time.sleep(1)
+
+
+        # --- 2. Entry Logic (If no trade is active and not in check_only mode) ---
         if not check_only and not contract_id: 
+            # ... (Balance/Initial Balance check) ...
             balance, currency = get_balance_and_currency(user_token)
             if balance is None:
                 print(f"Failed to get balance for {email}. Skipping trade.")
@@ -387,19 +466,31 @@ def run_trading_job_for_user(session_data, check_only=False):
                 initial_balance = float(balance)
                 update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=None, trade_start_time=None)
             
+            # **A. التحليل (يتم فوراً)**
+            tick_prices = get_ticks_history(ws, count=ANALYSE_TICKS_COUNT)
+            if tick_prices is None:
+                 print(f"User {email}: Failed to get {ANALYSE_TICKS_COUNT} ticks history. Waiting for next cycle.")
+                 return 
+            
+            signal, message = analyse_data(tick_prices)
+            print(f"User {email}: Last {ANALYSE_TICKS_COUNT} ticks analysis: {message}. Signal: {signal}")
+            
+            if signal == "Wait":
+                 return 
+                 
+            # **B. الدخول (عند وجود Signal)**
             amount_to_bet = max(0.35, round(float(current_amount), 2))
                              
-            # **التعديل هنا: استخدام "barrier" بدلاً من "target"**
+            # 1. طلب الاقتراح (Proposal)
             proposal_req = {
                 "proposal": 1, "amount": amount_to_bet, "basis": "stake",
-                "contract_type": CONTRACT_TYPE, "currency": currency,
+                "contract_type": signal, "currency": currency,
                 "duration": CONTRACT_DURATION, "duration_unit": CONTRACT_DURATION_UNIT, 
-                "symbol": TRADING_SYMBOL,
-                "barrier": str(DIFFER_TARGET_DIGIT) # **تم التعديل**
+                "symbol": TRADING_SYMBOL
             }
             ws.send(json.dumps(proposal_req))
             
-            # Wait for proposal response
+            # 2. انتظار الرد على الاقتراح
             proposal_response = None
             for i in range(5):
                 try:
@@ -421,13 +512,13 @@ def run_trading_job_for_user(session_data, check_only=False):
             if proposal_response and 'proposal' in proposal_response:
                 proposal_id = proposal_response['proposal']['id']
                 
-                # Place the order
+                # 3. وضع أمر الشراء (Buy)
                 order_response = place_order(ws, proposal_id, amount_to_bet)
                 
                 if 'buy' in order_response and 'contract_id' in order_response['buy']:
                     new_contract_id = order_response['buy']['contract_id']
-                    trade_start_time = time.time()
-                    print(f"User {email}: Placed trade {new_contract_id} (Differ {DIFFER_TARGET_DIGIT}). Stake: {amount_to_bet:.2f}")
+                    trade_start_time = time.time() # تسجيل وقت الدخول للبدء في حساب الـ 12 ثانية
+                    print(f"User {email}: Placed {signal} trade {new_contract_id} for {CONTRACT_DURATION}{CONTRACT_DURATION_UNIT}. Stake: {amount_to_bet:.2f}")
                     
                     update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time)
                 else:
@@ -463,15 +554,16 @@ def bot_loop():
                         
                     contract_id = latest_session_data.get('contract_id')
                     
-                    # 1. Check and close active trades
+                    # 1. Check/Monitor active trades 
                     if contract_id:
                         run_trading_job_for_user(latest_session_data, check_only=True)
                     
-                    # 2. Place new trades (Immediate Entry)
+                    # 2. Analyze and Place new trades (Immediate entry if no contract_id)
                     elif not contract_id:
                         run_trading_job_for_user(latest_session_data, check_only=False) 
             
-            time.sleep(1) # Wait for 1 second before the next iteration of the loop
+            # انتظار قصير هنا (1 ثانية) للسماح للدورة التالية بالبدء، أو للسماح بحلقة المراقبة المستمرة بالعمل
+            time.sleep(1) 
         except Exception as e:
             print(f"Error in bot_loop main loop: {e}. Sleeping for 5 seconds before retrying.")
             time.sleep(5)
@@ -536,6 +628,8 @@ if st.session_state.logged_in:
     
     with st.form("settings_and_control"):
         st.subheader("Bot Settings and Control")
+        st.info(f"**Current Strategy:** Call/Put (5 ticks analysis) with a **5-tick duration**. The bot **monitors every second** for the result after **12 seconds** of trade entry.")
+        
         user_token_val = ""
         base_amount_val = 0.35
         tp_target_val = 10.0
@@ -611,7 +705,7 @@ if st.session_state.logged_in:
                 st.metric(label="Consecutive Losses", value=stats.get('consecutive_losses', 0))
             
             if stats.get('contract_id'):
-                st.warning("⚠ A trade is currently active. Stats will update after completion.")
+                st.warning("⚠ A trade is currently active. The bot will begin continuous checking after 12 seconds from entry.")
     else:
         with stats_placeholder.container():
             st.info("Your bot session is currently stopped or not yet configured.")
