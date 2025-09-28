@@ -7,19 +7,19 @@ import decimal
 import sqlite3
 import multiprocessing
 
-# --- Strategy Configuration (Updated) ---
+# --- Strategy Configuration (Unchanged) ---
 TRADING_SYMBOL = "R_100"       
 CONTRACT_DURATION = 1          
 CONTRACT_DURATION_UNIT = 't'   
 MIN_CHECK_DELAY_SECONDS = 5    
-NET_LOSS_MULTIPLIER = 6.0      # 🌟 مضاعف الخسارة الصافية الجديد: x6
-BASE_OVER_MULTIPLIER = 2.0     # 🌟 مضاعف Over 3 الجديد: x2
-MAX_CONSECUTIVE_LOSSES = 3     # 🌟 وقف الخسارة الثابت الجديد: 3 خسائر صافية
+NET_LOSS_MULTIPLIER = 6.0      
+BASE_OVER_MULTIPLIER = 2.0     
+MAX_CONSECUTIVE_LOSSES = 3     
 
 # --- SQLite Database Configuration ---
 DB_FILE = "trading_data_unique_martingale_final.db" 
 
-# --- Database & Utility Functions (Unchanged Logic) ---
+# --- Database & Utility Functions (Unchanged) ---
 def create_connection():
     try:
         conn = sqlite3.connect(DB_FILE)
@@ -125,7 +125,6 @@ def start_new_session_in_db(email, settings):
     if conn:
         try:
             base_under = settings["base_under_amount_input"]
-            # 🌟 استخدام BASE_OVER_MULTIPLIER الجديد (x2)
             base_over = base_under * BASE_OVER_MULTIPLIER 
             
             max_losses = settings.get("max_consecutive_losses", MAX_CONSECUTIVE_LOSSES) 
@@ -276,12 +275,13 @@ def place_order(ws, proposal_id, amount):
     except Exception: return {"error": {"message": "Order placement failed."}}
 
 
-# --- Trading Bot Logic (Immediate Cycle Restart and Multiplier Update) ---
+# --- Trading Bot Logic (Corrected Multiplier Logic) ---
 
 def run_trading_job_for_user(session_data, check_only=False):
     email = session_data['email']
     user_token = session_data['user_token']
     
+    # 🌟 يتم تمرير البيانات كمتغيرات قابلة للتعديل داخل الدالة
     tp_target = session_data['tp_target']
     max_consecutive_losses = session_data['max_consecutive_losses']
     total_wins = session_data['total_wins']
@@ -322,6 +322,10 @@ def run_trading_job_for_user(session_data, check_only=False):
                     
                     
                     if trade_count == 1: # End of Trade 1 (Under 3)
+                        # 🌟 لا تغيير في current_under_amount أو current_over_amount هنا
+                        # لأننا نعتمد على قيمة الـ current_over_amount المحفوظة مسبقاً للدخول
+                        # وهذه القيمة هي التي تم حسابها في نهاية الدورة السابقة (أو القيمة الأساسية)
+                        
                         update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, 
                                                           trade_count=2, cycle_net_profit=cycle_net_profit, 
                                                           initial_balance=initial_balance, contract_id=None, trade_start_time=0.0)
@@ -335,15 +339,17 @@ def run_trading_job_for_user(session_data, check_only=False):
                         if cycle_net_profit < 0:
                             consecutive_net_losses += 1
                             # 🌟 تطبيق المضاعف الجديد (x6)
-                            next_under_bet = float(current_under_amount) * NET_LOSS_MULTIPLIER 
-                            # 🌟 تطبيق مضاعف Over 3 الجديد (x2)
-                            next_over_bet = next_under_bet * BASE_OVER_MULTIPLIER 
+                            next_under_bet = base_under_amount * (NET_LOSS_MULTIPLIER ** consecutive_net_losses)
                             
-                            # نستخدم base_under_amount كحد أدنى للدخول الأول
+                            # نضمن أن يتم الدخول في الصفقة الأولى بالمبلغ الجديد
                             current_under_amount = max(base_under_amount, next_under_bet)
-                            # نستخدم base_over_amount كحد أدنى للدخول الثاني
-                            current_over_amount = max(base_over_amount, next_over_bet)
-                        else:
+                            
+                            # نضمن أن تكون الصفقة الثانية مضاعف للصفقة الأولى (x2)
+                            current_over_amount = current_under_amount * BASE_OVER_MULTIPLIER
+                            
+                            # ملاحظة: تم تعديل طريقة حساب المبلغ للمضاعفة لتجنب التراكم الخاطئ
+                            
+                        else: # ربح صافي أو تعادل
                             consecutive_net_losses = 0
                             current_under_amount = base_under_amount 
                             current_over_amount = base_over_amount
@@ -432,11 +438,11 @@ def run_trading_job_for_user(session_data, check_only=False):
                         update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, 
                                                           trade_count=new_trade_count, cycle_net_profit=cycle_net_profit, 
                                                           initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time)
-                        return # الخروج بعد وضع الصفقة بنجاح
+                        return 
                     else:
-                        return # فشل وضع الأمر
+                        return 
                 else:
-                     return # فشل جلب العرض (Proposal)
+                     return 
             
             else: 
                 return 
@@ -468,7 +474,7 @@ def bot_loop():
         except Exception as e:
             time.sleep(5)
 
-# --- Streamlit App Configuration (Updated Caption) ---
+# --- Streamlit App Configuration (Unchanged) ---
 st.set_page_config(page_title="Khoury Bot", layout="wide")
 st.title("Khoury Bot 🤖")
 
@@ -532,8 +538,7 @@ if st.session_state.logged_in:
         
         tp_target = st.number_input("Take Profit Target ($)", min_value=10.0, value=tp_target_val, step=10.0, disabled=is_user_bot_running_in_db)
         
-        # 🌟 تحديث رسالة الشرح
-        st.caption(f"Strategy: 1 Tick, Over 3 bet is **{BASE_OVER_MULTIPLIER}x** the Under 3 bet. Martingale $\times **{NET_LOSS_MULTIPLIER}**$ on Net Cycle Loss. **Stop Loss (SL) is fixed at {MAX_CONSECUTIVE_LOSSES} consecutive net cycles loss.**")
+        st.caption(f"Strategy: 1 Tick, Over 3 bet is **{BASE_OVER_MULTIPLIER}x** the Under 3 bet. Martingale $\times **{NET_LOSS_MULTIPLIER}**$ on **Net Cycle Loss**. **Stop Loss (SL) is fixed at {MAX_CONSECUTIVE_LOSSES} consecutive net cycles loss.**")
         
         col_start, col_stop = st.columns(2)
         with col_start:
