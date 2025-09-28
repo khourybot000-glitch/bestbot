@@ -9,7 +9,7 @@ import pandas as pd
 from datetime import datetime
 import multiprocessing
 
-# --- Strategy Configuration (Call/Put 5 Ticks) ---
+# --- Strategy Configuration ---
 TRADING_SYMBOL = "R_100"       # Volatility 100 Index
 CONTRACT_DURATION = 5          # 5 ticks (مدة الصفقة)
 CONTRACT_DURATION_UNIT = 't'   # 't' for tick
@@ -19,9 +19,8 @@ MIN_CHECK_DELAY_SECONDS = 12   # الحد الأدنى للانتظار قبل �
 # --- SQLite Database Configuration ---
 DB_FILE = "trading_data0099.db"
 
-# --- Database & Utility Functions ---
+# --- Database & Utility Functions (Unchanged) ---
 def create_connection():
-    """Create a database connection to the SQLite database specified by DB_FILE"""
     try:
         conn = sqlite3.connect(DB_FILE)
         return conn
@@ -30,7 +29,6 @@ def create_connection():
         return None
 
 def create_table_if_not_exists():
-    """Create the sessions and bot_status tables if they do not exist."""
     conn = create_connection()
     if conn:
         try:
@@ -73,9 +71,6 @@ def create_table_if_not_exists():
             conn.close()
 
 def get_bot_running_status():
-    """
-    Gets the global bot running status from the database, checking for process liveness.
-    """
     conn = create_connection()
     if conn:
         try:
@@ -84,7 +79,6 @@ def get_bot_running_status():
                 row = cursor.fetchone()
                 if row:
                     status, heartbeat, pid = row
-                    
                     if status == 1:
                         if (time.time() - heartbeat > 30): 
                             print(f"Bot process {pid} timed out. Marking as stopped.")
@@ -102,7 +96,6 @@ def get_bot_running_status():
     return 0
 
 def update_bot_running_status(status, pid):
-    """Updates the global bot running status and PID in the database."""
     conn = create_connection()
     if conn:
         try:
@@ -114,7 +107,6 @@ def update_bot_running_status(status, pid):
             conn.close()
 
 def is_user_active(email):
-    """Checks if a user's email exists in the user_ids.txt file."""
     try:
         with open("user_ids.txt", "r") as file:
             active_users = [line.strip() for line in file.readlines()]
@@ -126,7 +118,6 @@ def is_user_active(email):
         return False
 
 def start_new_session_in_db(email, settings):
-    """Saves or updates user settings and initializes session data in the database."""
     conn = create_connection()
     if conn:
         try:
@@ -142,7 +133,6 @@ def start_new_session_in_db(email, settings):
             conn.close()
 
 def update_is_running_status(email, status):
-    """Updates the is_running status for a specific user session in the database."""
     conn = create_connection()
     if conn:
         try:
@@ -154,7 +144,6 @@ def update_is_running_status(email, status):
             conn.close()
 
 def get_session_status_from_db(email):
-    """Retrieves the current session status for a given email from the database."""
     conn = create_connection()
     if conn:
         try:
@@ -172,7 +161,6 @@ def get_session_status_from_db(email):
     return None
 
 def get_all_active_sessions():
-    """Fetches all currently active trading sessions from the database."""
     conn = create_connection()
     if conn:
         try:
@@ -192,7 +180,6 @@ def get_all_active_sessions():
     return []
 
 def update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=None, contract_id=None, trade_start_time=None):
-    """Updates trading statistics and trade information for a user in the database."""
     conn = create_connection()
     if conn:
         try:
@@ -209,15 +196,13 @@ def update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_a
         finally:
             conn.close()
 
-# --- WebSocket Helper Functions ---
+# --- WebSocket Helper Functions (Unchanged) ---
 def connect_websocket(user_token):
-    """Establishes a WebSocket connection and authenticates the user."""
     ws = websocket.WebSocket()
     try:
         ws.connect("wss://blue.derivws.com/websockets/v3?app_id=16929") 
         auth_req = {"authorize": user_token}
         ws.send(json.dumps(auth_req))
-        # Wait for authorization response
         while True:
             auth_response = json.loads(ws.recv())
             if auth_response.get('msg_type') == 'authorize' or auth_response.get('error'):
@@ -233,7 +218,6 @@ def connect_websocket(user_token):
         return None
 
 def get_balance_and_currency(user_token):
-    """Fetches the user's current balance and currency using WebSocket."""
     ws = None
     try:
         ws = connect_websocket(user_token)
@@ -241,7 +225,6 @@ def get_balance_and_currency(user_token):
             return None, None
         balance_req = {"balance": 1}
         ws.send(json.dumps(balance_req))
-        # Wait for balance response
         while True:
             balance_response = json.loads(ws.recv())
             if balance_response.get('msg_type') == 'balance' or balance_response.get('error'):
@@ -259,15 +242,13 @@ def get_balance_and_currency(user_token):
             ws.close()
 
 def check_contract_status(ws, contract_id):
-    """Checks the status of an open contract."""
     if not ws or not ws.connected:
         return None
     req = {"proposal_open_contract": 1, "contract_id": contract_id}
     try:
         ws.send(json.dumps(req))
-        # Receive until we get the contract status response
         response = None
-        for _ in range(3): # Try to receive a response up to 3 times
+        for _ in range(3): 
             try:
                 response_str = ws.recv()
                 response = json.loads(response_str)
@@ -288,14 +269,12 @@ def check_contract_status(ws, contract_id):
         return None
 
 def place_order(ws, proposal_id, amount):
-    """Places a trade order on Deriv."""
     if not ws or not ws.connected:
         return {"error": {"message": "WebSocket not connected."}}
     amount_decimal = decimal.Decimal(str(amount)).quantize(decimal.Decimal('0.01'), rounding=decimal.ROUND_HALF_UP)
     req = {"buy": proposal_id, "price": float(amount_decimal)}
     try:
         ws.send(json.dumps(req))
-        # Wait for the buy response
         while True:
             response_str = ws.recv()
             response = json.loads(response_str)
@@ -308,7 +287,6 @@ def place_order(ws, proposal_id, amount):
         return {"error": {"message": "Order placement failed."}}
 
 def get_ticks_history(ws, count=ANALYSE_TICKS_COUNT):
-    """Fetches the last 'count' ticks history. Must be called sparingly."""
     if not ws or not ws.connected:
         return None
     req = {"ticks_history": TRADING_SYMBOL, "end": "latest", "count": count, "subscribe": 0}
@@ -333,32 +311,23 @@ def get_ticks_history(ws, count=ANALYSE_TICKS_COUNT):
 
 def analyse_data(tick_prices):
     """
-    Analyzes the last 5 tick prices to determine the trend.
-    Signal: 'CALL' if the last 5 ticks were strictly increasing (Price[i+1] > Price[i]).
-            'PUT' if the last 5 ticks were strictly decreasing (Price[i+1] < Price[i]).
-            'Wait' otherwise.
+    Analyzes the last 5 tick prices by comparing the first tick price 
+    to the last tick price (as requested).
     """
     if not tick_prices or len(tick_prices) < ANALYSE_TICKS_COUNT:
         return "Wait", f"Not enough data (less than {ANALYSE_TICKS_COUNT} ticks)."
     
-    is_up_trend = True
-    is_down_trend = True
+    # تحويل الأسعار إلى أرقام عشرية للمقارنة
+    first_tick = float(tick_prices[0])      # أول تيك
+    last_tick = float(tick_prices[-1])     # آخر تيك
     
-    # التحقق من 4 مقارنات (بين 5 تيكات)
-    for i in range(len(tick_prices) - 1):
-        # للتأكد من صعود متتال (Strictly Increasing)
-        if float(tick_prices[i+1]) <= float(tick_prices[i]):
-            is_up_trend = False 
-        # للتأكد من هبوط متتال (Strictly Decreasing)
-        if float(tick_prices[i+1]) >= float(tick_prices[i]):
-            is_down_trend = False 
-            
-    if is_up_trend:
-        return "CALL", f"{ANALYSE_TICKS_COUNT} consecutive ticks were strictly UP. Entering CALL."
-    elif is_down_trend:
-        return "PUT", f"{ANALYSE_TICKS_COUNT} consecutive ticks were strictly DOWN. Entering PUT."
+    # المقارنة بين الأول والأخير
+    if last_tick > first_tick:
+        return "CALL", f"Price went UP over the last {ANALYSE_TICKS_COUNT} ticks ({first_tick} -> {last_tick}). Entering CALL."
+    elif last_tick < first_tick:
+        return "PUT", f"Price went DOWN over the last {ANALYSE_TICKS_COUNT} ticks ({first_tick} -> {last_tick}). Entering PUT."
     else:
-        return "Wait", "Trend not clear (not 5 consecutive strictly UP or DOWN)."
+        return "Wait", f"Price remained SAME over the last {ANALYSE_TICKS_COUNT} ticks ({first_tick} == {last_tick})."
 
 def run_trading_job_for_user(session_data, check_only=False):
     """Executes the trading logic for a specific user's session."""
@@ -394,7 +363,7 @@ def run_trading_job_for_user(session_data, check_only=False):
             
             # 1.1 الانتظار الإجباري: العودة إذا لم يتم بلوغ الـ 12 ثانية بعد
             if elapsed_time < MIN_CHECK_DELAY_SECONDS:
-                print(f"User {email}: Trade {contract_id} active. Elapsed time: {elapsed_time:.2f}s. Waiting for {MIN_CHECK_DELAY_SECONDS}s minimum threshold.")
+                # print(f"User {email}: Trade {contract_id} active. Elapsed time: {elapsed_time:.2f}s. Waiting for {MIN_CHECK_DELAY_SECONDS}s minimum threshold.")
                 return 
             
             # 1.2 المراقبة الدقيقة بعد تجاوز 12 ثانية
@@ -451,13 +420,13 @@ def run_trading_job_for_user(session_data, check_only=False):
                     return # الخروج من الدالة والسماح لـ bot_loop بالدخول فورا
                 
                 # إذا لم تغلق، انتظر ثانية واحدة وكرر الفحص
-                print(f"User {email}: Trade {contract_id} still open after check at {time.time():.2f}. Sleeping 1s for next check.")
+                # print(f"User {email}: Trade {contract_id} still open after check at {time.time():.2f}. Sleeping 1s for next check.")
                 time.sleep(1)
 
 
         # --- 2. Entry Logic (If no trade is active and not in check_only mode) ---
         if not check_only and not contract_id: 
-            # ... (Balance/Initial Balance check) ...
+            
             balance, currency = get_balance_and_currency(user_token)
             if balance is None:
                 print(f"Failed to get balance for {email}. Skipping trade.")
@@ -556,13 +525,15 @@ def bot_loop():
                     
                     # 1. Check/Monitor active trades 
                     if contract_id:
+                        # هذه الدالة تراقب الصفقة وتدخل في حلقة فحص مستمرة بعد 12 ثانية
                         run_trading_job_for_user(latest_session_data, check_only=True)
                     
                     # 2. Analyze and Place new trades (Immediate entry if no contract_id)
                     elif not contract_id:
+                        # هذه الدالة تعمل فوراً بعد أن تصفّر الدالة الأولى الـ contract_id
                         run_trading_job_for_user(latest_session_data, check_only=False) 
             
-            # انتظار قصير هنا (1 ثانية) للسماح للدورة التالية بالبدء، أو للسماح بحلقة المراقبة المستمرة بالعمل
+            # انتظار قصير هنا (1 ثانية) للتحقق من الصفقة النشطة أو بدء دورة تداول جديدة
             time.sleep(1) 
         except Exception as e:
             print(f"Error in bot_loop main loop: {e}. Sleeping for 5 seconds before retrying.")
@@ -628,7 +599,7 @@ if st.session_state.logged_in:
     
     with st.form("settings_and_control"):
         st.subheader("Bot Settings and Control")
-        st.info(f"**Current Strategy:** Call/Put (5 ticks analysis) with a **5-tick duration**. The bot **monitors every second** for the result after **12 seconds** of trade entry.")
+        st.info(f"**Current Strategy:** Call/Put (5 ticks analysis based on **First vs. Last Tick**). The trade duration is **5 ticks**, and the bot **monitors every second** for the result after **12 seconds** of trade entry.")
         
         user_token_val = ""
         base_amount_val = 0.35
