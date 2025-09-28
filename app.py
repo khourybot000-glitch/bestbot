@@ -7,19 +7,19 @@ import decimal
 import sqlite3
 import multiprocessing
 
-# --- Strategy Configuration (Unchanged) ---
+# --- Strategy Configuration ---
 TRADING_SYMBOL = "R_100"       
 CONTRACT_DURATION = 1          
 CONTRACT_DURATION_UNIT = 't'   
 MIN_CHECK_DELAY_SECONDS = 5    
-NET_LOSS_MULTIPLIER = 6.0      # المضاعف: x6 (على الخسارة الصافية)
+NET_LOSS_MULTIPLIER = 6.0      # المضاعف: x6 (على الخسارة الصافية للدورة)
 BASE_OVER_MULTIPLIER = 2.0     # مضاعف Over 3: x2
-MAX_CONSECUTIVE_LOSSES = 3     # وقف الخسارة: 3 خسائر صافية
+MAX_CONSECUTIVE_LOSSES = 3     # وقف الخسارة: 3 خسائر صافية متتالية
 
 # --- SQLite Database Configuration ---
 DB_FILE = "trading_data_unique_martingale_final.db" 
 
-# --- Database & Utility Functions (Added field for the second contract ID) ---
+# --- Database & Utility Functions ---
 def create_connection():
     try:
         conn = sqlite3.connect(DB_FILE)
@@ -48,8 +48,8 @@ def create_table_if_not_exists():
                 consecutive_net_losses INTEGER DEFAULT 0, 
                 
                 initial_balance REAL DEFAULT 0.0,
-                under_contract_id TEXT,  -- 🌟 Contract ID for Under 3
-                over_contract_id TEXT,   -- 🌟 Contract ID for Over 3
+                under_contract_id TEXT,  
+                over_contract_id TEXT,   
                 trade_start_time REAL DEFAULT 0.0,
                 is_running INTEGER DEFAULT 0,
                 trade_count INTEGER DEFAULT 0, 
@@ -220,10 +220,11 @@ def update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_u
         finally:
             conn.close()
 
-# --- WebSocket Helper Functions (Unchanged) ---
+# --- WebSocket Helper Functions ---
 def connect_websocket(user_token):
     ws = websocket.WebSocket()
     try:
+        # ⚠️ تأكد من استخدام تطبيق Deriv ID صالح
         ws.connect("wss://blue.derivws.com/websockets/v3?app_id=16929") 
         auth_req = {"authorize": user_token}
         ws.send(json.dumps(auth_req))
@@ -313,7 +314,7 @@ def place_order(ws, contract_type, amount, currency, barrier):
     return {"error": {"message": "Order placement failed or proposal missing."}}
 
 
-# --- Trading Bot Logic (Simultaneous Trades) ---
+# --- Trading Bot Logic (Simultaneous Trades - Corrected Flow) ---
 
 def run_trading_job_for_user(session_data, check_only=False):
     email = session_data['email']
@@ -344,12 +345,11 @@ def run_trading_job_for_user(session_data, check_only=False):
 
         # 🌟 المرحلة 1: مراقبة الصفقات النشطة (trade_count = 1)
         if under_contract_id or over_contract_id:
-            trade_count = 1 # نضمن أن الـ trade_count = 1 أثناء المراقبة
+            trade_count = 1 
 
             if time.time() - trade_start_time < MIN_CHECK_DELAY_SECONDS: 
                 return 
 
-            # مصفوفة لتخزين الأرباح/الخسائر بعد الإغلاق
             results = []
             
             # 1. فحص صفقة Under 3
@@ -358,7 +358,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                 if contract_info and contract_info.get('is_sold'):
                     profit = float(contract_info.get('profit', 0))
                     results.append(profit)
-                    under_contract_id = None # إزالة العقد من المراقبة
+                    under_contract_id = None 
             
             # 2. فحص صفقة Over 3
             if over_contract_id:
@@ -366,12 +366,11 @@ def run_trading_job_for_user(session_data, check_only=False):
                 if contract_info and contract_info.get('is_sold'):
                     profit = float(contract_info.get('profit', 0))
                     results.append(profit)
-                    over_contract_id = None # إزالة العقد من المراقبة
+                    over_contract_id = None 
 
             # 3. اتخاذ القرار إذا تم إغلاق كلتا الصفقتين
             if under_contract_id is None and over_contract_id is None:
                 
-                # تحديث الإحصائيات والأرباح
                 cycle_net_profit = sum(results)
                 for profit in results:
                     total_wins += 1 if profit > 0 else 0
@@ -379,18 +378,13 @@ def run_trading_job_for_user(session_data, check_only=False):
                 
                 # --- منطق المضاعفة على الخسارة الصافية للدورة ---
                 if cycle_net_profit < 0:
-                    # خسارة صافية للدورة: نزيد عداد الخسائر ونضاعف للمرة القادمة
                     consecutive_net_losses += 1
                     
-                    # حساب المبلغ الجديد للصفقة الأولى (Under 3)
                     new_under_bet = base_under_amount * (NET_LOSS_MULTIPLIER ** consecutive_net_losses)
                     current_under_amount = round(max(base_under_amount, new_under_bet), 2)
-                    
-                    # حساب المبلغ الجديد للصفقة الثانية (Over 3) (x2)
                     current_over_amount = round(current_under_amount * BASE_OVER_MULTIPLIER, 2)
                     
                 else: 
-                    # ربح صافي أو تعادل: إعادة تعيين إلى المبلغ الأساسي
                     consecutive_net_losses = 0
                     current_under_amount = base_under_amount 
                     current_over_amount = base_over_amount
@@ -406,9 +400,8 @@ def run_trading_job_for_user(session_data, check_only=False):
                                                   trade_count=0, cycle_net_profit=0.0, initial_balance=initial_balance, 
                                                   under_contract_id=None, over_contract_id=None, trade_start_time=0.0)
                 
-                trade_count = 0
-                cycle_net_profit = 0.0
-                continue # انتقال فوري لبدء دورة جديدة (للوصول للمرحلة 2)
+                # 🌟 نستخدم RETURN للخروج، مما يسمح لـ bot_loop باستدعاء الدالة مرة أخرى فوراً للدخول في دورة جديدة
+                return 
             
             # تحديث حالة العقود إذا أغلق أحدها وبقي الآخر
             update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, 
@@ -416,7 +409,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                                               initial_balance=initial_balance, under_contract_id=under_contract_id, over_contract_id=over_contract_id, trade_start_time=trade_start_time)
 
             time.sleep(1) 
-            return # الخروج للمراقبة لاحقاً
+            return 
         
         # 🌟 المرحلة 2: الدخول في صفقات جديدة (trade_count = 0)
         elif trade_count == 0 and not check_only: 
@@ -424,11 +417,11 @@ def run_trading_job_for_user(session_data, check_only=False):
             balance, currency = get_balance_and_currency(user_token)
             if balance is None: return
             
+            # تحديث الرصيد الأولي والتحقق من هدف الربح (TP)
             if initial_balance == 0:
                 initial_balance = float(balance)
                 update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, trade_count, cycle_net_profit, initial_balance=initial_balance)
             
-            # Check for Take Profit Target
             current_profit = float(balance) - initial_balance
             if current_profit >= tp_target and initial_balance != 0:
                  update_is_running_status(email, 0)
@@ -450,9 +443,7 @@ def run_trading_job_for_user(session_data, check_only=False):
             if 'buy' in order_response_over and 'contract_id' in order_response_over['buy']:
                 new_over_id = order_response_over['buy']['contract_id']
             else:
-                # إذا فشلت الصفقة الثانية، نلغي الأولى أو نخرج 
-                # (لغرض البساطة، سنخرج ونعتمد على الدورة التالية)
-                return 
+                return # فشل صفقة Over 3
 
             # --- 3. حفظ بيانات الصفقتين وبدء المراقبة ---
             trade_start_time = time.time() 
@@ -488,11 +479,11 @@ def bot_loop():
                         
                     run_trading_job_for_user(latest_session_data, check_only=False) 
             
-            time.sleep(1) 
+            time.sleep(1) # الانتظار ثانية واحدة بين فحص الجلسات
         except Exception as e:
             time.sleep(5)
 
-# --- Streamlit App Configuration (Updated to show 2 contracts) ---
+# --- Streamlit App Configuration (Unchanged) ---
 st.set_page_config(page_title="Khoury Bot", layout="wide")
 st.title("Khoury Bot 🤖")
 
