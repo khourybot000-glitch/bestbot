@@ -19,8 +19,9 @@ MIN_CHECK_DELAY_SECONDS = 12   # الحد الأدنى للانتظار قبل �
 # --- SQLite Database Configuration ---
 DB_FILE = "trading_data0099.db"
 
-# --- Database & Utility Functions (Unchanged) ---
+# --- Database & Utility Functions ---
 def create_connection():
+    """Create a database connection."""
     try:
         conn = sqlite3.connect(DB_FILE)
         return conn
@@ -29,6 +30,7 @@ def create_connection():
         return None
 
 def create_table_if_not_exists():
+    """Create the sessions and bot_status tables if they do not exist."""
     conn = create_connection()
     if conn:
         try:
@@ -71,6 +73,7 @@ def create_table_if_not_exists():
             conn.close()
 
 def get_bot_running_status():
+    """Gets the global bot running status from the database, checking for process liveness."""
     conn = create_connection()
     if conn:
         try:
@@ -79,6 +82,7 @@ def get_bot_running_status():
                 row = cursor.fetchone()
                 if row:
                     status, heartbeat, pid = row
+                    
                     if status == 1:
                         if (time.time() - heartbeat > 30): 
                             print(f"Bot process {pid} timed out. Marking as stopped.")
@@ -96,6 +100,7 @@ def get_bot_running_status():
     return 0
 
 def update_bot_running_status(status, pid):
+    """Updates the global bot running status and PID in the database."""
     conn = create_connection()
     if conn:
         try:
@@ -107,6 +112,7 @@ def update_bot_running_status(status, pid):
             conn.close()
 
 def is_user_active(email):
+    """Checks if a user's email exists in the user_ids.txt file."""
     try:
         with open("user_ids.txt", "r") as file:
             active_users = [line.strip() for line in file.readlines()]
@@ -118,6 +124,7 @@ def is_user_active(email):
         return False
 
 def start_new_session_in_db(email, settings):
+    """Saves or updates user settings and initializes session data in the database."""
     conn = create_connection()
     if conn:
         try:
@@ -133,6 +140,7 @@ def start_new_session_in_db(email, settings):
             conn.close()
 
 def update_is_running_status(email, status):
+    """Updates the is_running status for a specific user session in the database."""
     conn = create_connection()
     if conn:
         try:
@@ -144,6 +152,7 @@ def update_is_running_status(email, status):
             conn.close()
 
 def get_session_status_from_db(email):
+    """Retrieves the current session status for a given email from the database."""
     conn = create_connection()
     if conn:
         try:
@@ -161,6 +170,7 @@ def get_session_status_from_db(email):
     return None
 
 def get_all_active_sessions():
+    """Fetches all currently active trading sessions from the database."""
     conn = create_connection()
     if conn:
         try:
@@ -180,6 +190,7 @@ def get_all_active_sessions():
     return []
 
 def update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=None, contract_id=None, trade_start_time=None):
+    """Updates trading statistics and trade information for a user in the database."""
     conn = create_connection()
     if conn:
         try:
@@ -196,13 +207,15 @@ def update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_a
         finally:
             conn.close()
 
-# --- WebSocket Helper Functions (Unchanged) ---
+# --- WebSocket Helper Functions ---
 def connect_websocket(user_token):
+    """Establishes a WebSocket connection and authenticates the user."""
     ws = websocket.WebSocket()
     try:
         ws.connect("wss://blue.derivws.com/websockets/v3?app_id=16929") 
         auth_req = {"authorize": user_token}
         ws.send(json.dumps(auth_req))
+        # Wait for authorization response
         while True:
             auth_response = json.loads(ws.recv())
             if auth_response.get('msg_type') == 'authorize' or auth_response.get('error'):
@@ -218,6 +231,7 @@ def connect_websocket(user_token):
         return None
 
 def get_balance_and_currency(user_token):
+    """Fetches the user's current balance and currency using WebSocket."""
     ws = None
     try:
         ws = connect_websocket(user_token)
@@ -225,6 +239,7 @@ def get_balance_and_currency(user_token):
             return None, None
         balance_req = {"balance": 1}
         ws.send(json.dumps(balance_req))
+        # Wait for balance response
         while True:
             balance_response = json.loads(ws.recv())
             if balance_response.get('msg_type') == 'balance' or balance_response.get('error'):
@@ -242,13 +257,15 @@ def get_balance_and_currency(user_token):
             ws.close()
 
 def check_contract_status(ws, contract_id):
+    """Checks the status of an open contract."""
     if not ws or not ws.connected:
         return None
     req = {"proposal_open_contract": 1, "contract_id": contract_id}
     try:
         ws.send(json.dumps(req))
+        # Receive until we get the contract status response
         response = None
-        for _ in range(3): 
+        for _ in range(3): # Try to receive a response up to 3 times
             try:
                 response_str = ws.recv()
                 response = json.loads(response_str)
@@ -269,12 +286,14 @@ def check_contract_status(ws, contract_id):
         return None
 
 def place_order(ws, proposal_id, amount):
+    """Places a trade order on Deriv."""
     if not ws or not ws.connected:
         return {"error": {"message": "WebSocket not connected."}}
     amount_decimal = decimal.Decimal(str(amount)).quantize(decimal.Decimal('0.01'), rounding=decimal.ROUND_HALF_UP)
     req = {"buy": proposal_id, "price": float(amount_decimal)}
     try:
         ws.send(json.dumps(req))
+        # Wait for the buy response
         while True:
             response_str = ws.recv()
             response = json.loads(response_str)
@@ -287,9 +306,16 @@ def place_order(ws, proposal_id, amount):
         return {"error": {"message": "Order placement failed."}}
 
 def get_ticks_history(ws, count=ANALYSE_TICKS_COUNT):
+    """
+    Fetches the last 'count' ticks history for analysis. 
+    The 'subscribe' parameter has been removed/replaced to fix the validation error.
+    """
     if not ws or not ws.connected:
         return None
-    req = {"ticks_history": TRADING_SYMBOL, "end": "latest", "count": count, "subscribe": 0}
+        
+    # **** التصحيح: إزالة "subscribe": 0 واستبدالها بـ "adjust_start_time": 1 ****
+    req = {"ticks_history": TRADING_SYMBOL, "end": "latest", "count": count, "adjust_start_time": 1}
+    # *************************************************************************
     
     try:
         ws.send(json.dumps(req))
@@ -312,7 +338,7 @@ def get_ticks_history(ws, count=ANALYSE_TICKS_COUNT):
 def analyse_data(tick_prices):
     """
     Analyzes the last 5 tick prices by comparing the first tick price 
-    to the last tick price (as requested).
+    to the last tick price (First vs. Last).
     """
     if not tick_prices or len(tick_prices) < ANALYSE_TICKS_COUNT:
         return "Wait", f"Not enough data (less than {ANALYSE_TICKS_COUNT} ticks)."
@@ -363,7 +389,6 @@ def run_trading_job_for_user(session_data, check_only=False):
             
             # 1.1 الانتظار الإجباري: العودة إذا لم يتم بلوغ الـ 12 ثانية بعد
             if elapsed_time < MIN_CHECK_DELAY_SECONDS:
-                # print(f"User {email}: Trade {contract_id} active. Elapsed time: {elapsed_time:.2f}s. Waiting for {MIN_CHECK_DELAY_SECONDS}s minimum threshold.")
                 return 
             
             # 1.2 المراقبة الدقيقة بعد تجاوز 12 ثانية
@@ -417,10 +442,9 @@ def run_trading_job_for_user(session_data, check_only=False):
 
                     # تحديث قاعدة البيانات والسماح بالدخول الفوري في الدورة التالية
                     update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time)
-                    return # الخروج من الدالة والسماح لـ bot_loop بالدخول فورا
+                    return 
                 
                 # إذا لم تغلق، انتظر ثانية واحدة وكرر الفحص
-                # print(f"User {email}: Trade {contract_id} still open after check at {time.time():.2f}. Sleeping 1s for next check.")
                 time.sleep(1)
 
 
@@ -525,12 +549,10 @@ def bot_loop():
                     
                     # 1. Check/Monitor active trades 
                     if contract_id:
-                        # هذه الدالة تراقب الصفقة وتدخل في حلقة فحص مستمرة بعد 12 ثانية
                         run_trading_job_for_user(latest_session_data, check_only=True)
                     
                     # 2. Analyze and Place new trades (Immediate entry if no contract_id)
                     elif not contract_id:
-                        # هذه الدالة تعمل فوراً بعد أن تصفّر الدالة الأولى الـ contract_id
                         run_trading_job_for_user(latest_session_data, check_only=False) 
             
             # انتظار قصير هنا (1 ثانية) للتحقق من الصفقة النشطة أو بدء دورة تداول جديدة
