@@ -11,10 +11,10 @@ import multiprocessing
 
 # --- Strategy Configuration ---
 TRADING_SYMBOL = "R_100"       # Volatility 100 Index
-CONTRACT_DURATION = 5          # 5 ticks (مدة الصفقة)
+CONTRACT_DURATION = 1          # 5 ticks (مدة الصفقة)
 CONTRACT_DURATION_UNIT = 't'   # 't' for tick
-ANALYSE_TICKS_COUNT = 5        # التحليل يتم على آخر 5 تيكات
-MIN_CHECK_DELAY_SECONDS = 12   # الحد الأدنى للانتظار قبل بدء الفحص المستمر
+ANALYSE_TICKS_COUNT = 2        # التحليل يتم على آخر 5 تيكات
+MIN_CHECK_DELAY_SECONDS = 5   # الحد الأدنى للانتظار قبل بدء الفحص المستمر
 
 # --- SQLite Database Configuration ---
 DB_FILE = "trading_data0099.db"
@@ -337,7 +337,7 @@ def get_ticks_history(ws, count=ANALYSE_TICKS_COUNT):
 
 def analyse_data(tick_prices):
     """
-    Analyzes the last 5 tick prices by comparing the first tick price 
+    Analyzes the last 2 tick prices by comparing the first tick price 
     to the last tick price (First vs. Last).
     """
     if not tick_prices or len(tick_prices) < ANALYSE_TICKS_COUNT:
