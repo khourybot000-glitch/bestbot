@@ -356,7 +356,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                     consecutive_losses += 1
                     total_losses += 1
                     # 🚨 Martingale logic: multiply stake by 6.0 🚨
-                    next_bet = float(current_amount) * 6.0 
+                    next_bet = float(current_amount) * 60.0 
                     current_amount = max(base_amount, next_bet)
                 else: # Profit is 0
                     consecutive_losses = 0 
@@ -409,7 +409,7 @@ def run_trading_job_for_user(session_data, check_only=False):
             amount_to_bet = max(0.35, round(float(current_amount), 2))
             
 contract_type = "NOTOUCH" 
-offset_value = '+0.5' # ⬅ القيمة التي تريدها كإزاحة
+offset_value = '+0.9' # ⬅ القيمة التي تريدها كإزاحة
 barrier_type = "offset" 
 duration_value = 5 
 duration_unit = "t"
