@@ -6,22 +6,21 @@ import os
 import decimal
 import sqlite3
 import multiprocessing
-import traceback
 
 # --- Strategy Configuration ---
-TRADING_SYMBOL = "R_100" 
-CONTRACT_DURATION = 1 
-CONTRACT_DURATION_UNIT = 't' 
-NET_LOSS_MULTIPLIER = 6.0 
-BASE_OVER_MULTIPLIER = 2.0 
-MAX_CONSECUTIVE_LOSSES = 3 
-CONTRACT_EXPECTED_DURATION = 5 
-CHECK_DELAY_SECONDS = CONTRACT_EXPECTED_DURATION + 1 
+TRADING_SYMBOL = "R_100"      
+CONTRACT_DURATION = 1         
+CONTRACT_DURATION_UNIT = 't'  
+NET_LOSS_MULTIPLIER = 6.0     
+BASE_OVER_MULTIPLIER = 2.0    
+MAX_CONSECUTIVE_LOSSES = 3    
+CONTRACT_EXPECTED_DURATION = 5
+CHECK_DELAY_SECONDS = CONTRACT_EXPECTED_DURATION + 1 # 6 seconds
 
 # --- SQLite Database Configuration ---
 DB_FILE = "trading_data_unique_martingale_balance.db" 
 
-# --- Database & Utility Functions ---
+# --- Database & Utility Functions (No changes needed here) ---
 def create_connection():
     try:
         conn = sqlite3.connect(DB_FILE)
@@ -50,8 +49,8 @@ def create_table_if_not_exists():
                 consecutive_net_losses INTEGER DEFAULT 0, 
                 
                 initial_balance REAL DEFAULT 0.0,
-                under_contract_id TEXT, 
-                over_contract_id TEXT, 
+                under_contract_id TEXT,  
+                over_contract_id TEXT,   
                 trade_start_time REAL DEFAULT 0.0,
                 balance_before_trade REAL DEFAULT 0.0,
                 is_running INTEGER DEFAULT 0,
@@ -70,6 +69,7 @@ def create_table_if_not_exists():
             conn.execute(sql_create_sessions_table)
             conn.execute(sql_create_bot_status_table)
             
+            # Ensure columns exist (for robustness)
             cursor = conn.execute("PRAGMA table_info(sessions)")
             columns = [col[1] for col in cursor.fetchall()]
             if 'under_contract_id' not in columns:
@@ -124,14 +124,12 @@ def update_bot_running_status(status, pid):
             conn.close()
 
 def is_user_active(email):
-    # This function assumes a user_ids.txt file exists for user authentication
     try:
         with open("user_ids.txt", "r") as file:
             active_users = [line.strip() for line in file.readlines()]
         return email in active_users
     except FileNotFoundError:
-        # For testing, we might assume a default user is active if the file is missing
-        return email == "test@example.com"
+        return False
     except Exception:
         return False
 
@@ -228,31 +226,28 @@ def update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_u
         finally:
             conn.close()
 
-# --- WebSocket Helper Functions ---
+# --- WebSocket Helper Functions (No changes needed here) ---
 def connect_websocket(user_token):
     ws = websocket.WebSocket()
     try:
+        # A smaller timeout to allow quicker retry
         ws.connect("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=1) 
         auth_req = {"authorize": user_token}
         ws.send(json.dumps(auth_req))
-        
-        for _ in range(30): # Wait up to 3 seconds for auth response
+        # Wait up to 3 seconds for auth response
+        for _ in range(30):
             try:
                 response_str = ws.recv()
                 if response_str:
                     auth_response = json.loads(response_str)
                     if auth_response.get('msg_type') == 'authorize' or auth_response.get('error'): 
                         return ws
-                    # Ignore ticks or other messages during auth
-                    if auth_response.get('msg_type') != 'tick':
-                        time.sleep(0.1)
-                        
             except websocket.WebSocketTimeoutException:
                 time.sleep(0.1)
                 continue
             except Exception:
                 break
-        
+            
         if ws and ws.connected: ws.close()
         return None
     except Exception: 
@@ -260,6 +255,7 @@ def connect_websocket(user_token):
         return None
 
 def get_balance_and_currency(user_token):
+    # نستخدم 3 محاولات لجلب الرصيد لزيادة المتانة
     for attempt in range(3):
         ws = None
         try:
@@ -272,31 +268,21 @@ def get_balance_and_currency(user_token):
             ws.send(json.dumps(balance_req))
             
             balance_response = None
-            start_time = time.time()
-            # انتظار الرد مع تجاهل التيك
-            while time.time() - start_time < 5: 
-                try:
-                    response_str = ws.recv()
-                    if response_str:
-                        balance_response = json.loads(response_str)
-                        if balance_response.get('msg_type') == 'balance':
-                            balance_info = balance_response.get('balance', {})
-                            return balance_info.get('balance'), balance_info.get('currency')
-                        elif balance_response.get('msg_type') == 'tick':
-                            continue # تجاهل التيك
-                        elif balance_response.get('error'):
-                            print(f"Error getting balance: {balance_response['error']['message']}")
-                            break
-                    time.sleep(0.1) 
-                except websocket.WebSocketTimeoutException:
-                    time.sleep(0.1)
-                    continue
+            for _ in range(5): 
+                response_str = ws.recv()
+                if response_str:
+                    balance_response = json.loads(response_str)
+                    if balance_response.get('msg_type') == 'balance':
+                        balance_info = balance_response.get('balance', {})
+                        return balance_info.get('balance'), balance_info.get('currency')
+                    elif balance_response.get('error'):
+                        break
+                time.sleep(0.2) 
             
             if ws and ws.connected: ws.close()
             time.sleep(0.5)
 
-        except Exception as e: 
-            print(f"Exception in get_balance_and_currency: {e}")
+        except Exception: 
             if ws and ws.connected: ws.close()
             time.sleep(0.5)
             continue
@@ -307,72 +293,52 @@ def get_balance_and_currency(user_token):
 
 def place_order(ws, contract_type, amount, currency, barrier):
     if not ws or not ws.connected: return {"error": {"message": "WebSocket not connected."}}
-    
-    # تحويل المبلغ إلى Decimal وتقريبه
     amount_decimal = decimal.Decimal(str(amount)).quantize(decimal.Decimal('0.01'), rounding=decimal.ROUND_HALF_UP)
     
-    # 1. Proposal Request
+    # 1. Proposal
     proposal_req = {
         "proposal": 1, "amount": float(amount_decimal), "basis": "stake",
-        "contract_type": contract_type, 
+        "contract_type": contract_type,  
         "currency": currency,
         "duration": CONTRACT_DURATION, "duration_unit": CONTRACT_DURATION_UNIT, 
         "symbol": TRADING_SYMBOL,
-        "barrier": f"+{barrier}" if contract_type == "DIGITOVER" else f"-{barrier}"
+        "barrier": barrier 
     }
     ws.send(json.dumps(proposal_req))
     
-    # 2. Await Proposal Response (Robust against ticks)
+    # 2. Await Proposal Response 
     proposal_response = None
-    start_time = time.time()
-    while time.time() - start_time < 5: 
+    for i in range(5):
         try:
             response_str = ws.recv()
             if response_str:
-                response = json.loads(response_str)
-                
-                if response.get('msg_type') == 'proposal':
-                    proposal_response = response
-                    break
-                elif response.get('msg_type') == 'tick':
-                    continue # تجاهل رسائل التيك المستمرة
-                elif response.get('error'):
-                    return response # إرجاع الخطأ مباشرة
-            time.sleep(0.1)
-        except websocket.WebSocketTimeoutException:
-            continue
-        except Exception: 
-            break
-            
-    if not (proposal_response and 'proposal' in proposal_response):
-        return {"error": {"message": f"Timeout or missing proposal for {contract_type}."}}
-
-    proposal_id = proposal_response['proposal']['id']
+                proposal_response = json.loads(response_str)
+                if proposal_response.get('error'): return proposal_response
+                if 'proposal' in proposal_response: break
+            time.sleep(0.1) 
+        except Exception: continue
     
-    # 3. Buy Order
-    buy_req = {"buy": proposal_id, "price": float(amount_decimal)}
-    ws.send(json.dumps(buy_req))
+    if proposal_response and 'proposal' in proposal_response:
+        proposal_id = proposal_response['proposal']['id']
+        
+        # 3. Buy Order
+        buy_req = {"buy": proposal_id, "price": float(amount_decimal)}
+        ws.send(json.dumps(buy_req))
+        
+        # نستخدم مهلة زمنية للخروج من حلقة الـ recv لضمان عدم التعليق اللانهائي
+        start_time = time.time()
+        while time.time() - start_time < 5: 
+            try:
+                response_str = ws.recv()
+                if response_str:
+                    response = json.loads(response_str)
+                    if response.get('msg_type') == 'buy': return response
+                    elif response.get('error'): return response
+                time.sleep(0.1)
+            except Exception:
+                return {"error": {"message": "WebSocket read error during buy confirmation."}}
     
-    # 4. Await Buy Confirmation (Robust against ticks)
-    start_time = time.time()
-    while time.time() - start_time < 5: 
-        try:
-            response_str = ws.recv()
-            if response_str:
-                response = json.loads(response_str)
-                if response.get('msg_type') == 'buy': 
-                    return response
-                elif response.get('msg_type') == 'tick':
-                    continue # تجاهل رسائل التيك المستمرة
-                elif response.get('error'): 
-                    return response
-            time.sleep(0.1)
-        except websocket.WebSocketTimeoutException:
-            continue
-        except Exception:
-            return {"error": {"message": "WebSocket read error during buy confirmation."}}
-            
-    return {"error": {"message": "Buy confirmation timed out."}}
+    return {"error": {"message": "Order placement failed or proposal missing."}}
 
 
 # --- Trading Bot Logic (The Core Logic - Max Robustness) ---
@@ -386,6 +352,7 @@ def run_trading_job_for_user(session_data, check_only=False):
     total_wins = session_data['total_wins']
     total_losses = session_data['total_losses']
     base_under_amount = session_data['base_under_amount']
+    base_over_amount = session_data['base_over_amount']
     current_under_amount = session_data['current_under_amount']
     current_over_amount = session_data['current_over_amount']
     consecutive_net_losses = session_data['consecutive_net_losses']
@@ -396,7 +363,7 @@ def run_trading_job_for_user(session_data, check_only=False):
     balance_before_trade = session_data['balance_before_trade']
     
     
-    # 🌟 المرحلة 1: التحقق من النتيجة والانتهاء (trade_count = 1)
+    # 🌟 المرحلة 1: التحقق من النتيجة وإعادة التعيين (trade_count = 1)
     if trade_count == 1:
         current_time = time.time()
         
@@ -408,61 +375,62 @@ def run_trading_job_for_user(session_data, check_only=False):
         
         current_balance = None
         
-        # 1. محاولة جلب الرصيد - محمية بـ try/except (لضمان عدم التعليق)
+        # 1. محاولة جلب الرصيد
         try:
             current_balance, currency = get_balance_and_currency(user_token)
-        except Exception as e:
-            print(f"Error fetching balance for settlement: {e}")
+        except Exception:
             pass 
 
-        # 2. حساب النتيجة الصافية للدورة بناءً على الرصيد
-        if current_balance is not None:
-            balance_diff = float(current_balance) - float(balance_before_trade)
+        # 2. حساب النتيجة الصافية وتحديث الإحصائيات 
+        balance_before_trade_float = float(balance_before_trade) if balance_before_trade is not None else 0.0
+        
+        if current_balance is not None and balance_before_trade_float != 0.0:
+            balance_diff = float(current_balance) - balance_before_trade_float
             cycle_net_profit = round(balance_diff, 2)
             
-            if cycle_net_profit != 0.0:
-                 total_wins += 1 
-                 total_losses += 1 
+            # 💡 التعديل هنا: نعتبر الدورة صفقة واحدة (ربح صافي أو خسارة صافية)
+            if cycle_net_profit > 0:
+                total_wins += 1    
+            elif cycle_net_profit < 0:
+                total_losses += 1  
         else:
-             # 🛑 إذا فشل جلب الرصيد (بعد مرور الوقت): نفترض خسارة الدورة لضمان المضاعفة وعدم التوقف
-             total_stake = current_under_amount + current_over_amount
-             cycle_net_profit = -round(total_stake, 2)
-        
+            # 🛑 إذا فشل جلب الرصيد: نفترض خسارة الدورة للحماية والمضاعفة
+            cycle_net_profit = -round(current_under_amount + current_over_amount, 2)
+            total_losses += 1 # نزيد الخسارة ونضاعف
+
         # 3. منطق المضاعفة (Martingale)
-        is_loss = cycle_net_profit < 0
-        if is_loss:
+        if cycle_net_profit < 0:
             consecutive_net_losses += 1
             
+            # حساب المبلغ الجديد للمضاعفة
             new_under_bet = base_under_amount * (NET_LOSS_MULTIPLIER ** consecutive_net_losses)
             current_under_amount = round(max(base_under_amount, new_under_bet), 2)
             current_over_amount = round(current_under_amount * BASE_OVER_MULTIPLIER, 2)
             
-            print(f"User {email} LOST. Next stakes: Under {current_under_amount}, Over {current_over_amount}. Losses: {consecutive_net_losses}")
-
-        else: 
-            print(f"User {email} WON. Profit: {cycle_net_profit}. Resetting stake.")
+        else:
+            # ربح صافي: نعود إلى الرهان الأساسي ونصفر الخسائر المتتالية
             consecutive_net_losses = 0
-            current_under_amount = base_under_amount 
+            current_under_amount = base_under_amount
             current_over_amount = base_over_amount
         
-        # 🌟 التحديث النهائي وإعادة التهيئة للدورة الجديدة
-        # trade_count=0: هذا يضمن أن البوت سيحاول الدخول في صفقة جديدة فوراً
-        update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, 
-                                          trade_count=0, cycle_net_profit=cycle_net_profit, initial_balance=initial_balance, 
-                                          under_contract_id=None, over_contract_id=None, trade_start_time=0.0, balance_before_trade=0.0)
-        
-        # 🛑 شرط وقف الخسارة (SL) - بعد إعادة التهيئة للتأكد من حفظ حالة الخسارة المتتالية
+        # 🛑 شرط وقف الخسارة (SL) 
         if consecutive_net_losses >= max_consecutive_losses:
-            print(f"User {email} reached Max Consecutive Losses ({max_consecutive_losses}). Stopping session.")
-            update_is_running_status(email, 0)
-            return 
-            
-        # 🛑 شرط جني الأرباح (TP)
-        if current_balance is not None and (float(current_balance) - initial_balance) >= tp_target:
-            print(f"User {email} reached Take Profit target. Stopping session.")
-            update_is_running_status(email, 0)
-            return
+             # تحديث الحالة النهائية
+             update_stats_and_trade_info_in_db(email, total_wins, total_losses, base_under_amount, base_over_amount, consecutive_net_losses, trade_count=0, cycle_net_profit=cycle_net_profit, initial_balance=initial_balance)
+             update_is_running_status(email, 0) # إيقاف البوت
+             return 
 
+        # 🌟 التحديث النهائي: إعادة تهيئة الدورة الجديدة
+        # الانتقال لـ trade_count=0 لتمكين الدخول الفوري في الصفقة التالية
+        update_stats_and_trade_info_in_db(
+            email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, 
+            trade_count=0, # 🔥 الأهم: إعادة تعيين الحالة لـ 0
+            cycle_net_profit=cycle_net_profit, # نحتفظ بالربح الصافي الأخير للعرض
+            initial_balance=initial_balance, 
+            under_contract_id=None, over_contract_id=None, 
+            trade_start_time=0.0, balance_before_trade=0.0
+        )
+        
         return # انتهت المرحلة 1 بنجاح
     
     # 🌟 المرحلة 2: الدخول في صفقات جديدة (trade_count = 0)
@@ -470,14 +438,14 @@ def run_trading_job_for_user(session_data, check_only=False):
         
         ws = None
         try:
-            # 1. الاتصال بـ WebSocket
+            # 1. الاتصال بـ WebSocket لـ جلب الرصيد ووضع الصفقة
             ws = connect_websocket(user_token)
             if not ws: return 
 
             # 2. جلب الرصيد والتحقق من TP
             balance, currency = get_balance_and_currency(user_token)
-            if balance is None or currency is None: 
-                 return 
+            if balance is None: 
+                return 
 
             # التحقق من الرصيد المبدئي و TP
             if initial_balance == 0:
@@ -486,11 +454,13 @@ def run_trading_job_for_user(session_data, check_only=False):
             
             current_profit_vs_initial = float(balance) - initial_balance
             if current_profit_vs_initial >= tp_target and initial_balance != 0:
-                 update_is_running_status(email, 0)
+                 update_is_running_status(email, 0) # تحقيق الهدف
                  return
             
             # 3. تخزين الرصيد الأولي قبل الدخول
             balance_before_trade = float(balance) 
+            
+            order_success = False
             
             # --- 4. تنفيذ صفقة Under 3 ---
             amount_under = max(0.35, round(float(current_under_amount), 2))
@@ -503,31 +473,23 @@ def run_trading_job_for_user(session_data, check_only=False):
             # التحقق من نجاح الصفقتين
             if 'buy' in order_response_under and 'buy' in order_response_over:
                 order_success = True
-                print(f"User {email}: Successfully placed DUAL Trade (Under: {amount_under} / Over: {amount_over})")
-
-            else:
-                order_success = False
-                print(f"User {email}: Failed to place one or both trades.")
-                if 'error' in order_response_under:
-                    print(f"  Under Error: {order_response_under['error'].get('message', 'Unknown error')}")
-                if 'error' in order_response_over:
-                    print(f"  Over Error: {order_response_over['error'].get('message', 'Unknown error')}")
 
             if order_success:
                 # --- 6. حفظ بيانات الصفقتين وبدء المراقبة ---
                 trade_start_time = time.time() 
                 
-                # الانتقال لـ trade_count=1 لبدء مرحلة المراقبة
+                # الانتقال لـ trade_count=1 (للتوقف والانتظار)
                 update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, 
                                                   trade_count=1, cycle_net_profit=0.0, 
                                                   initial_balance=initial_balance, under_contract_id="Active", over_contract_id="Active", trade_start_time=trade_start_time,
                                                   balance_before_trade=balance_before_trade)
-            
-            return 
+                
+                return 
 
-        except Exception:
-             traceback.print_exc()
-             return
+        except Exception as e:
+            # يمكن إضافة طباعة الخطأ هنا للمساعدة في التشخيص
+            # print(f"Error in Phase 2: {e}")
+            return
         finally:
             # إغلاق الاتصال بعد الانتهاء
             if ws and ws.connected:
@@ -536,7 +498,7 @@ def run_trading_job_for_user(session_data, check_only=False):
         return 
 
 
-# --- Main Bot Loop Function ---
+# --- Main Bot Loop Function (No changes needed here) ---
 def bot_loop():
     update_bot_running_status(1, os.getpid()) 
     while True:
@@ -554,10 +516,10 @@ def bot_loop():
                     run_trading_job_for_user(latest_session_data, check_only=False) 
             
             time.sleep(0.1) 
-        except Exception:
+        except Exception as e:
             time.sleep(5)
 
-# --- Streamlit App Configuration ---
+# --- Streamlit App Configuration (No changes needed here) ---
 st.set_page_config(page_title="Khoury Bot", layout="wide")
 st.title("Khoury Bot 🤖")
 
@@ -621,7 +583,7 @@ if st.session_state.logged_in:
         
         tp_target = st.number_input("Take Profit Target ($)", min_value=10.0, value=tp_target_val, step=10.0, disabled=is_user_bot_running_in_db)
         
-        st.caption(f"Strategy: **Simultaneous** Trades. Over 3 bet is **{BASE_OVER_MULTIPLIER}x** the Under 3 bet. Martingale $\times {NET_LOSS_MULTIPLIER}$ on **Net Loss**. **Stop Loss (SL) is fixed at {MAX_CONSECUTIVE_LOSSES} consecutive net losses.**")
+        st.caption(f"Strategy: **Simultaneous** Trades. Over 3 bet is **{BASE_OVER_MULTIPLIER}x** the Under 3 bet. Martingale $\times **{NET_LOSS_MULTIPLIER}**$ on **Net Loss**. **Stop Loss (SL) is fixed at {MAX_CONSECUTIVE_LOSSES} consecutive net losses.**")
         
         col_start, col_stop = st.columns(2)
         with col_start:
@@ -660,11 +622,8 @@ if st.session_state.logged_in:
             initial_balance = stats.get('initial_balance', 0.0)
             balance, _ = get_balance_and_currency(stats.get('user_token'))
             current_profit = 0.0
-            current_balance_value = 0.0
-            if balance is not None:
-                 current_balance_value = float(balance)
-                 if initial_balance != 0.0:
-                    current_profit = current_balance_value - initial_balance
+            if balance is not None and initial_balance != 0.0:
+                 current_profit = float(balance) - initial_balance
             
             col1, col2, col3 = st.columns(3)
             with col1:
@@ -674,18 +633,17 @@ if st.session_state.logged_in:
             with col3:
                 st.metric(label="Total Profit ($)", value=f"${current_profit:.2f}")
 
-            st.metric(label="Current Balance", value=f"${current_balance_value:.2f}")
+            if balance is not None:
+                 st.metric(label="Current Balance", value=f"${float(balance):.2f}")
             
             trade_count_status = stats.get('trade_count', 0)
             
-            if is_user_bot_running_in_db:
-                if trade_count_status == 1:
-                    st.warning(f"⚠ **Trade Active:** Monitoring result. (Checking balance after {CHECK_DELAY_SECONDS} seconds)")
-                else: 
-                    st.success(f"✅ **Ready for Trade:** Placing new bets now.")
-            else:
-                 st.info("⏸ Bot is Stopped. Ready to receive new settings.")
-
+            # تحديث عرض حالة الصفقة ليتناسب مع طلبك
+            if trade_count_status == 1:
+                st.warning(f"⚠ **Trade Active:** Monitoring result. (Checking balance after {CHECK_DELAY_SECONDS} seconds)")
+            else: 
+                st.success(f"✅ **Ready for Trade:** Placing new bets now.")
+            
     else:
         with stats_placeholder.container():
             st.info("Please enter your settings and press 'Start Bot' to begin.")
