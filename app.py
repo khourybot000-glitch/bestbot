@@ -408,12 +408,12 @@ def run_trading_job_for_user(session_data, check_only=False):
             # Ensure current_amount is valid for order placement
             amount_to_bet = max(0.35, round(float(current_amount), 2))
             
-            # NOTOUCH CONFIGURATION
-            contract_type = "NOTOUCH" 
-            barrier_value = '+0.5' 
-            duration_value = 5 # 5 Ticks duration
-            duration_unit = "t"
-            symbol = "R_100"
+contract_type = "NOTOUCH" 
+offset_value = '+0.5' # ⬅ القيمة التي تريدها كإزاحة
+barrier_type = "offset" 
+duration_value = 5 
+duration_unit = "t"
+symbol = "R_75"
             
             print(f"User {email}: Preparing to place {contract_type} trade with amount {amount_to_bet}.")
 
