@@ -345,7 +345,7 @@ def run_trading_job_for_user(session_data, check_only=False):
             barrier_type = "offset" 
             duration_value = 5 
             duration_unit = "t"
-            symbol = "R_75"
+            symbol = "R_100"
             
             print(f"User {email}: Preparing to place {contract_type} trade with amount {amount_to_bet} and offset {offset_value}.")
 
