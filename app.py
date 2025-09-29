@@ -9,21 +9,18 @@ import multiprocessing
 
 # --- Strategy Configuration ---
 TRADING_SYMBOL = "R_100"      
-CONTRACT_DURATION = 1         
+CONTRACT_DURATION = 2         
 CONTRACT_DURATION_UNIT = 't'  
 NET_LOSS_MULTIPLIER = 7.0     
-BASE_OVER_MULTIPLIER = 3.0    # Over 3 is 3x Under 3
+BASE_OVER_MULTIPLIER = 3.0    
 MAX_CONSECUTIVE_LOSSES = 3    
-CONTRACT_EXPECTED_DURATION = 5
+CONTRACT_EXPECTED_DURATION = 7
 CHECK_DELAY_SECONDS = CONTRACT_EXPECTED_DURATION + 1 # 6 seconds
 
 # --- SQLite Database Configuration ---
 DB_FILE = "trading_data_unique_martingale_balance.db" 
 
-# ====================================================================
-# --- Database & Utility Functions (Defined First to Avoid NameError) ---
-# ====================================================================
-
+# --- Database & Utility Functions (No changes needed here) ---
 def create_connection():
     try:
         conn = sqlite3.connect(DB_FILE)
@@ -229,13 +226,15 @@ def update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_u
         finally:
             conn.close()
 
-# --- WebSocket Helper Functions ---
+# --- WebSocket Helper Functions (No changes needed here) ---
 def connect_websocket(user_token):
     ws = websocket.WebSocket()
     try:
+        # A smaller timeout to allow quicker retry
         ws.connect("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=1) 
         auth_req = {"authorize": user_token}
         ws.send(json.dumps(auth_req))
+        # Wait up to 3 seconds for auth response
         for _ in range(30):
             try:
                 response_str = ws.recv()
@@ -256,6 +255,7 @@ def connect_websocket(user_token):
         return None
 
 def get_balance_and_currency(user_token):
+    # نستخدم 3 محاولات لجلب الرصيد لزيادة المتانة
     for attempt in range(3):
         ws = None
         try:
@@ -325,6 +325,7 @@ def place_order(ws, contract_type, amount, currency, barrier):
         buy_req = {"buy": proposal_id, "price": float(amount_decimal)}
         ws.send(json.dumps(buy_req))
         
+        # نستخدم مهلة زمنية للخروج من حلقة الـ recv لضمان عدم التعليق اللانهائي
         start_time = time.time()
         while time.time() - start_time < 5: 
             try:
@@ -340,9 +341,7 @@ def place_order(ws, contract_type, amount, currency, barrier):
     return {"error": {"message": "Order placement failed or proposal missing."}}
 
 
-# ====================================================================
-# --- Trading Bot Logic (The Core Logic) ---
-# ====================================================================
+# --- Trading Bot Logic (The Core Logic - Max Robustness) ---
 
 def run_trading_job_for_user(session_data, check_only=False):
     email = session_data['email']
@@ -368,13 +367,15 @@ def run_trading_job_for_user(session_data, check_only=False):
     if trade_count == 1:
         current_time = time.time()
         
-        # 🛑 الانتظار
+        # 🛑 الانتظار (Sleep) - يخرج البوت من الدالة ويعود للدخول في الحلقة التالية
         if current_time - trade_start_time < CHECK_DELAY_SECONDS: 
             return 
         
-        # ******** منطق التحقق والإغلاق الحاسم *********
+        # ******** منطق التحقق والإغلاق الحاسم (وقت الصفقة انتهى) *********
         
         current_balance = None
+        
+        # 1. محاولة جلب الرصيد
         try:
             current_balance, currency = get_balance_and_currency(user_token)
         except Exception:
@@ -387,15 +388,15 @@ def run_trading_job_for_user(session_data, check_only=False):
             balance_diff = float(current_balance) - balance_before_trade_float
             cycle_net_profit = round(balance_diff, 2)
             
-            # نعتبر الدورة صفقة واحدة (ربح صافي أو خسارة صافية)
+            # 💡 التعديل هنا: نعتبر الدورة صفقة واحدة (ربح صافي أو خسارة صافية)
             if cycle_net_profit > 0:
                 total_wins += 1    
             elif cycle_net_profit < 0:
                 total_losses += 1  
         else:
-            # نفترض خسارة الدورة للحماية والمضاعفة
+            # 🛑 إذا فشل جلب الرصيد: نفترض خسارة الدورة للحماية والمضاعفة
             cycle_net_profit = -round(current_under_amount + current_over_amount, 2)
-            total_losses += 1 
+            total_losses += 1 # نزيد الخسارة ونضاعف
 
         # 3. منطق المضاعفة (Martingale)
         if cycle_net_profit < 0:
@@ -414,32 +415,26 @@ def run_trading_job_for_user(session_data, check_only=False):
         
         # 🛑 شرط وقف الخسارة (SL) 
         if consecutive_net_losses >= max_consecutive_losses:
+             # تحديث الحالة النهائية
              update_stats_and_trade_info_in_db(email, total_wins, total_losses, base_under_amount, base_over_amount, consecutive_net_losses, trade_count=0, cycle_net_profit=cycle_net_profit, initial_balance=initial_balance)
-             update_is_running_status(email, 0) 
+             update_is_running_status(email, 0) # إيقاف البوت
              return 
 
-        # 🌟 التحديث النهائي: إعادة تعيين الحالة لـ trade_count=0
+        # 🌟 التحديث النهائي: إعادة تهيئة الدورة الجديدة
+        # الانتقال لـ trade_count=0 لتمكين الدخول الفوري في الصفقة التالية
         update_stats_and_trade_info_in_db(
             email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, 
             trade_count=0, # 🔥 الأهم: إعادة تعيين الحالة لـ 0
-            cycle_net_profit=cycle_net_profit, 
+            cycle_net_profit=cycle_net_profit, # نحتفظ بالربح الصافي الأخير للعرض
             initial_balance=initial_balance, 
             under_contract_id=None, over_contract_id=None, 
             trade_start_time=0.0, balance_before_trade=0.0
         )
         
-        return 
+        return # انتهت المرحلة 1 بنجاح
     
     # 🌟 المرحلة 2: الدخول في صفقات جديدة (trade_count = 0)
     elif trade_count == 0 and not check_only: 
-        
-        # 🔥🔥🔥 شرط التوقيت: ندخل فقط في بداية الدقيقة (الثواني 0 إلى 5) 🔥🔥🔥
-        current_second = time.localtime().tm_sec
-        
-        if current_second > 5:
-            return # الانتظار حتى بداية الدقيقة التالية
-        
-        # إذا كان الوقت مناسباً، نستمر في تنفيذ الصفقة
         
         ws = None
         try:
@@ -492,18 +487,18 @@ def run_trading_job_for_user(session_data, check_only=False):
                 return 
 
         except Exception as e:
+            # يمكن إضافة طباعة الخطأ هنا للمساعدة في التشخيص
+            # print(f"Error in Phase 2: {e}")
             return
         finally:
+            # إغلاق الاتصال بعد الانتهاء
             if ws and ws.connected:
                 ws.close()
     else: 
         return 
 
 
-# ====================================================================
-# --- Main Bot Loop Function ---
-# ====================================================================
-
+# --- Main Bot Loop Function (No changes needed here) ---
 def bot_loop():
     update_bot_running_status(1, os.getpid()) 
     while True:
@@ -524,10 +519,7 @@ def bot_loop():
         except Exception as e:
             time.sleep(5)
 
-# ====================================================================
-# --- Streamlit App Configuration (Execution Starts Here) ---
-# ====================================================================
-
+# --- Streamlit App Configuration (No changes needed here) ---
 st.set_page_config(page_title="Khoury Bot", layout="wide")
 st.title("Khoury Bot 🤖")
 
@@ -535,8 +527,7 @@ if "logged_in" not in st.session_state: st.session_state.logged_in = False
 if "user_email" not in st.session_state: st.session_state.user_email = ""
 if "stats" not in st.session_state: st.session_state.stats = None
     
-# 🔥 Call to the function is now safe as it is defined above
-create_table_if_not_exists() 
+create_table_if_not_exists()
 
 # Start Bot Process
 bot_status_from_db = get_bot_running_status()
@@ -588,11 +579,11 @@ if st.session_state.logged_in:
         
         user_token = st.text_input("Deriv API Token", type="password", value=user_token_val, disabled=is_user_bot_running_in_db)
         
-        base_under_amount_input = st.number_input("Base Bet Amount for **Under 3** (min $0.35)", min_value=0.35, value=base_under_amount_val, step=0.1, disabled=is_user_bot_running_in_db)
+        base_under_amount_input = st.number_input("Base Bet Amount for *Under 3* (min $0.35)", min_value=0.35, value=base_under_amount_val, step=0.1, disabled=is_user_bot_running_in_db)
         
         tp_target = st.number_input("Take Profit Target ($)", min_value=10.0, value=tp_target_val, step=10.0, disabled=is_user_bot_running_in_db)
         
-        st.caption(f"Strategy: **Simultaneous** Trades. Over 3 bet is **{BASE_OVER_MULTIPLIER}x** the Under 3 bet. Martingale $\times **{NET_LOSS_MULTIPLIER}**$ on **Net Loss**. **Stop Loss (SL) is fixed at {MAX_CONSECUTIVE_LOSSES} consecutive net losses.**")
+        st.caption(f"Strategy: *Simultaneous* Trades. Over 3 bet is *{BASE_OVER_MULTIPLIER}x* the Under 3 bet. Martingale $\times *{NET_LOSS_MULTIPLIER}$ on **Net Loss. **Stop Loss (SL) is fixed at {MAX_CONSECUTIVE_LOSSES} consecutive net losses.*")
         
         col_start, col_stop = st.columns(2)
         with col_start:
@@ -620,9 +611,9 @@ if st.session_state.logged_in:
     
     current_global_bot_status = get_bot_running_status()
     if current_global_bot_status == 1:
-        st.success("🟢 *Global Bot Service is RUNNING*.")
+        st.success("🟢 Global Bot Service is RUNNING.")
     else:
-        st.error("🔴 *Global Bot Service is STOPPED*.")
+        st.error("🔴 Global Bot Service is STOPPED.")
 
     if st.session_state.stats:
         with stats_placeholder.container():
@@ -647,14 +638,11 @@ if st.session_state.logged_in:
             
             trade_count_status = stats.get('trade_count', 0)
             
+            # تحديث عرض حالة الصفقة ليتناسب مع طلبك
             if trade_count_status == 1:
-                st.warning(f"⚠ **Trade Active:** Monitoring result. (Checking balance after {CHECK_DELAY_SECONDS} seconds)")
+                st.warning(f"⚠ *Trade Active:* Monitoring result. (Checking balance after {CHECK_DELAY_SECONDS} seconds)")
             else: 
-                current_second = time.localtime().tm_sec
-                if current_second > 5:
-                    st.info(f"⏱️ **Ready, but Waiting for Next Minute Start** (Current Second: {current_second}).")
-                else:
-                    st.success(f"✅ **Ready for Trade:** Placing new bets now (Current Second: {current_second}).")
+                st.success(f"✅ *Ready for Trade:* Placing new bets now.")
             
     else:
         with stats_placeholder.container():
