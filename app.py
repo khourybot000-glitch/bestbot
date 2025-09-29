@@ -413,7 +413,7 @@ offset_value = '+0.9' # ⬅ القيمة التي تريدها كإزاحة
 barrier_type = "offset" 
 duration_value = 5 
 duration_unit = "t"
-symbol = "R_75"
+symbol = "R_100"
             
             print(f"User {email}: Preparing to place {contract_type} trade with amount {amount_to_bet}.")
 
