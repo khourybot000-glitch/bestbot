@@ -357,81 +357,80 @@ def run_trading_job_for_user(session_data, check_only=False):
     trade_start_time = session_data['trade_start_time']
     balance_before_trade = session_data['balance_before_trade']
     
-    ws = None
-    try:
-        # اتصال WebSocket - يجب أن يكون ناجحاً قبل كل صفقة
-        ws = connect_websocket(user_token)
-        # إذا فشل الاتصال في أي مرحلة، نخرج ونعيد المحاولة لاحقاً
-        if not ws: return 
-
-        # 🌟 المرحلة 1: التحقق من النتيجة عبر الرصيد (trade_count = 1)
-        if trade_count == 1:
-            current_time = time.time()
-            
-            # 1. إذا لم يمر وقت الصفقة، ننتظر
-            if current_time - trade_start_time < CONTRACT_EXPECTED_DURATION + 1: 
-                return 
-            
-            # ******** منطق التحقق والإغلاق الحاسم *********
-            
-            current_balance = None
-            
-            # 2. محاولة جلب الرصيد - محمية بـ try/except و تتضمن 3 محاولات داخلية
-            try:
-                current_balance, currency = get_balance_and_currency(user_token)
-            except Exception:
-                # إذا فشل الاتصال، فإن current_balance ستبقى None
-                pass 
-
-            # 3. حساب النتيجة الصافية للدورة بناءً على الرصيد
-            if current_balance is not None:
-                # إذا نجحنا في جلب الرصيد: نحسب النتيجة الحقيقية
-                balance_diff = float(current_balance) - float(balance_before_trade)
-                cycle_net_profit = round(balance_diff, 2)
-                
-                # تحديث الـ Wins/Losses (فقط إذا نجحنا في جلب الرصيد)
-                if cycle_net_profit != 0.0:
-                     total_wins += 1 
-                     total_losses += 1 
-            else:
-                 # 🛑 إذا فشل جلب الرصيد (بعد مرور الوقت): نفترض خسارة الدورة لضمان المضاعفة وعدم التوقف
-                 cycle_net_profit = -round(current_under_amount + current_over_amount, 2)
-            
-            # 4. منطق المضاعفة على الخسارة الصافية للدورة
-            if cycle_net_profit < 0:
-                consecutive_net_losses += 1
-                
-                new_under_bet = base_under_amount * (NET_LOSS_MULTIPLIER ** consecutive_net_losses)
-                current_under_amount = round(max(base_under_amount, new_under_bet), 2)
-                current_over_amount = round(current_under_amount * BASE_OVER_MULTIPLIER, 2)
-                
-            else: 
-                consecutive_net_losses = 0
-                current_under_amount = base_under_amount 
-                current_over_amount = base_over_amount
-            
-            # 🛑 شرط وقف الخسارة 
-            if consecutive_net_losses >= max_consecutive_losses:
-                update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, trade_count=0, cycle_net_profit=0.0, initial_balance=initial_balance)
-                update_is_running_status(email, 0)
-                return 
-
-            # 🌟 التحديث النهائي: إعادة تهيئة الدورة الجديدة
-            # الانتقال لـ trade_count=0 فورا (Guaranteed Reset)
-            update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, 
-                                              trade_count=0, cycle_net_profit=cycle_net_profit, initial_balance=initial_balance, 
-                                              under_contract_id=None, over_contract_id=None, trade_start_time=0.0, balance_before_trade=0.0)
-            
-            return # انتهت المرحلة 1 بنجاح (سواء بالربح أو المضاعفة)
+    
+    # 🌟 المرحلة 1: التحقق من النتيجة عبر الرصيد (trade_count = 1)
+    if trade_count == 1:
+        current_time = time.time()
         
-        # 🌟 المرحلة 2: الدخول في صفقات جديدة (trade_count = 0)
-        elif trade_count == 0 and not check_only: 
+        # 🛑 إذا لم يمر وقت الصفقة، نخرج وننتظر الدورة التالية
+        if current_time - trade_start_time < CONTRACT_EXPECTED_DURATION + 1: 
+            return 
+        
+        # ******** منطق التحقق والإغلاق الحاسم (وقت الصفقة انتهى) *********
+        
+        current_balance = None
+        
+        # 1. محاولة جلب الرصيد - محمية بـ try/except (تتضمن 3 محاولات)
+        try:
+            # لا نحتاج لـ WS هنا، دالة get_balance_and_currency تتصل بنفسها
+            current_balance, currency = get_balance_and_currency(user_token)
+        except Exception:
+            pass # إذا فشل الاتصال، فإن current_balance ستبقى None
+
+        # 2. حساب النتيجة الصافية للدورة بناءً على الرصيد
+        if current_balance is not None:
+            # إذا نجحنا في جلب الرصيد: نحسب النتيجة الحقيقية
+            balance_diff = float(current_balance) - float(balance_before_trade)
+            cycle_net_profit = round(balance_diff, 2)
             
+            # تحديث الـ Wins/Losses (فقط إذا نجحنا في جلب الرصيد)
+            if cycle_net_profit != 0.0:
+                 total_wins += 1 
+                 total_losses += 1 
+        else:
+             # 🛑 إذا فشل جلب الرصيد (بعد مرور الوقت): نفترض خسارة الدورة لضمان المضاعفة وعدم التوقف
+             cycle_net_profit = -round(current_under_amount + current_over_amount, 2)
+        
+        # 3. منطق المضاعفة على الخسارة الصافية للدورة
+        if cycle_net_profit < 0:
+            consecutive_net_losses += 1
+            
+            new_under_bet = base_under_amount * (NET_LOSS_MULTIPLIER ** consecutive_net_losses)
+            current_under_amount = round(max(base_under_amount, new_under_bet), 2)
+            current_over_amount = round(current_under_amount * BASE_OVER_MULTIPLIER, 2)
+            
+        else: 
+            consecutive_net_losses = 0
+            current_under_amount = base_under_amount 
+            current_over_amount = base_over_amount
+        
+        # 🛑 شرط وقف الخسارة 
+        if consecutive_net_losses >= max_consecutive_losses:
+            update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, trade_count=0, cycle_net_profit=0.0, initial_balance=initial_balance)
+            update_is_running_status(email, 0)
+            return 
+
+        # 🌟 التحديث النهائي: إعادة تهيئة الدورة الجديدة
+        # الانتقال لـ trade_count=0 فورا (Guaranteed Reset)
+        update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, 
+                                          trade_count=0, cycle_net_profit=cycle_net_profit, initial_balance=initial_balance, 
+                                          under_contract_id=None, over_contract_id=None, trade_start_time=0.0, balance_before_trade=0.0)
+        
+        return # انتهت المرحلة 1 بنجاح (سواء بالربح أو المضاعفة)
+    
+    # 🌟 المرحلة 2: الدخول في صفقات جديدة (trade_count = 0)
+    elif trade_count == 0 and not check_only: 
+        
+        ws = None
+        try:
             # 1. جلب الرصيد والتحقق من TP
-            # نعتمد على دالة قوية تجلب الرصيد
+            ws = connect_websocket(user_token)
+            if not ws: return # إذا فشل الاتصال، نخرج ونعيد المحاولة فورا
+            
             balance, currency = get_balance_and_currency(user_token)
             if balance is None: return # إذا فشل الاتصال، نخرج ونعيد المحاولة فورا
-            
+
+            # ... (بقية منطق التحقق من TP)
             if initial_balance == 0:
                 initial_balance = float(balance)
                 update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, trade_count, cycle_net_profit, initial_balance=initial_balance)
@@ -446,21 +445,17 @@ def run_trading_job_for_user(session_data, check_only=False):
             
             order_success = False
             
-            try:
-                # --- 3. تنفيذ صفقة Under 3 ---
-                amount_under = max(0.35, round(float(current_under_amount), 2))
-                order_response_under = place_order(ws, "DIGITUNDER", amount_under, currency, 3)
-                
-                # --- 4. تنفيذ صفقة Over 3 ---
-                amount_over = max(0.35, round(float(current_over_amount), 2))
-                order_response_over = place_order(ws, "DIGITOVER", amount_over, currency, 3)
-                
-                # التحقق من نجاح الصفقتين
-                if 'buy' in order_response_under and 'buy' in order_response_over:
-                    order_success = True
-
-            except Exception:
-                pass 
+            # --- 3. تنفيذ صفقة Under 3 ---
+            amount_under = max(0.35, round(float(current_under_amount), 2))
+            order_response_under = place_order(ws, "DIGITUNDER", amount_under, currency, 3)
+            
+            # --- 4. تنفيذ صفقة Over 3 ---
+            amount_over = max(0.35, round(float(current_over_amount), 2))
+            order_response_over = place_order(ws, "DIGITOVER", amount_over, currency, 3)
+            
+            # التحقق من نجاح الصفقتين
+            if 'buy' in order_response_under and 'buy' in order_response_over:
+                order_success = True
 
             if order_success:
                 # --- 5. حفظ بيانات الصفقتين وبدء المراقبة ---
@@ -475,16 +470,15 @@ def run_trading_job_for_user(session_data, check_only=False):
             # إذا فشلت الصفقة (order_success=False)، فإن trade_count ستبقى 0، وسيحاول الدخول فورا في دورة الحلقة التالية.
             return 
 
-        else: 
-            return 
+        except Exception:
+             return
+        finally:
+            # إغلاق الاتصال بعد الانتهاء
+            if ws and ws.connected:
+                ws.close()
+    else: 
+        return 
 
-    except Exception:
-        # في حال حدوث خطأ عام 
-        return
-    finally:
-        # إغلاق الاتصال بعد الانتهاء
-        if ws and ws.connected:
-            ws.close()
 
 # --- Main Bot Loop Function ---
 def bot_loop():
@@ -630,6 +624,7 @@ if st.session_state.logged_in:
             
             # العرض يعتمد فقط على trade_count لضمان عدم التعليق في الواجهة
             if trade_count_status == 1:
+                # هذه الرسالة ستظهر طالما أن الوقت لم ينته، لكن البوت لن يعلق
                 st.warning("⚠ Monitoring active trades: Cycle is Active. (Check Balance in 6 seconds)")
             else: 
                 st.success(f"✅ Cycle complete. Starting new Cycle (Simultaneous).")
