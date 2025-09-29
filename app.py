@@ -11,16 +11,16 @@ import multiprocessing
 TRADING_SYMBOL = "R_100"       
 CONTRACT_DURATION = 1          
 CONTRACT_DURATION_UNIT = 't'   
-MIN_CHECK_DELAY_SECONDS = 5    
 NET_LOSS_MULTIPLIER = 6.0      
 BASE_OVER_MULTIPLIER = 2.0     
 MAX_CONSECUTIVE_LOSSES = 3     
-CONTRACT_EXPECTED_DURATION = 5 
+CONTRACT_EXPECTED_DURATION = 5 # مدة العقد بالثواني
+CHECK_DELAY_SECONDS = CONTRACT_EXPECTED_DURATION + 1 # 6 ثواني للانتظار قبل التحقق
 
 # --- SQLite Database Configuration ---
 DB_FILE = "trading_data_unique_martingale_balance.db" 
 
-# --- Database & Utility Functions ---
+# --- Database & Utility Functions (No changes needed here) ---
 def create_connection():
     try:
         conn = sqlite3.connect(DB_FILE)
@@ -69,7 +69,6 @@ def create_table_if_not_exists():
             conn.execute(sql_create_sessions_table)
             conn.execute(sql_create_bot_status_table)
             
-            # تحديث جدول sessions إذا كانت الأعمدة الجديدة مفقودة
             cursor = conn.execute("PRAGMA table_info(sessions)")
             columns = [col[1] for col in cursor.fetchall()]
             if 'under_contract_id' not in columns:
@@ -226,7 +225,7 @@ def update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_u
         finally:
             conn.close()
 
-# --- WebSocket Helper Functions (Updated to be more robust) ---
+# --- WebSocket Helper Functions ---
 def connect_websocket(user_token):
     ws = websocket.WebSocket()
     try:
@@ -237,20 +236,19 @@ def connect_websocket(user_token):
         # Wait up to 3 seconds for auth response
         for _ in range(30):
             try:
-                auth_response_str = ws.recv()
-                if auth_response_str:
-                    auth_response = json.loads(auth_response_str)
-                    if auth_response.get('msg_type') == 'authorize' or auth_response.get('error'): break
+                response_str = ws.recv()
+                if response_str:
+                    auth_response = json.loads(response_str)
+                    if auth_response.get('msg_type') == 'authorize' or auth_response.get('error'): 
+                        return ws
             except websocket.WebSocketTimeoutException:
                 time.sleep(0.1)
                 continue
             except Exception:
                 break
         
-        if auth_response.get('error'):
-            ws.close()
-            return None
-        return ws
+        if ws and ws.connected: ws.close()
+        return None
     except Exception: 
         if ws and ws.connected: ws.close()
         return None
@@ -263,13 +261,12 @@ def get_balance_and_currency(user_token):
             ws = connect_websocket(user_token)
             if not ws: 
                 time.sleep(0.5)
-                continue # فشل الاتصال، نجرب مرة أخرى
+                continue 
 
             balance_req = {"balance": 1}
             ws.send(json.dumps(balance_req))
             
             balance_response = None
-            # انتظار لرد API مع توقيت قصير
             for _ in range(5): 
                 response_str = ws.recv()
                 if response_str:
@@ -281,7 +278,6 @@ def get_balance_and_currency(user_token):
                         break
                 time.sleep(0.2) 
             
-            # إذا لم نحصل على رد صالح، نغلق الاتصال ونعيد المحاولة
             if ws and ws.connected: ws.close()
             time.sleep(0.5)
 
@@ -292,7 +288,7 @@ def get_balance_and_currency(user_token):
         finally:
             if ws and ws.connected: ws.close()
             
-    return None, None # بعد 3 محاولات فاشلة، نرجع None
+    return None, None
 
 def place_order(ws, contract_type, amount, currency, barrier):
     if not ws or not ws.connected: return {"error": {"message": "WebSocket not connected."}}
@@ -328,11 +324,18 @@ def place_order(ws, contract_type, amount, currency, barrier):
         buy_req = {"buy": proposal_id, "price": float(amount_decimal)}
         ws.send(json.dumps(buy_req))
         
-        while True:
-            response_str = ws.recv()
-            response = json.loads(response_str)
-            if response.get('msg_type') == 'buy': return response
-            elif response.get('error'): return response
+        # نستخدم مهلة زمنية للخروج من حلقة الـ recv لضمان عدم التعليق اللانهائي
+        start_time = time.time()
+        while time.time() - start_time < 5: 
+            try:
+                response_str = ws.recv()
+                if response_str:
+                    response = json.loads(response_str)
+                    if response.get('msg_type') == 'buy': return response
+                    elif response.get('error'): return response
+                time.sleep(0.1)
+            except Exception:
+                return {"error": {"message": "WebSocket read error during buy confirmation."}}
     
     return {"error": {"message": "Order placement failed or proposal missing."}}
 
@@ -358,24 +361,23 @@ def run_trading_job_for_user(session_data, check_only=False):
     balance_before_trade = session_data['balance_before_trade']
     
     
-    # 🌟 المرحلة 1: التحقق من النتيجة عبر الرصيد (trade_count = 1)
+    # 🌟 المرحلة 1: التحقق من النتيجة والانتهاء (trade_count = 1)
     if trade_count == 1:
         current_time = time.time()
         
-        # 🛑 إذا لم يمر وقت الصفقة، نخرج وننتظر الدورة التالية
-        if current_time - trade_start_time < CONTRACT_EXPECTED_DURATION + 1: 
+        # 🛑 الانتظار (Sleep) - يخرج البوت من الدالة ويعود للدخول في الحلقة التالية
+        if current_time - trade_start_time < CHECK_DELAY_SECONDS: 
             return 
         
         # ******** منطق التحقق والإغلاق الحاسم (وقت الصفقة انتهى) *********
         
         current_balance = None
         
-        # 1. محاولة جلب الرصيد - محمية بـ try/except (تتضمن 3 محاولات)
+        # 1. محاولة جلب الرصيد - محمية بـ try/except (لضمان عدم التعليق)
         try:
-            # لا نحتاج لـ WS هنا، دالة get_balance_and_currency تتصل بنفسها
             current_balance, currency = get_balance_and_currency(user_token)
         except Exception:
-            pass # إذا فشل الاتصال، فإن current_balance ستبقى None
+            pass 
 
         # 2. حساب النتيجة الصافية للدورة بناءً على الرصيد
         if current_balance is not None:
@@ -383,7 +385,6 @@ def run_trading_job_for_user(session_data, check_only=False):
             balance_diff = float(current_balance) - float(balance_before_trade)
             cycle_net_profit = round(balance_diff, 2)
             
-            # تحديث الـ Wins/Losses (فقط إذا نجحنا في جلب الرصيد)
             if cycle_net_profit != 0.0:
                  total_wins += 1 
                  total_losses += 1 
@@ -391,7 +392,7 @@ def run_trading_job_for_user(session_data, check_only=False):
              # 🛑 إذا فشل جلب الرصيد (بعد مرور الوقت): نفترض خسارة الدورة لضمان المضاعفة وعدم التوقف
              cycle_net_profit = -round(current_under_amount + current_over_amount, 2)
         
-        # 3. منطق المضاعفة على الخسارة الصافية للدورة
+        # 3. منطق المضاعفة (Martingale)
         if cycle_net_profit < 0:
             consecutive_net_losses += 1
             
@@ -404,7 +405,7 @@ def run_trading_job_for_user(session_data, check_only=False):
             current_under_amount = base_under_amount 
             current_over_amount = base_over_amount
         
-        # 🛑 شرط وقف الخسارة 
+        # 🛑 شرط وقف الخسارة (SL) 
         if consecutive_net_losses >= max_consecutive_losses:
             update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, trade_count=0, cycle_net_profit=0.0, initial_balance=initial_balance)
             update_is_running_status(email, 0)
@@ -416,21 +417,23 @@ def run_trading_job_for_user(session_data, check_only=False):
                                           trade_count=0, cycle_net_profit=cycle_net_profit, initial_balance=initial_balance, 
                                           under_contract_id=None, over_contract_id=None, trade_start_time=0.0, balance_before_trade=0.0)
         
-        return # انتهت المرحلة 1 بنجاح (سواء بالربح أو المضاعفة)
+        return # انتهت المرحلة 1 بنجاح
     
     # 🌟 المرحلة 2: الدخول في صفقات جديدة (trade_count = 0)
     elif trade_count == 0 and not check_only: 
         
         ws = None
         try:
-            # 1. جلب الرصيد والتحقق من TP
+            # 1. الاتصال بـ WebSocket لـ جلب الرصيد ووضع الصفقة
             ws = connect_websocket(user_token)
-            if not ws: return # إذا فشل الاتصال، نخرج ونعيد المحاولة فورا
-            
-            balance, currency = get_balance_and_currency(user_token)
-            if balance is None: return # إذا فشل الاتصال، نخرج ونعيد المحاولة فورا
+            if not ws: return 
 
-            # ... (بقية منطق التحقق من TP)
+            # 2. جلب الرصيد والتحقق من TP
+            balance, currency = get_balance_and_currency(user_token)
+            if balance is None: 
+                 return 
+
+            # التحقق من الرصيد المبدئي و TP
             if initial_balance == 0:
                 initial_balance = float(balance)
                 update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, trade_count, cycle_net_profit, initial_balance=initial_balance)
@@ -440,16 +443,16 @@ def run_trading_job_for_user(session_data, check_only=False):
                  update_is_running_status(email, 0)
                  return
             
-            # 2. تخزين الرصيد الأولي قبل الدخول
+            # 3. تخزين الرصيد الأولي قبل الدخول
             balance_before_trade = float(balance) 
             
             order_success = False
             
-            # --- 3. تنفيذ صفقة Under 3 ---
+            # --- 4. تنفيذ صفقة Under 3 ---
             amount_under = max(0.35, round(float(current_under_amount), 2))
             order_response_under = place_order(ws, "DIGITUNDER", amount_under, currency, 3)
             
-            # --- 4. تنفيذ صفقة Over 3 ---
+            # --- 5. تنفيذ صفقة Over 3 ---
             amount_over = max(0.35, round(float(current_over_amount), 2))
             order_response_over = place_order(ws, "DIGITOVER", amount_over, currency, 3)
             
@@ -458,7 +461,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                 order_success = True
 
             if order_success:
-                # --- 5. حفظ بيانات الصفقتين وبدء المراقبة ---
+                # --- 6. حفظ بيانات الصفقتين وبدء المراقبة ---
                 trade_start_time = time.time() 
                 
                 # الانتقال لـ trade_count=1
@@ -467,7 +470,6 @@ def run_trading_job_for_user(session_data, check_only=False):
                                                   initial_balance=initial_balance, under_contract_id="Active", over_contract_id="Active", trade_start_time=trade_start_time,
                                                   balance_before_trade=balance_before_trade)
             
-            # إذا فشلت الصفقة (order_success=False)، فإن trade_count ستبقى 0، وسيحاول الدخول فورا في دورة الحلقة التالية.
             return 
 
         except Exception:
@@ -480,7 +482,7 @@ def run_trading_job_for_user(session_data, check_only=False):
         return 
 
 
-# --- Main Bot Loop Function ---
+# --- Main Bot Loop Function (No changes needed here) ---
 def bot_loop():
     update_bot_running_status(1, os.getpid()) 
     while True:
@@ -497,12 +499,11 @@ def bot_loop():
                         
                     run_trading_job_for_user(latest_session_data, check_only=False) 
             
-            # زمن انتظار قصير للدخول الفوري
             time.sleep(0.1) 
         except Exception as e:
             time.sleep(5)
 
-# --- Streamlit App Configuration ---
+# --- Streamlit App Configuration (No changes needed here) ---
 st.set_page_config(page_title="Khoury Bot", layout="wide")
 st.title("Khoury Bot 🤖")
 
@@ -603,7 +604,6 @@ if st.session_state.logged_in:
             stats = st.session_state.stats
             
             initial_balance = stats.get('initial_balance', 0.0)
-            # نستخدم الدالة القوية لجلب الرصيد للعرض
             balance, _ = get_balance_and_currency(stats.get('user_token'))
             current_profit = 0.0
             if balance is not None and initial_balance != 0.0:
@@ -622,10 +622,8 @@ if st.session_state.logged_in:
             
             trade_count_status = stats.get('trade_count', 0)
             
-            # العرض يعتمد فقط على trade_count لضمان عدم التعليق في الواجهة
             if trade_count_status == 1:
-                # هذه الرسالة ستظهر طالما أن الوقت لم ينته، لكن البوت لن يعلق
-                st.warning("⚠ Monitoring active trades: Cycle is Active. (Check Balance in 6 seconds)")
+                st.warning(f"⚠ Monitoring active trades: Cycle is Active. (Checking balance after {CHECK_DELAY_SECONDS} seconds)")
             else: 
                 st.success(f"✅ Cycle complete. Starting new Cycle (Simultaneous).")
             
