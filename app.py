@@ -9,12 +9,13 @@ import pandas as pd
 from datetime import datetime
 import multiprocessing
 
-# --- GLOBAL CONFIGURATION ---
+# --- GLOBAL CONFIGURATION (MODIFIED) ---
 DB_FILE = "trading_data0099.db"
-TRADING_SYMBOL = "R_100"       # Changed from R_75 to R_100
-TRADE_DURATION = 5             # Changed from 1 tick to 5 ticks
+TRADING_SYMBOL = "R_100"       
+TRADE_DURATION = 2             # Changed from 5 ticks to 2 ticks
+ANALYSIS_COUNT = 2             # Changed from 5 ticks to 2 ticks for analysis
 
-# --- Database & Utility Functions (Unchanged from original structure, minor cleanup) ---
+# --- Database & Utility Functions (Unchanged) ---
 
 def create_connection():
     """Create a database connection to the SQLite database specified by DB_FILE"""
@@ -88,13 +89,6 @@ def get_bot_running_status():
                             # print(f"Bot process {pid} timed out. Marking as stopped.")
                             update_bot_running_status(0, 0) # Mark as stopped if no heartbeat
                             return 0
-                        
-                        # In a Linux environment, uncommenting the os.path.exists check is a good idea
-                        # if pid and os.path.exists(f"/proc/{pid}"): # Linux specific check
-                        #    return status 
-                        # else: # If the process is gone, mark as stopped
-                        #    update_bot_running_status(0, 0)
-                        #    return 0
                         return status # Assume running if heartbeat is recent
                     else:
                         return 0 # Bot is explicitly stopped
@@ -243,7 +237,7 @@ def connect_websocket(user_token):
             return None
         return ws
     except Exception as e:
-        print(f"Error connecting to WebSocket: {e}")
+        # print(f"Error connecting to WebSocket: {e}")
         return None
 
 def get_balance_and_currency(user_token):
@@ -298,35 +292,34 @@ def place_order(ws, proposal_id, amount):
 # --- Trading Bot Logic (MODIFIED) ---
 def analyse_data(df_ticks):
     """
-    Analyzes tick data to generate a trading signal based on the last 5 ticks trend.
-    This is the core signal generation based on the user's new strategy.
+    Analyzes tick data to generate a trading signal based on the last 2 ticks trend.
     """
-    # Need at least 5 ticks for the analysis
-    if len(df_ticks) < 5:
-        return "Neutral", "Insufficient data. Need at least 5 ticks."
+    # Need at least 2 ticks for the analysis
+    if len(df_ticks) < ANALYSIS_COUNT:
+        return "Neutral", "Insufficient data. Need at least 2 ticks."
 
-    # Use the last 5 ticks
-    last_5_ticks = df_ticks.tail(5).copy()
+    # Use the last 2 ticks
+    last_2_ticks = df_ticks.tail(ANALYSIS_COUNT).copy()
 
-    # Determine the trend based on the first and last price in the 5 ticks window
-    first_price = last_5_ticks.iloc[0]['price']
-    last_price = last_5_ticks.iloc[-1]['price']
+    # Determine the trend based on the first and last price in the 2 ticks window
+    first_price = last_2_ticks.iloc[0]['price']
+    last_price = last_2_ticks.iloc[-1]['price']
 
     signal = "Neutral"
-    message = "No clear trend detected on the last 5 ticks."
+    message = "No clear trend detected on the last 2 ticks."
 
     if last_price > first_price:
         signal = "Buy"
-        message = "Detected an uptrend on the last 5 ticks."
+        message = "Detected an uptrend on the last 2 ticks."
     elif last_price < first_price:
         signal = "Sell"
-        message = "Detected a downtrend on the last 5 ticks."
+        message = "Detected a downtrend on the last 2 ticks."
     
     return signal, message
 
 
 def run_trading_job_for_user(session_data, check_only=False):
-    """Executes the trading logic for a specific user's session."""
+    """Executes the trading logic for a specific user's session with immediate reconnection logic."""
     email = session_data['email']
     user_token = session_data['user_token']
     base_amount = session_data['base_amount']
@@ -345,11 +338,59 @@ def run_trading_job_for_user(session_data, check_only=False):
         if not ws:
             # print(f"Could not connect WebSocket for {email}")
             return
+            
+        # --- Helper function for receiving data with immediate reconnection ---
+        def safe_ws_recv(ws_obj, email, user_token):
+            """Receives data from WebSocket, attempting immediate reconnection on failure."""
+            nonlocal ws # Allow modification of the outer 'ws' variable
+            try:
+                # Attempt to receive data
+                response_str = ws_obj.recv()
+                if response_str:
+                    return json.loads(response_str)
+            except websocket._exceptions.WebSocketConnectionClosedException:
+                print(f"User {email}: WebSocket closed. Attempting immediate reconnection.")
+                ws_obj.close()
+                new_ws = connect_websocket(user_token)
+                if new_ws:
+                    print(f"User {email}: Successfully reconnected.")
+                    ws = new_ws # Update the main ws object to the new connection
+                    # After reconnecting, we should retry the receive operation in the main loop
+                    raise ConnectionRefusedError("Reconnected, please retry operation.")
+                else:
+                    print(f"User {email}: Failed to reconnect permanently.")
+                    raise ConnectionRefusedError("Permanent connection failure.")
+            except Exception as e:
+                # Handle non-connection errors (e.g. JSON decode error)
+                print(f"User {email}: Error during ws.recv or JSON load: {e}.")
+                return None
+            return None # Should be handled by the outer loop if response_str is None
 
         # --- Check for completed trades (if contract_id exists) ---
         if contract_id: 
-            contract_info = check_contract_status(ws, contract_id)
+            # Reconnection logic is inside safe_ws_recv, but we use check_contract_status here.
+            # We must wrap the call to check_contract_status with a retry loop manually
+            contract_info = None
+            for _ in range(3): # Max 3 retries for contract status check
+                try:
+                    # check_contract_status sends a message and waits for one response.
+                    # If it fails, the outer try/except catches the error.
+                    contract_info = check_contract_status(ws, contract_id)
+                    if contract_info:
+                        break # Success
+                except Exception as e:
+                    print(f"User {email}: Error during contract status check. Attempting reconnect.")
+                    ws.close()
+                    new_ws = connect_websocket(user_token)
+                    if new_ws:
+                        ws = new_ws # Update ws
+                        continue # Retry contract check
+                    else:
+                        print(f"User {email}: Failed to reconnect for contract check.")
+                        return # Exit the function
+            
             if contract_info and contract_info.get('is_sold'): # Trade has finished
+                # ... (Martingale/Stats Logic - UNCHANGED) ...
                 profit = float(contract_info.get('profit', 0))
                 
                 # Martingale/Stats Logic
@@ -362,9 +403,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                     total_losses += 1
                     next_bet = float(current_amount) * 2.1  # Martingale factor
                     current_amount = max(base_amount, next_bet)
-                # else: profit is 0 (keep stats same)
 
-                # Reset trade tracking after completion
                 new_contract_id = None
                 trade_start_time = 0.0
                 update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time)
@@ -404,69 +443,78 @@ def run_trading_job_for_user(session_data, check_only=False):
                 initial_balance = float(balance)
                 update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=None, trade_start_time=None)
             
-            # 1. (MODIFIED) Subscribe to Ticks and get initial history (need 5 ticks)
-            req = {"ticks_history": TRADING_SYMBOL, "end": "latest", "count": 5, "subscribe": 1, "style": "ticks"}
+            # 1. (MODIFIED) Subscribe to Ticks and get initial history (need 2 ticks)
+            req = {"ticks_history": TRADING_SYMBOL, "end": "latest", "count": ANALYSIS_COUNT, "subscribe": 1, "style": "ticks"}
             ws.send(json.dumps(req))
             
             tick_data = None
             
-            # Wait for initial history response and then start listening for ticks
+            # Wait for initial history response and the first new tick
             while True:
+                response = None
+                
+                # --- Immediate Reconnection Logic ---
                 try:
                     response_str = ws.recv()
                     if response_str:
                         response = json.loads(response_str)
-
-                        # Response is the initial history
-                        if response.get('msg_type') == 'history':
-                            tick_data = response
-                            # Continue to listen for the first tick that ends with '0'
-                            continue 
-                        
-                        # Response is a live tick
-                        elif response.get('msg_type') == 'tick':
-                            current_tick_price = response['tick']['quote']
-                            
-                            # Apply the entry condition: last digit of the price must be '0'
-                            price_str = str(current_tick_price)
-                            
-                            # Ensure the string is long enough to check the last digit
-                            if len(price_str) > 0 and price_str[-1] == '0':
-                                print(f"User {email}: Entry condition met (Price ends with 0). Proceeding with analysis.")
-                                # Update tick data to include the latest tick before breaking
-                                if 'history' in tick_data and 'prices' in tick_data['history']:
-                                    # Add the current tick to the history list for analysis
-                                    tick_data['history']['prices'].append(current_tick_price)
-                                    if len(tick_data['history']['prices']) > 5:
-                                        tick_data['history']['prices'] = tick_data['history']['prices'][-5:]
-                                break # Exit loop and place trade
-                            
-                            # Update tick data for subsequent checks (keep only the last 5 prices)
-                            if 'history' in tick_data and 'prices' in tick_data['history']:
-                                # Only keep the last 5 ticks in the list
-                                tick_data['history']['prices'] = tick_data['history']['prices'][-4:] + [current_tick_price]
-                                
-                            
-                        elif response.get('error'):
-                            print(f"Error getting ticks/history for {email}: {response['error']['message']}")
-                            ws.send(json.dumps({"forget_all": "ticks"})) # Forget subscription
-                            return
-                
                 except websocket._exceptions.WebSocketConnectionClosedException:
-                    print(f"WebSocket closed while waiting for tick for {email}")
-                    return
+                    print(f"User {email}: WebSocket closed during tick reception. Attempting immediate reconnection.")
+                    ws.close()
+                    new_ws = connect_websocket(user_token)
+                    if new_ws:
+                        print(f"User {email}: Successfully reconnected. Retrying tick reception.")
+                        ws = new_ws 
+                        # Re-send the subscription request after reconnecting
+                        ws.send(json.dumps(req))
+                        continue 
+                    else:
+                        print(f"User {email}: Failed to reconnect permanently for ticks.")
+                        return 
                 except Exception as e:
-                    print(f"Error receiving tick for {email}: {e}")
+                    print(f"User {email}: Error receiving tick: {e}")
+                    return 
+                # --- End Reconnection Logic ---
+
+
+                if response is None:
+                    continue # Try receiving again if response was empty or error occurred
+
+                # Response is the initial history
+                if response.get('msg_type') == 'history':
+                    tick_data = response
+                    
+                # Response is a live tick
+                elif response.get('msg_type') == 'tick':
+                    current_tick_price = response['tick']['quote']
+                    
+                    # 2. (REMOVED CONDITION) Removed the 'price ends with 0' condition. Trade immediately on the first received tick after history.
+                    
+                    if 'history' in tick_data and 'prices' in tick_data['history']:
+                        # Add the current tick to the history list for analysis
+                        tick_data['history']['prices'].append(current_tick_price)
+                        # Keep only the required number of ticks
+                        if len(tick_data['history']['prices']) > ANALYSIS_COUNT:
+                            tick_data['history']['prices'] = tick_data['history']['prices'][-ANALYSIS_COUNT:]
+                        
+                        # Once we have history data, and a new tick, we can proceed.
+                        if len(tick_data['history']['prices']) >= ANALYSIS_COUNT:
+                            break # Exit loop and place trade
+                        
+                    
+                elif response.get('error'):
+                    print(f"Error getting ticks/history for {email}: {response['error']['message']}")
+                    ws.send(json.dumps({"forget_all": "ticks"})) # Forget subscription
                     return
             
-            # 2. (MODIFIED) Stop subscription immediately after condition is met
+            # 3. Stop subscription immediately after we have the required ticks
             ws.send(json.dumps({"forget_all": "ticks"}))
             
             if 'history' in tick_data and 'prices' in tick_data['history']:
                 ticks = tick_data['history']['prices']
                 df_ticks = pd.DataFrame({'price': ticks})
                 
-                # Analysis
+                # Analysis (on 2 ticks)
                 signal, message = analyse_data(df_ticks)
                 print(f"User {email}: Signal = {signal}, Message = {message}")
 
@@ -474,7 +522,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                     contract_type = "CALL" if signal == 'Buy' else "PUT"
                     amount_to_bet = max(0.35, round(float(current_amount), 2)) 
 
-                    # 3. (MODIFIED) Get proposal for the trade on R_100 for 5 ticks
+                    # 4. (MODIFIED) Get proposal for the trade on R_100 for 2 ticks
                     proposal_req = {
                         "proposal": 1, "amount": amount_to_bet, "basis": "stake",
                         "contract_type": contract_type, "currency": currency,
@@ -483,20 +531,39 @@ def run_trading_job_for_user(session_data, check_only=False):
                     ws.send(json.dumps(proposal_req))
                     
                     proposal_response = None
-                    # Wait for proposal response
-                    try:
-                        while proposal_response is None:
+                    # Wait for proposal response with immediate reconnection
+                    while proposal_response is None:
+                        response = None
+                        # --- Immediate Reconnection Logic ---
+                        try:
                             response_str = ws.recv()
                             if response_str:
-                                proposal_response = json.loads(response_str)
-                                if proposal_response.get('error'):
-                                    print(f"Error getting proposal for {email}: {proposal_response['error']['message']}")
-                                    return
-                                if 'proposal' in proposal_response:
-                                    break 
-                    except Exception as e:
-                        print(f"Error receiving proposal for {email}: {e}")
-                        return
+                                response = json.loads(response_str)
+                        except websocket._exceptions.WebSocketConnectionClosedException:
+                            print(f"User {email}: WebSocket closed during proposal reception. Attempting immediate reconnection.")
+                            ws.close()
+                            new_ws = connect_websocket(user_token)
+                            if new_ws:
+                                print(f"User {email}: Successfully reconnected. Re-sending proposal request.")
+                                ws = new_ws 
+                                ws.send(json.dumps(proposal_req)) # Re-send proposal request
+                                continue 
+                            else:
+                                print(f"User {email}: Failed to reconnect permanently for proposal.")
+                                return 
+                        except Exception as e:
+                            print(f"Error receiving proposal for {email}: {e}")
+                            return 
+                        # --- End Reconnection Logic ---
+                        
+                        if response:
+                            proposal_response = response
+                            if proposal_response.get('error'):
+                                print(f"Error getting proposal for {email}: {proposal_response['error']['message']}")
+                                return
+                            if 'proposal' in proposal_response:
+                                break 
+                    
 
                     if proposal_response and 'proposal' in proposal_response:
                         proposal_id = proposal_response['proposal']['id']
@@ -519,8 +586,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                 print(f"User {email}: No tick history received or unexpected response format: {tick_data}")
     
     except websocket._exceptions.WebSocketConnectionClosedException:
-        print(f"WebSocket connection lost for user {email}. Will try to reconnect in next loop.")
-        # Save current state 
+        print(f"WebSocket connection lost for user {email} (Outer Catch). Will try to reconnect in next loop.")
         if contract_id: 
              update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=contract_id, trade_start_time=session_data.get('trade_start_time'))
 
@@ -528,14 +594,13 @@ def run_trading_job_for_user(session_data, check_only=False):
         print(f"An error occurred in run_trading_job_for_user for {email}: {e}")
     finally:
         if ws and ws.connected:
-            # Send forget_all to ensure no dangling subscriptions (just in case of failure before the intended forget_all)
             try:
                 ws.send(json.dumps({"forget_all": "ticks"})) 
             except:
                 pass 
             ws.close()
 
-# --- Main Bot Loop Function (Minor Update to remove timing constraint) ---
+# --- Main Bot Loop Function (Unchanged) ---
 def bot_loop():
     """Main loop that orchestrates trading jobs for all active sessions."""
     print("Bot process started. PID:", os.getpid())
@@ -562,22 +627,18 @@ def bot_loop():
                     trade_start_time = latest_session_data.get('trade_start_time')
                     
                     # --- Logic to check and close active trades ---
-                    # We check and process completed trades in every loop.
-                    # Since the trade duration is 5 ticks (very fast), we check status every loop.
                     if contract_id:
-                        # Allow a maximum of 10 seconds for the trade to be checked and processed
-                        if (time.time() - trade_start_time) >= 10: 
+                        # Allow a maximum of 5 seconds for a 2-tick trade to be checked and processed
+                        if (time.time() - trade_start_time) >= 5: 
                              print(f"User {email}: Trade {contract_id} time limit exceeded, checking status...")
                         
                         run_trading_job_for_user(latest_session_data, check_only=True) # check_only=True to only process completed trades and stop criteria
                     
                     # --- Logic to place new trades ---
-                    # The timing constraint (now.second == 0) has been removed because the entry is now based on the last digit of the price ('0').
-                    # We attempt to place a trade if there is no contract active.
                     elif not contract_id:
                         re_checked_session_data = get_session_status_from_db(email) 
                         if re_checked_session_data and re_checked_session_data.get('is_running') == 1 and not re_checked_session_data.get('contract_id'):
-                            # check_only=False ensures it will attempt to place a new trade by listening for the '0' condition
+                            # check_only=False ensures it will attempt to place a new trade immediately
                             run_trading_job_for_user(re_checked_session_data, check_only=False) 
             
             time.sleep(1) # Wait for 1 second before the next iteration
@@ -685,7 +746,7 @@ if st.session_state.logged_in:
                 "max_consecutive_losses": max_consecutive_losses
             }
             start_new_session_in_db(st.session_state.user_email, settings)
-            st.success("✅ Bot session started successfully! The bot is now listening for the price condition (last digit '0').")
+            st.success("✅ Bot session started successfully! It will now place trades based on the 2-tick trend.")
             st.rerun()
 
     if stop_button:
