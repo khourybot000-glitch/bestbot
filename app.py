@@ -6,13 +6,14 @@ import os
 import decimal
 import sqlite3
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone # 🚨 تم استيراد timezone هنا
 import multiprocessing
 
 # --- SQLite Database Configuration ---
 DB_FILE = "trading_data0099.db"
 
 # --- Database & Utility Functions (No change needed here) ---
+# ... (Functions: create_connection, create_table_if_not_exists, get_bot_running_status, etc. - No change)
 def create_connection():
     """Create a database connection to the SQLite database specified by DB_FILE"""
     try:
@@ -317,7 +318,7 @@ def place_order(ws, proposal_id, amount):
         print(f"Error placing order: {e}")
         return {"error": {"message": "Order placement failed."}}
 
-# --- Trading Bot Logic (SIMPLIFIED FOR CONSTANT TRADE) ---
+# --- Trading Bot Logic (MODIFIED FOR DEBUGGING) ---
 def run_trading_job_for_user(session_data, check_only=False):
     """Executes the trading logic for a specific user's session."""
     email = session_data['email']
@@ -340,6 +341,7 @@ def run_trading_job_for_user(session_data, check_only=False):
             return
 
         # --- Check for completed trades (if contract_id exists) ---
+        # ... (Martingale/Stop Loss/Take Profit logic remains the same)
         if contract_id: # This means a trade is currently open/in progress
             contract_info = check_contract_status(ws, contract_id)
             if contract_info and contract_info.get('is_sold'): # Trade has finished
@@ -401,12 +403,12 @@ def run_trading_job_for_user(session_data, check_only=False):
                 update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=None, trade_start_time=None)
             
             
-            # 🚨 SIMPLIFIED LOGIC: No analysis, always place trade
+            # SIMPLIFIED LOGIC: No analysis, always place trade
             
             # Ensure current_amount is valid for order placement
             amount_to_bet = max(0.35, round(float(current_amount), 2))
             
-            # 🚨 NOTOUCH CONFIGURATION 🚨
+            # NOTOUCH CONFIGURATION
             contract_type = "NOTOUCH" 
             barrier_value = '+0.5' 
             duration_value = 5 # 5 Ticks duration
@@ -432,12 +434,19 @@ def run_trading_job_for_user(session_data, check_only=False):
                     response_str = ws.recv()
                     if response_str:
                         response = json.loads(response_str)
+                        
+                        # 🚨 DEBUG: طباعة أي رسالة خطأ تتلقاها من Deriv
+                        if response.get('error'):
+                            print(f"\n🚨🚨 PROPOSAL ERROR for {email}: 🚨🚨")
+                            print(f"   Request Sent: {proposal_req}")
+                            print(f"   Error Response: {response['error']}")
+                            print("--------------------------------------------------\n")
+                            return # Stop and wait for the next minute
+                            
                         if response.get('msg_type') == 'proposal':
                              proposal_response = response
                              break
-                        elif response.get('error'):
-                            print(f"Error getting proposal for {email}: {response['error']['message']}")
-                            return
+                        
                 except websocket._exceptions.WebSocketConnectionClosedException:
                     print(f"WebSocket closed while waiting for proposal for {email}")
                     return
@@ -451,6 +460,14 @@ def run_trading_job_for_user(session_data, check_only=False):
                 # 2. Place the order
                 order_response = place_order(ws, proposal_id, amount_to_bet)
                 
+                # 🚨 DEBUG: طباعة أي رسالة خطأ في الـ Order
+                if order_response.get('error'):
+                    print(f"\n🚨🚨 ORDER (BUY) ERROR for {email}: 🚨🚨")
+                    print(f"   Proposal ID: {proposal_id}")
+                    print(f"   Error Response: {order_response['error']}")
+                    print("--------------------------------------------------\n")
+                    return # Stop and wait for the next minute
+                
                 if 'buy' in order_response and 'contract_id' in order_response['buy']:
                     new_contract_id = order_response['buy']['contract_id']
                     trade_start_time = time.time()
@@ -459,8 +476,10 @@ def run_trading_job_for_user(session_data, check_only=False):
                     # Update DB with new trade info
                     update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time)
                 else:
-                    print(f"User {email}: Failed to place order. Response: {order_response}")
+                    # Fallback for unexpected non-error failure (shouldn't happen often)
+                    print(f"User {email}: Failed to place order (Unknown issue). Full response: {order_response}")
             else:
+                # This should be caught by the DEBUG block above, but remains as a final fallback
                 print(f"User {email}: No proposal received or error in proposal response.")
     
     except websocket._exceptions.WebSocketConnectionClosedException:
@@ -475,7 +494,7 @@ def run_trading_job_for_user(session_data, check_only=False):
         if ws and ws.connected:
             ws.close()
 
-# --- Main Bot Loop Function ---
+# --- Main Bot Loop Function (Using UTC) ---
 def bot_loop():
     """Main loop that orchestrates trading jobs for all active sessions."""
     print("Bot process started. PID:", os.getpid())
@@ -483,7 +502,8 @@ def bot_loop():
     
     while True:
         try:
-            now = datetime.now()
+            # 🚨 استخدام التوقيت العالمي (UTC)
+            now = datetime.now(timezone.utc)
             
             # Update heartbeat to show this process is alive and well
             update_bot_running_status(1, os.getpid())
@@ -494,7 +514,6 @@ def bot_loop():
                 for session in active_sessions:
                     email = session['email']
                     
-                    # Get the most up-to-date session data from DB
                     latest_session_data = get_session_status_from_db(email)
                     if not latest_session_data or latest_session_data.get('is_running') == 0:
                         continue
@@ -502,19 +521,15 @@ def bot_loop():
                     contract_id = latest_session_data.get('contract_id')
                     trade_start_time = latest_session_data.get('trade_start_time', 0.0)
                     
-                    # 1. Check/close active trades and handle Martingale/Stop Loss/Take Profit
-                    # Check if trade duration exceeds the max allowed (5 ticks is usually ~5 seconds) + safety margin
-                    if contract_id and (time.time() - trade_start_time) >= 15: 
-                         # We call it with check_only=True to force a status check on old contracts
+                    # 1. Check/close active trades 
+                    if contract_id and (time.time() - trade_start_time) >= 10: 
                         print(f"User {email}: Trade {contract_id} exceeded time limit, checking status...")
                         run_trading_job_for_user(latest_session_data, check_only=True)
 
-                    # 2. Logic to place new trades - ONLY at second 0 if no contract is active
-                    # We re-fetch data just before placing a trade to ensure it's up-to-date
+                    # 2. Logic to place new trades - ONLY at second 0 (UTC)
                     if now.second == 0 and not contract_id: 
                         re_checked_session_data = get_session_status_from_db(email)
                         if re_checked_session_data and re_checked_session_data.get('is_running') == 1 and not re_checked_session_data.get('contract_id'):
-                             # The check_only=False ensures it will attempt to place a new trade
                             run_trading_job_for_user(re_checked_session_data, check_only=False) 
             
             time.sleep(1) # Wait for 1 second before the next iteration of the loop
@@ -523,6 +538,7 @@ def bot_loop():
             time.sleep(5)
 
 # --- Streamlit App Configuration ---
+# ... (Streamlit code remains the same)
 st.set_page_config(page_title="Khoury Bot", layout="wide")
 st.title("Khoury Bot 🤖")
 
@@ -674,7 +690,7 @@ if st.session_state.logged_in:
             if stats.get('contract_id'):
                 st.warning(f"⚠ Trade Active: {stats.get('contract_id')}. Stats update after completion.")
             elif stats.get('is_running') == 1:
-                 st.info("🕒 Waiting for next trade cycle (second 0).")
+                 st.info("🕒 Waiting for next trade cycle (second 0 UTC).")
 
     else:
         with stats_placeholder.container():
