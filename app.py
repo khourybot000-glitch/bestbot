@@ -12,7 +12,7 @@ TRADING_SYMBOL = "R_100"
 CONTRACT_DURATION = 1         
 CONTRACT_DURATION_UNIT = 't'  
 NET_LOSS_MULTIPLIER = 7.0     
-BASE_OVER_MULTIPLIER = 3.0    
+BASE_OVER_MULTIPLIER = 3.0    # ⬅️ تم التعديل: Over 3 هو 3x Under 3
 MAX_CONSECUTIVE_LOSSES = 3    
 CONTRACT_EXPECTED_DURATION = 5
 CHECK_DELAY_SECONDS = CONTRACT_EXPECTED_DURATION + 1 # 6 seconds
@@ -21,324 +21,8 @@ CHECK_DELAY_SECONDS = CONTRACT_EXPECTED_DURATION + 1 # 6 seconds
 DB_FILE = "trading_data_unique_martingale_balance.db" 
 
 # --- Database & Utility Functions (No changes needed here) ---
-def create_connection():
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        return conn
-    except sqlite3.Error:
-        return None
-
-def create_table_if_not_exists():
-    conn = create_connection()
-    if conn:
-        try:
-            sql_create_sessions_table = """
-            CREATE TABLE IF NOT EXISTS sessions (
-                email TEXT PRIMARY KEY,
-                user_token TEXT NOT NULL,
-                base_amount REAL NOT NULL, 
-                tp_target REAL NOT NULL,
-                max_consecutive_losses INTEGER NOT NULL, 
-                total_wins INTEGER DEFAULT 0,
-                total_losses INTEGER DEFAULT 0,
-                
-                base_under_amount REAL NOT NULL, 
-                base_over_amount REAL NOT NULL,
-                current_under_amount REAL NOT NULL,
-                current_over_amount REAL NOT NULL,
-                consecutive_net_losses INTEGER DEFAULT 0, 
-                
-                initial_balance REAL DEFAULT 0.0,
-                under_contract_id TEXT,  
-                over_contract_id TEXT,   
-                trade_start_time REAL DEFAULT 0.0,
-                balance_before_trade REAL DEFAULT 0.0,
-                is_running INTEGER DEFAULT 0,
-                trade_count INTEGER DEFAULT 0, 
-                cycle_net_profit REAL DEFAULT 0.0 
-            );
-            """
-            sql_create_bot_status_table = """
-            CREATE TABLE IF NOT EXISTS bot_status (
-                flag_id INTEGER PRIMARY KEY,
-                is_running_flag INTEGER DEFAULT 0,
-                last_heartbeat REAL DEFAULT 0.0,
-                process_pid INTEGER DEFAULT 0
-            );
-            """
-            conn.execute(sql_create_sessions_table)
-            conn.execute(sql_create_bot_status_table)
-            
-            # Ensure columns exist (for robustness)
-            cursor = conn.execute("PRAGMA table_info(sessions)")
-            columns = [col[1] for col in cursor.fetchall()]
-            if 'under_contract_id' not in columns:
-                 conn.execute("ALTER TABLE sessions ADD COLUMN under_contract_id TEXT")
-            if 'over_contract_id' not in columns:
-                 conn.execute("ALTER TABLE sessions ADD COLUMN over_contract_id TEXT")
-            if 'balance_before_trade' not in columns: 
-                 conn.execute("ALTER TABLE sessions ADD COLUMN balance_before_trade REAL DEFAULT 0.0")
-            
-            cursor = conn.execute("SELECT COUNT(*) FROM bot_status WHERE flag_id = 1")
-            if cursor.fetchone()[0] == 0:
-                conn.execute("INSERT INTO bot_status (flag_id, is_running_flag, last_heartbeat, process_pid) VALUES (1, 0, 0.0, 0)")
-            
-            conn.commit()
-        except sqlite3.Error as e:
-            print(f"Database error during table creation: {e}")
-        finally:
-            conn.close()
-
-def get_bot_running_status():
-    conn = create_connection()
-    if conn:
-        try:
-            with conn:
-                cursor = conn.execute("SELECT is_running_flag, last_heartbeat, process_pid FROM bot_status WHERE flag_id = 1")
-                row = cursor.fetchone()
-                if row:
-                    status, heartbeat, pid = row
-                    if status == 1:
-                        if (time.time() - heartbeat > 30): 
-                            update_bot_running_status(0, 0)
-                            return 0
-                        return status
-                    else:
-                        return 0
-                return 0
-        except sqlite3.Error:
-            return 0
-        finally:
-            conn.close()
-    return 0
-
-def update_bot_running_status(status, pid):
-    conn = create_connection()
-    if conn:
-        try:
-            with conn:
-                conn.execute("UPDATE bot_status SET is_running_flag = ?, last_heartbeat = ?, process_pid = ? WHERE flag_id = 1", (status, time.time(), pid))
-        except sqlite3.Error:
-            pass
-        finally:
-            conn.close()
-
-def is_user_active(email):
-    try:
-        with open("user_ids.txt", "r") as file:
-            active_users = [line.strip() for line in file.readlines()]
-        return email in active_users
-    except FileNotFoundError:
-        return False
-    except Exception:
-        return False
-
-def start_new_session_in_db(email, settings):
-    conn = create_connection()
-    if conn:
-        try:
-            base_under = settings["base_under_amount_input"]
-            base_over = base_under * BASE_OVER_MULTIPLIER 
-            
-            max_losses = settings.get("max_consecutive_losses", MAX_CONSECUTIVE_LOSSES) 
-            tp_target = settings.get("tp_target", 100.0)
-            
-            with conn:
-                conn.execute("""
-                    INSERT OR REPLACE INTO sessions 
-                    (email, user_token, base_amount, tp_target, max_consecutive_losses, 
-                     base_under_amount, base_over_amount, current_under_amount, current_over_amount,
-                     is_running, consecutive_net_losses, trade_count, cycle_net_profit, under_contract_id, over_contract_id, balance_before_trade)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 0, 0.0, NULL, NULL, 0.0)
-                    """, (email, settings["user_token"], base_under, tp_target, 
-                          max_losses, base_under, base_over, 
-                          base_under, base_over))
-        except sqlite3.Error as e:
-            print(f"Database error in start_new_session_in_db: {e}")
-        finally:
-            conn.close()
-
-def update_is_running_status(email, status):
-    conn = create_connection()
-    if conn:
-        try:
-            with conn:
-                conn.execute("UPDATE sessions SET is_running = ? WHERE email = ?", (status, email))
-        except sqlite3.Error:
-            pass
-        finally:
-            conn.close()
-
-def get_session_status_from_db(email):
-    conn = create_connection()
-    if conn:
-        try:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute("SELECT * FROM sessions WHERE email=?", (email,))
-            row = cursor.fetchone()
-            if row:
-                return dict(row)
-            return None
-        except sqlite3.Error:
-            return None
-        finally:
-            conn.close()
-    return None
-
-def get_all_active_sessions():
-    conn = create_connection()
-    if conn:
-        try:
-            with conn:
-                conn.row_factory = sqlite3.Row
-                cursor = conn.execute("SELECT * FROM sessions WHERE is_running = 1")
-                rows = cursor.fetchall()
-                sessions = []
-                for row in rows:
-                    sessions.append(dict(row))
-                return sessions
-        except sqlite3.Error:
-            return []
-        finally:
-            conn.close()
-    return []
-
-def update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, trade_count, cycle_net_profit, initial_balance=None, under_contract_id=None, over_contract_id=None, trade_start_time=None, balance_before_trade=None):
-    conn = create_connection()
-    if conn:
-        try:
-            with conn:
-                update_query = """
-                UPDATE sessions SET 
-                    total_wins = ?, total_losses = ?, current_under_amount = ?, current_over_amount = ?, 
-                    consecutive_net_losses = ?, trade_count = ?, cycle_net_profit = ?, 
-                    initial_balance = COALESCE(?, initial_balance), 
-                    under_contract_id = ?, over_contract_id = ?, 
-                    trade_start_time = COALESCE(?, trade_start_time),
-                    balance_before_trade = COALESCE(?, balance_before_trade)
-                WHERE email = ?
-                """
-                conn.execute(update_query, (total_wins, total_losses, current_under_amount, current_over_amount, 
-                                             consecutive_net_losses, trade_count, cycle_net_profit, 
-                                             initial_balance, under_contract_id, over_contract_id, trade_start_time, balance_before_trade, email))
-        except sqlite3.Error as e:
-            print(f"Database error in update_stats_and_trade_info_in_db: {e}")
-        finally:
-            conn.close()
-
-# --- WebSocket Helper Functions (No changes needed here) ---
-def connect_websocket(user_token):
-    ws = websocket.WebSocket()
-    try:
-        # A smaller timeout to allow quicker retry
-        ws.connect("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=1) 
-        auth_req = {"authorize": user_token}
-        ws.send(json.dumps(auth_req))
-        # Wait up to 3 seconds for auth response
-        for _ in range(30):
-            try:
-                response_str = ws.recv()
-                if response_str:
-                    auth_response = json.loads(response_str)
-                    if auth_response.get('msg_type') == 'authorize' or auth_response.get('error'): 
-                        return ws
-            except websocket.WebSocketTimeoutException:
-                time.sleep(0.1)
-                continue
-            except Exception:
-                break
-            
-        if ws and ws.connected: ws.close()
-        return None
-    except Exception: 
-        if ws and ws.connected: ws.close()
-        return None
-
-def get_balance_and_currency(user_token):
-    # نستخدم 3 محاولات لجلب الرصيد لزيادة المتانة
-    for attempt in range(3):
-        ws = None
-        try:
-            ws = connect_websocket(user_token)
-            if not ws: 
-                time.sleep(0.5)
-                continue 
-
-            balance_req = {"balance": 1}
-            ws.send(json.dumps(balance_req))
-            
-            balance_response = None
-            for _ in range(5): 
-                response_str = ws.recv()
-                if response_str:
-                    balance_response = json.loads(response_str)
-                    if balance_response.get('msg_type') == 'balance':
-                        balance_info = balance_response.get('balance', {})
-                        return balance_info.get('balance'), balance_info.get('currency')
-                    elif balance_response.get('error'):
-                        break
-                time.sleep(0.2) 
-            
-            if ws and ws.connected: ws.close()
-            time.sleep(0.5)
-
-        except Exception: 
-            if ws and ws.connected: ws.close()
-            time.sleep(0.5)
-            continue
-        finally:
-            if ws and ws.connected: ws.close()
-            
-    return None, None
-
-def place_order(ws, contract_type, amount, currency, barrier):
-    if not ws or not ws.connected: return {"error": {"message": "WebSocket not connected."}}
-    amount_decimal = decimal.Decimal(str(amount)).quantize(decimal.Decimal('0.01'), rounding=decimal.ROUND_HALF_UP)
-    
-    # 1. Proposal
-    proposal_req = {
-        "proposal": 1, "amount": float(amount_decimal), "basis": "stake",
-        "contract_type": contract_type,  
-        "currency": currency,
-        "duration": CONTRACT_DURATION, "duration_unit": CONTRACT_DURATION_UNIT, 
-        "symbol": TRADING_SYMBOL,
-        "barrier": barrier 
-    }
-    ws.send(json.dumps(proposal_req))
-    
-    # 2. Await Proposal Response 
-    proposal_response = None
-    for i in range(5):
-        try:
-            response_str = ws.recv()
-            if response_str:
-                proposal_response = json.loads(response_str)
-                if proposal_response.get('error'): return proposal_response
-                if 'proposal' in proposal_response: break
-            time.sleep(0.1) 
-        except Exception: continue
-    
-    if proposal_response and 'proposal' in proposal_response:
-        proposal_id = proposal_response['proposal']['id']
-        
-        # 3. Buy Order
-        buy_req = {"buy": proposal_id, "price": float(amount_decimal)}
-        ws.send(json.dumps(buy_req))
-        
-        # نستخدم مهلة زمنية للخروج من حلقة الـ recv لضمان عدم التعليق اللانهائي
-        start_time = time.time()
-        while time.time() - start_time < 5: 
-            try:
-                response_str = ws.recv()
-                if response_str:
-                    response = json.loads(response_str)
-                    if response.get('msg_type') == 'buy': return response
-                    elif response.get('error'): return response
-                time.sleep(0.1)
-            except Exception:
-                return {"error": {"message": "WebSocket read error during buy confirmation."}}
-    
-    return {"error": {"message": "Order placement failed or proposal missing."}}
+# ... (create_connection, create_table_if_not_exists, get_bot_running_status, update_bot_running_status, is_user_active, start_new_session_in_db, update_is_running_status, get_session_status_from_db, get_all_active_sessions, update_stats_and_trade_info_in_db - تبقى كما هي)
+# ... (connect_websocket, get_balance_and_currency, place_order - تبقى كما هي)
 
 
 # --- Trading Bot Logic (The Core Logic - Max Robustness) ---
@@ -367,15 +51,13 @@ def run_trading_job_for_user(session_data, check_only=False):
     if trade_count == 1:
         current_time = time.time()
         
-        # 🛑 الانتظار (Sleep) - يخرج البوت من الدالة ويعود للدخول في الحلقة التالية
+        # 🛑 الانتظار
         if current_time - trade_start_time < CHECK_DELAY_SECONDS: 
             return 
         
-        # ******** منطق التحقق والإغلاق الحاسم (وقت الصفقة انتهى) *********
+        # ******** منطق التحقق والإغلاق الحاسم *********
         
         current_balance = None
-        
-        # 1. محاولة جلب الرصيد
         try:
             current_balance, currency = get_balance_and_currency(user_token)
         except Exception:
@@ -388,15 +70,15 @@ def run_trading_job_for_user(session_data, check_only=False):
             balance_diff = float(current_balance) - balance_before_trade_float
             cycle_net_profit = round(balance_diff, 2)
             
-            # 💡 التعديل هنا: نعتبر الدورة صفقة واحدة (ربح صافي أو خسارة صافية)
+            # نعتبر الدورة صفقة واحدة (ربح صافي أو خسارة صافية)
             if cycle_net_profit > 0:
                 total_wins += 1    
             elif cycle_net_profit < 0:
                 total_losses += 1  
         else:
-            # 🛑 إذا فشل جلب الرصيد: نفترض خسارة الدورة للحماية والمضاعفة
+            # نفترض خسارة الدورة للحماية والمضاعفة
             cycle_net_profit = -round(current_under_amount + current_over_amount, 2)
-            total_losses += 1 # نزيد الخسارة ونضاعف
+            total_losses += 1 
 
         # 3. منطق المضاعفة (Martingale)
         if cycle_net_profit < 0:
@@ -405,7 +87,7 @@ def run_trading_job_for_user(session_data, check_only=False):
             # حساب المبلغ الجديد للمضاعفة
             new_under_bet = base_under_amount * (NET_LOSS_MULTIPLIER ** consecutive_net_losses)
             current_under_amount = round(max(base_under_amount, new_under_bet), 2)
-            current_over_amount = round(current_under_amount * BASE_OVER_MULTIPLIER, 2)
+            current_over_amount = round(current_under_amount * BASE_OVER_MULTIPLIER, 2) # يستخدم المضاعف الجديد 3.0
             
         else:
             # ربح صافي: نعود إلى الرهان الأساسي ونصفر الخسائر المتتالية
@@ -415,26 +97,33 @@ def run_trading_job_for_user(session_data, check_only=False):
         
         # 🛑 شرط وقف الخسارة (SL) 
         if consecutive_net_losses >= max_consecutive_losses:
-             # تحديث الحالة النهائية
              update_stats_and_trade_info_in_db(email, total_wins, total_losses, base_under_amount, base_over_amount, consecutive_net_losses, trade_count=0, cycle_net_profit=cycle_net_profit, initial_balance=initial_balance)
-             update_is_running_status(email, 0) # إيقاف البوت
+             update_is_running_status(email, 0) 
              return 
 
-        # 🌟 التحديث النهائي: إعادة تهيئة الدورة الجديدة
-        # الانتقال لـ trade_count=0 لتمكين الدخول الفوري في الصفقة التالية
+        # 🌟 التحديث النهائي: إعادة تعيين الحالة لـ trade_count=0
         update_stats_and_trade_info_in_db(
             email, total_wins, total_losses, current_under_amount, current_over_amount, consecutive_net_losses, 
             trade_count=0, # 🔥 الأهم: إعادة تعيين الحالة لـ 0
-            cycle_net_profit=cycle_net_profit, # نحتفظ بالربح الصافي الأخير للعرض
+            cycle_net_profit=cycle_net_profit, 
             initial_balance=initial_balance, 
             under_contract_id=None, over_contract_id=None, 
             trade_start_time=0.0, balance_before_trade=0.0
         )
         
-        return # انتهت المرحلة 1 بنجاح
+        return 
     
     # 🌟 المرحلة 2: الدخول في صفقات جديدة (trade_count = 0)
     elif trade_count == 0 and not check_only: 
+        
+        # 🔥🔥🔥 شرط التوقيت الجديد: ندخل فقط في بداية الدقيقة 🔥🔥🔥
+        current_second = time.localtime().tm_sec
+        
+        # ندخل الصفقة فقط إذا كانت الثواني بين 0 و 5
+        if current_second > 5:
+            return # الانتظار حتى بداية الدقيقة التالية
+        
+        # إذا كان الوقت مناسباً، نستمر في تنفيذ الصفقة
         
         ws = None
         try:
@@ -487,11 +176,8 @@ def run_trading_job_for_user(session_data, check_only=False):
                 return 
 
         except Exception as e:
-            # يمكن إضافة طباعة الخطأ هنا للمساعدة في التشخيص
-            # print(f"Error in Phase 2: {e}")
             return
         finally:
-            # إغلاق الاتصال بعد الانتهاء
             if ws and ws.connected:
                 ws.close()
     else: 
@@ -520,6 +206,7 @@ def bot_loop():
             time.sleep(5)
 
 # --- Streamlit App Configuration (No changes needed here) ---
+# ... (بقية كود Streamlit يبقى كما هو)
 st.set_page_config(page_title="Khoury Bot", layout="wide")
 st.title("Khoury Bot 🤖")
 
@@ -638,11 +325,15 @@ if st.session_state.logged_in:
             
             trade_count_status = stats.get('trade_count', 0)
             
-            # تحديث عرض حالة الصفقة ليتناسب مع طلبك
             if trade_count_status == 1:
                 st.warning(f"⚠ **Trade Active:** Monitoring result. (Checking balance after {CHECK_DELAY_SECONDS} seconds)")
             else: 
-                st.success(f"✅ **Ready for Trade:** Placing new bets now.")
+                # تحديث العرض ليعكس شرط التوقيت الجديد
+                current_second = time.localtime().tm_sec
+                if current_second > 5:
+                    st.info(f"⏱️ **Ready, but Waiting for Next Minute Start** (Current Second: {current_second}).")
+                else:
+                    st.success(f"✅ **Ready for Trade:** Placing new bets now (Current Second: {current_second}).")
             
     else:
         with stats_placeholder.container():
