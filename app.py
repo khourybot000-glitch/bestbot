@@ -325,10 +325,10 @@ def analyse_data(df_ticks):
     trend_15 = "Neutral" # تم التعديل
     # إذا كان سعر التيك الأخير (index 1) أكبر من سعر التيك ما قبل الأخير (index 0)
     if last_15_ticks.iloc[-1]['price'] > last_15_ticks.iloc[0]['price']:
-        trend_15 = "Buy"
+        trend_15 = "Sell"
     # إذا كان سعر التيك الأخير أقل من سعر التيك ما قبل الأخير
     elif last_15_ticks.iloc[-1]['price'] < last_15_ticks.iloc[0]['price']:
-        trend_15 = "Sell"
+        trend_15 = "Buy"
 
     if trend_15 == "Buy":
         return "Sell", "Detected an uptrend in the last 2 ticks."
