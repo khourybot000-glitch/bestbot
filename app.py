@@ -315,24 +315,24 @@ def analyse_data(df_ticks):
     """
     Analyzes tick data to generate a trading signal based on the last 2 ticks.
     """
-    if len(df_ticks) < 2: # تم التعديل
+    if len(df_ticks) < 5: # تم التعديل
         return "Neutral", "Insufficient data. Need at least 2 ticks."
 
     # Get the last 2 ticks for the analysis
-    last_2_ticks = df_ticks.tail(2).copy()
+    last_5_ticks = df_ticks.tail(5).copy()
  
     # Determine the trend of the last 2 ticks
-    trend_2 = "Neutral" # تم التعديل
+    trend_5 = "Neutral" # تم التعديل
     # إذا كان سعر التيك الأخير (index 1) أكبر من سعر التيك ما قبل الأخير (index 0)
-    if last_2_ticks.iloc[-1]['price'] > last_2_ticks.iloc[0]['price']:
-        trend_2 = "Buy"
+    if last_5_ticks.iloc[-1]['price'] > last_5_ticks.iloc[0]['price']:
+        trend_5 = "Buy"
     # إذا كان سعر التيك الأخير أقل من سعر التيك ما قبل الأخير
-    elif last_2_ticks.iloc[-1]['price'] < last_2_ticks.iloc[0]['price']:
-        trend_2 = "Sell"
+    elif last_5_ticks.iloc[-1]['price'] < last_5_ticks.iloc[0]['price']:
+        trend_5 = "Sell"
 
-    if trend_2 == "Buy":
+    if trend_5 == "Buy":
         return "Sell", "Detected an uptrend in the last 2 ticks."
-    elif trend_2 == "Sell":
+    elif trend_5 == "Sell":
         return "Buy", "Detected a downtrend in the last 2 ticks."
     
     return "Neutral", "No clear signal from 2-tick analysis." # تم التعديل
@@ -415,7 +415,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                 update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=None, trade_start_time=None)
             
             # Get latest ticks for analysis
-            req = {"ticks_history": "R_100", "end": "latest", "count": 2, "style": "ticks"} # تم التعديل إلى 5 تيكات
+            req = {"ticks_history": "R_100", "end": "latest", "count": 5, "style": "ticks"} # تم التعديل إلى 5 تيكات
             ws.send(json.dumps(req))
             tick_data = None
             # Wait for the ticks history response
