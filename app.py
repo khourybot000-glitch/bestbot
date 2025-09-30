@@ -331,9 +331,9 @@ def analyse_data(df_ticks):
         trend_5 = "Sell"
 
     if trend_5 == "Buy":
-        return "Buy", "Detected an uptrend in the last 2 ticks."
+        return "Sell", "Detected an uptrend in the last 2 ticks."
     elif trend_5 == "Sell":
-        return "Sell", "Detected a downtrend in the last 2 ticks."
+        return "Buy", "Detected a downtrend in the last 2 ticks."
     
     return "Neutral", "No clear signal from 2-tick analysis." # تم التعديل
 
