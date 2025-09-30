@@ -450,7 +450,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                     proposal_req = {
                         "proposal": 1, "amount": amount_to_bet, "basis": "stake",
                         "contract_type": contract_type, "currency": currency,
-                        "duration": 1, "duration_unit": "t", "symbol": "R_100" # تم التأكيد أن المدة 2 تيك
+                        "duration": 5, "duration_unit": "t", "symbol": "R_100" # تم التأكيد أن المدة 2 تيك
                     }
                     ws.send(json.dumps(proposal_req))
                     
@@ -533,7 +533,7 @@ def bot_loop():
                     # --- Logic to check and close active trades ---
                     if contract_id:
                         # Check if trade duration exceeds a reasonable limit (e.g., 5 seconds for 2-tick trades)
-                        if (time.time() - trade_start_time) >= 5: 
+                        if (time.time() - trade_start_time) >= 13: 
                             print(f"User {email}: Trade {contract_id} might be stuck, checking status...")
                             run_trading_job_for_user(latest_session_data, check_only=True) # check_only=True to only process completed trades and stop criteria
                         
