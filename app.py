@@ -450,7 +450,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                     proposal_req = {
                         "proposal": 1, "amount": amount_to_bet, "basis": "stake",
                         "contract_type": contract_type, "currency": currency,
-                        "duration": 120, "duration_unit": "s", "symbol": "R_50" # تم التأكيد أن المدة 2 تيك
+                        "duration": 2, "duration_unit": "m", "symbol": "R_50" # تم التأكيد أن المدة 2 تيك
                     }
                     ws.send(json.dumps(proposal_req))
                     
