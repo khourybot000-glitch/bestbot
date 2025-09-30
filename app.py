@@ -315,24 +315,24 @@ def analyse_data(df_ticks):
     """
     Analyzes tick data to generate a trading signal based on the last 2 ticks.
     """
-    if len(df_ticks) < 60: # تم التعديل
+    if len(df_ticks) < 30: # تم التعديل
         return "Neutral", "Insufficient data. Need at least 2 ticks."
 
     # Get the last 2 ticks for the analysis
-    last_60_ticks = df_ticks.tail(60).copy()
+    last_30_ticks = df_ticks.tail(30).copy()
  
     # Determine the trend of the last 2 ticks
-    trend_60 = "Neutral" # تم التعديل
+    trend_30 = "Neutral" # تم التعديل
     # إذا كان سعر التيك الأخير (index 1) أكبر من سعر التيك ما قبل الأخير (index 0)
-    if last_60_ticks.iloc[-1]['price'] > last_60_ticks.iloc[0]['price']:
-        trend_60 = "Sell"
+    if last_30_ticks.iloc[-1]['price'] > last_30_ticks.iloc[0]['price']:
+        trend_30 = "Sell"
     # إذا كان سعر التيك الأخير أقل من سعر التيك ما قبل الأخير
-    elif last_60_ticks.iloc[-1]['price'] < last_60_ticks.iloc[0]['price']:
-        trend_60 = "Buy"
+    elif last_30_ticks.iloc[-1]['price'] < last_30_ticks.iloc[0]['price']:
+        trend_30 = "Buy"
 
-    if trend_60 == "Buy":
+    if trend_30 == "Buy":
         return "Sell", "Detected an uptrend in the last 2 ticks."
-    elif trend_60 == "Sell":
+    elif trend_30 == "Sell":
         return "Buy", "Detected a downtrend in the last 2 ticks."
     
     return "Neutral", "No clear signal from 2-tick analysis." # تم التعديل
@@ -415,7 +415,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                 update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=None, trade_start_time=None)
             
             # Get latest ticks for analysis
-            req = {"ticks_history": "R_100", "end": "latest", "count": 60, "style": "ticks"} # تم التعديل إلى 5 تيكات
+            req = {"ticks_history": "R_100", "end": "latest", "count": 30, "style": "ticks"} # تم التعديل إلى 5 تيكات
             ws.send(json.dumps(req))
             tick_data = None
             # Wait for the ticks history response
@@ -450,7 +450,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                     proposal_req = {
                         "proposal": 1, "amount": amount_to_bet, "basis": "stake",
                         "contract_type": contract_type, "currency": currency,
-                        "duration": 1, "duration_unit": "m", "symbol": "R_100" # تم التأكيد أن المدة 2 تيك
+                        "duration": 30, "duration_unit": "s", "symbol": "R_100" # تم التأكيد أن المدة 2 تيك
                     }
                     ws.send(json.dumps(proposal_req))
                     
@@ -533,7 +533,7 @@ def bot_loop():
                     # --- Logic to check and close active trades ---
                     if contract_id:
                         # Check if trade duration exceeds a reasonable limit (e.g., 5 seconds for 2-tick trades)
-                        if (time.time() - trade_start_time) >= 65: 
+                        if (time.time() - trade_start_time) >= 35: 
                             print(f"User {email}: Trade {contract_id} might be stuck, checking status...")
                             run_trading_job_for_user(latest_session_data, check_only=True) # check_only=True to only process completed trades and stop criteria
                         
