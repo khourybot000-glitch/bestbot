@@ -414,7 +414,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                 update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=None, trade_start_time=None)
             
             # Get latest ticks for analysis
-            req = {"ticks_history": "R_10", "end": "latest", "count": 30, "style": "ticks"}
+            req = {"ticks_history": "R_100", "end": "latest", "count": 30, "style": "ticks"}
             ws.send(json.dumps(req))
             tick_data = None
             # Wait for the ticks history response
@@ -449,7 +449,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                     proposal_req = {
                         "proposal": 1, "amount": amount_to_bet, "basis": "stake",
                         "contract_type": contract_type, "currency": currency,
-                        "duration": 5, "duration_unit": "t", "symbol": "R_10"
+                        "duration": 5, "duration_unit": "t", "symbol": "R_100"
                     }
                     ws.send(json.dumps(proposal_req))
                     
