@@ -483,11 +483,11 @@ def run_trading_job_for_user(session_data, check_only=False):
                             # Update DB with new trade info
                             update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time)
                         else:
-                           # print(f"User {email}: Failed to place order. Response: {order_response}")
+                            print(f"User {email}: Failed to place order. Response: {order_response}")
                     else:
-                       # print(f"User {email}: No proposal received or error in proposal response. Response: {proposal_response}")
+                        print(f"User {email}: No proposal received or error in proposal response. Response: {proposal_response}")
             else:
-               # print(f"User {email}: No tick history received or unexpected response format: {tick_data}")
+                print(f"User {email}: No tick history received or unexpected response format: {tick_data}")
     
     except websocket._exceptions.WebSocketConnectionClosedException:
        # print(f"WebSocket connection lost for user {email}. Will try to reconnect.")
@@ -496,7 +496,7 @@ def run_trading_job_for_user(session_data, check_only=False):
              update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=contract_id, trade_start_time=session_data.get('trade_start_time'))
 
     except Exception as e:
-       # print(f"An error occurred in run_trading_job_for_user for {email}: {e}")
+        print(f"An error occurred in run_trading_job_for_user for {email}: {e}")
     finally:
         if ws and ws.connected:
             ws.close()
@@ -553,7 +553,7 @@ def bot_loop():
             
             time.sleep(1) # Wait for 1 second before the next iteration of the loop
         except Exception as e:
-           # print(f"Error in bot_loop main loop: {e}. Sleeping for 5 seconds before retrying.")
+            print(f"Error in bot_loop main loop: {e}. Sleeping for 5 seconds before retrying.")
             time.sleep(5) # Sleep longer if an error occurs to avoid rapid failure
 
 # --- Streamlit App Configuration ---
@@ -602,7 +602,7 @@ if bot_status_from_db == 0: # Bot is not running or was timed out/crashed
         st.error(f"❌ Error starting bot process: {e}")
 else:
     # Bot is already running (status is 1)
-   # print("Bot process is already running (status from DB).")
+    print("Bot process is already running (status from DB).")
 
 # --- Login Section ---
 if not st.session_state.logged_in:
