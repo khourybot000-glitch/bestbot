@@ -65,7 +65,7 @@ def create_table_if_not_exists():
             
             conn.commit()
         except sqlite3.Error as e:
-           # print(f"Database error during table creation: {e}") # For debugging
+            print(f"Database error during table creation: {e}") # For debugging
         finally:
             conn.close()
 
@@ -102,7 +102,7 @@ def get_bot_running_status():
                         return 0 # Bot is explicitly stopped
                 return 0 # No status found, assume stopped
         except sqlite3.Error as e:
-           # print(f"Database error in get_bot_running_status: {e}")
+            print(f"Database error in get_bot_running_status: {e}")
             return 0
         finally:
             conn.close()
@@ -116,7 +116,7 @@ def update_bot_running_status(status, pid):
             with conn:
                 conn.execute("UPDATE bot_status SET is_running_flag = ?, last_heartbeat = ?, process_pid = ? WHERE flag_id = 1", (status, time.time(), pid))
         except sqlite3.Error as e:
-           # print(f"Database error in update_bot_running_status: {e}")
+            print(f"Database error in update_bot_running_status: {e}")
         finally:
             conn.close()
 
@@ -130,7 +130,7 @@ def is_any_session_running():
                 count = cursor.fetchone()[0]
                 return count > 0
         except sqlite3.Error as e:
-           # print(f"Database error in is_any_session_running: {e}")
+            print(f"Database error in is_any_session_running: {e}")
             return True # Assume running to be safe
         finally:
             conn.close()
@@ -145,7 +145,7 @@ def is_user_active(email):
     except FileNotFoundError:
         return False
     except Exception as e:
-       # print(f"Error reading user_ids.txt: {e}")
+        print(f"Error reading user_ids.txt: {e}")
         return False
 
 def start_new_session_in_db(email, settings):
@@ -160,7 +160,7 @@ def start_new_session_in_db(email, settings):
                     VALUES (?, ?, ?, ?, ?, ?, 1)
                     """, (email, settings["user_token"], settings["base_amount"], settings["tp_target"], settings["max_consecutive_losses"], settings["base_amount"]))
         except sqlite3.Error as e:
-           # print(f"Database error in start_new_session_in_db: {e}")
+            print(f"Database error in start_new_session_in_db: {e}")
         finally:
             conn.close()
 
@@ -172,7 +172,7 @@ def update_is_running_status(email, status):
             with conn:
                 conn.execute("UPDATE sessions SET is_running = ? WHERE email = ?", (status, email))
         except sqlite3.Error as e:
-          #  print(f"Database error in update_is_running_status: {e}")
+            print(f"Database error in update_is_running_status: {e}")
         finally:
             conn.close()
 
@@ -184,7 +184,7 @@ def clear_session_data(email):
             with conn:
                 conn.execute("DELETE FROM sessions WHERE email=?", (email,))
         except sqlite3.Error as e:
-           # print(f"Database error in clear_session_data: {e}")
+            print(f"Database error in clear_session_data: {e}")
         finally:
             conn.close()
 
@@ -200,7 +200,7 @@ def get_session_status_from_db(email):
                 return dict(row)
             return None
         except sqlite3.Error as e:
-           # print(f"Database error in get_session_status_from_db: {e}")
+            print(f"Database error in get_session_status_from_db: {e}")
             return None
         finally:
             conn.close()
@@ -220,7 +220,7 @@ def get_all_active_sessions():
                     sessions.append(dict(row))
                 return sessions
         except sqlite3.Error as e:
-          #  print(f"Database error in get_all_active_sessions: {e}")
+            print(f"Database error in get_all_active_sessions: {e}")
             return []
         finally:
             conn.close()
@@ -240,7 +240,7 @@ def update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_a
                 """
                 conn.execute(update_query, (total_wins, total_losses, current_amount, consecutive_losses, initial_balance, contract_id, trade_start_time, email))
         except sqlite3.Error as e:
-           # print(f"Database error in update_stats_and_trade_info_in_db: {e}")
+            print(f"Database error in update_stats_and_trade_info_in_db: {e}")
         finally:
             conn.close()
 
@@ -259,7 +259,7 @@ def connect_websocket(user_token):
             return None
         return ws
     except Exception as e:
-       # print(f"Error connecting to WebSocket: {e}")
+        print(f"Error connecting to WebSocket: {e}")
         return None
 
 def get_balance_and_currency(user_token):
@@ -277,7 +277,7 @@ def get_balance_and_currency(user_token):
             return balance_info.get('balance'), balance_info.get('currency')
         return None, None
     except Exception as e:
-       # print(f"Error getting balance: {e}")
+        print(f"Error getting balance: {e}")
         return None, None
     finally:
         if ws and ws.connected:
@@ -293,7 +293,7 @@ def check_contract_status(ws, contract_id):
         response = json.loads(ws.recv())
         return response.get('proposal_open_contract')
     except Exception as e:
-       # print(f"Error checking contract status: {e}")
+        print(f"Error checking contract status: {e}")
         return None
 
 def place_order(ws, proposal_id, amount):
@@ -307,7 +307,7 @@ def place_order(ws, proposal_id, amount):
         response = json.loads(ws.recv())
         return response
     except Exception as e:
-       # print(f"Error placing order: {e}")
+        print(f"Error placing order: {e}")
         return {"error": {"message": "Order placement failed."}}
 
 # --- Trading Bot Logic ---
