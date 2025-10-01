@@ -330,7 +330,7 @@ def analyse_data(df_ticks):
         trend_30 = "Sell"
 
  
-        if trend_30 == "Buy":
+        if trend_30 == "Sell":
             return "Buy", "Detected a downtrend reversal on 5 ticks against a 60-tick uptrend."
         else:
             return "Sell", "Detected an uptrend reversal on 5 ticks against a 60-tick downtrend."
