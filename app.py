@@ -65,7 +65,7 @@ def create_table_if_not_exists():
             
             conn.commit()
         except sqlite3.Error as e:
-            print(f"Database error during table creation: {e}") # For debugging
+           # print(f"Database error during table creation: {e}") # For debugging
         finally:
             conn.close()
 
@@ -88,21 +88,21 @@ def get_bot_running_status():
                         # Check if the PID is valid and the process is alive
                         if pid and os.path.exists(f"/proc/{pid}"): # Linux specific check for process existence
                             if (time.time() - heartbeat > 30): # Heartbeat timeout (30 seconds)
-                                print(f"Bot process {pid} timed out. Marking as stopped.")
+                               # print(f"Bot process {pid} timed out. Marking as stopped.")
                                 update_bot_running_status(0, 0) # Mark as stopped if no heartbeat
                                 return 0
                             else:
                                 return status # Bot is running and heartbeat is recent
                         else:
                             # Process is not alive (or PID invalid), mark as stopped
-                            print(f"Bot process {pid} not found. Marking as stopped.")
+                           # print(f"Bot process {pid} not found. Marking as stopped.")
                             update_bot_running_status(0, 0)
                             return 0
                     else:
                         return 0 # Bot is explicitly stopped
                 return 0 # No status found, assume stopped
         except sqlite3.Error as e:
-            print(f"Database error in get_bot_running_status: {e}")
+           # print(f"Database error in get_bot_running_status: {e}")
             return 0
         finally:
             conn.close()
@@ -116,7 +116,7 @@ def update_bot_running_status(status, pid):
             with conn:
                 conn.execute("UPDATE bot_status SET is_running_flag = ?, last_heartbeat = ?, process_pid = ? WHERE flag_id = 1", (status, time.time(), pid))
         except sqlite3.Error as e:
-            print(f"Database error in update_bot_running_status: {e}")
+           # print(f"Database error in update_bot_running_status: {e}")
         finally:
             conn.close()
 
@@ -130,7 +130,7 @@ def is_any_session_running():
                 count = cursor.fetchone()[0]
                 return count > 0
         except sqlite3.Error as e:
-            print(f"Database error in is_any_session_running: {e}")
+           # print(f"Database error in is_any_session_running: {e}")
             return True # Assume running to be safe
         finally:
             conn.close()
@@ -145,7 +145,7 @@ def is_user_active(email):
     except FileNotFoundError:
         return False
     except Exception as e:
-        print(f"Error reading user_ids.txt: {e}")
+       # print(f"Error reading user_ids.txt: {e}")
         return False
 
 def start_new_session_in_db(email, settings):
@@ -160,7 +160,7 @@ def start_new_session_in_db(email, settings):
                     VALUES (?, ?, ?, ?, ?, ?, 1)
                     """, (email, settings["user_token"], settings["base_amount"], settings["tp_target"], settings["max_consecutive_losses"], settings["base_amount"]))
         except sqlite3.Error as e:
-            print(f"Database error in start_new_session_in_db: {e}")
+           # print(f"Database error in start_new_session_in_db: {e}")
         finally:
             conn.close()
 
@@ -172,7 +172,7 @@ def update_is_running_status(email, status):
             with conn:
                 conn.execute("UPDATE sessions SET is_running = ? WHERE email = ?", (status, email))
         except sqlite3.Error as e:
-            print(f"Database error in update_is_running_status: {e}")
+          #  print(f"Database error in update_is_running_status: {e}")
         finally:
             conn.close()
 
@@ -184,7 +184,7 @@ def clear_session_data(email):
             with conn:
                 conn.execute("DELETE FROM sessions WHERE email=?", (email,))
         except sqlite3.Error as e:
-            print(f"Database error in clear_session_data: {e}")
+           # print(f"Database error in clear_session_data: {e}")
         finally:
             conn.close()
 
@@ -200,7 +200,7 @@ def get_session_status_from_db(email):
                 return dict(row)
             return None
         except sqlite3.Error as e:
-            print(f"Database error in get_session_status_from_db: {e}")
+           # print(f"Database error in get_session_status_from_db: {e}")
             return None
         finally:
             conn.close()
@@ -220,7 +220,7 @@ def get_all_active_sessions():
                     sessions.append(dict(row))
                 return sessions
         except sqlite3.Error as e:
-            print(f"Database error in get_all_active_sessions: {e}")
+          #  print(f"Database error in get_all_active_sessions: {e}")
             return []
         finally:
             conn.close()
@@ -240,7 +240,7 @@ def update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_a
                 """
                 conn.execute(update_query, (total_wins, total_losses, current_amount, consecutive_losses, initial_balance, contract_id, trade_start_time, email))
         except sqlite3.Error as e:
-            print(f"Database error in update_stats_and_trade_info_in_db: {e}")
+           # print(f"Database error in update_stats_and_trade_info_in_db: {e}")
         finally:
             conn.close()
 
@@ -254,12 +254,12 @@ def connect_websocket(user_token):
         ws.send(json.dumps(auth_req))
         auth_response = json.loads(ws.recv())
         if auth_response.get('error'):
-            print(f"WebSocket authentication error: {auth_response['error']['message']}")
+           # print(f"WebSocket authentication error: {auth_response['error']['message']}")
             ws.close()
             return None
         return ws
     except Exception as e:
-        print(f"Error connecting to WebSocket: {e}")
+       # print(f"Error connecting to WebSocket: {e}")
         return None
 
 def get_balance_and_currency(user_token):
@@ -277,7 +277,7 @@ def get_balance_and_currency(user_token):
             return balance_info.get('balance'), balance_info.get('currency')
         return None, None
     except Exception as e:
-        print(f"Error getting balance: {e}")
+       # print(f"Error getting balance: {e}")
         return None, None
     finally:
         if ws and ws.connected:
@@ -293,7 +293,7 @@ def check_contract_status(ws, contract_id):
         response = json.loads(ws.recv())
         return response.get('proposal_open_contract')
     except Exception as e:
-        print(f"Error checking contract status: {e}")
+       # print(f"Error checking contract status: {e}")
         return None
 
 def place_order(ws, proposal_id, amount):
@@ -307,7 +307,7 @@ def place_order(ws, proposal_id, amount):
         response = json.loads(ws.recv())
         return response
     except Exception as e:
-        print(f"Error placing order: {e}")
+       # print(f"Error placing order: {e}")
         return {"error": {"message": "Order placement failed."}}
 
 # --- Trading Bot Logic ---
@@ -330,7 +330,7 @@ def analyse_data(df_ticks):
         trend_3 = "Sell"
 
  
-        if trend_3 == "Sell":
+        if trend_3 == "Buy":
             return "Buy", "Detected a downtrend reversal on 5 ticks against a 60-tick uptrend."
         else:
             return "Sell", "Detected an uptrend reversal on 5 ticks against a 60-tick downtrend."
@@ -354,7 +354,7 @@ def run_trading_job_for_user(session_data, check_only=False):
     try:
         ws = connect_websocket(user_token)
         if not ws:
-            print(f"Could not connect WebSocket for {email}")
+           # print(f"Could not connect WebSocket for {email}")
             return
 
         # --- Check for completed trades (if contract_id exists) ---
@@ -390,13 +390,13 @@ def run_trading_job_for_user(session_data, check_only=False):
                         update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time)
                     
                     if (current_balance_float - initial_balance) >= float(tp_target):
-                        print(f"User {email} reached Take Profit target. Stopping session.")
+                       # print(f"User {email} reached Take Profit target. Stopping session.")
                         update_is_running_status(email, 0) # Mark session as not running
                         clear_session_data(email)         # Clear session from DB
                         return
                     
                     if consecutive_losses >= max_consecutive_losses:
-                        print(f"User {email} reached Max Consecutive Losses. Stopping session.")
+                       # print(f"User {email} reached Max Consecutive Losses. Stopping session.")
                         update_is_running_status(email, 0)
                         clear_session_data(email)
                         return
@@ -407,7 +407,7 @@ def run_trading_job_for_user(session_data, check_only=False):
         if not check_only and not contract_id: # Place a new trade if no trade is active and not in check_only mode
             balance, currency = get_balance_and_currency(user_token)
             if balance is None:
-                print(f"Failed to get balance for {email}. Skipping trade.")
+              #  print(f"Failed to get balance for {email}. Skipping trade.")
                 return
             if initial_balance == 0: # If this is the first time setting balance
                 initial_balance = float(balance)
@@ -425,20 +425,20 @@ def run_trading_job_for_user(session_data, check_only=False):
                         tick_data = response
                         break
                     elif response.get('error'):
-                        print(f"Error getting ticks history for {email}: {response['error']['message']}")
+                       # print(f"Error getting ticks history for {email}: {response['error']['message']}")
                         return
                 except websocket._exceptions.WebSocketConnectionClosedException:
-                    print(f"WebSocket closed while waiting for ticks history for {email}")
+                   # print(f"WebSocket closed while waiting for ticks history for {email}")
                     return
                 except Exception as e:
-                    print(f"Error receiving ticks history for {email}: {e}")
+                   # print(f"Error receiving ticks history for {email}: {e}")
                     return
 
             if 'history' in tick_data and 'prices' in tick_data['history']:
                 ticks = tick_data['history']['prices']
                 df_ticks = pd.DataFrame({'price': ticks})
                 signal, message = analyse_data(df_ticks)
-                print(f"User {email}: Signal = {signal}, Message = {message}")
+               # print(f"User {email}: Signal = {signal}, Message = {message}")
 
                 if signal in ['Buy', 'Sell']:
                     contract_type = "CALL" if signal == 'Buy' else "PUT"
@@ -460,15 +460,15 @@ def run_trading_job_for_user(session_data, check_only=False):
                             if response_str:
                                 proposal_response = json.loads(response_str)
                                 if proposal_response.get('error'):
-                                     print(f"Error getting proposal for {email}: {proposal_response['error']['message']}")
+                                    # print(f"Error getting proposal for {email}: {proposal_response['error']['message']}")
                                      return
                                 if 'proposal' in proposal_response:
                                      break # Successfully got proposal
                         except websocket._exceptions.WebSocketConnectionClosedException:
-                            print(f"WebSocket closed while waiting for proposal for {email}")
+                           # print(f"WebSocket closed while waiting for proposal for {email}")
                             return
                         except Exception as e:
-                            print(f"Error receiving proposal for {email}: {e}")
+                           # print(f"Error receiving proposal for {email}: {e}")
                             return
 
                     if proposal_response and 'proposal' in proposal_response:
@@ -479,24 +479,24 @@ def run_trading_job_for_user(session_data, check_only=False):
                         if 'buy' in order_response and 'contract_id' in order_response['buy']:
                             new_contract_id = order_response['buy']['contract_id']
                             trade_start_time = time.time()
-                            print(f"User {email}: Placed trade {new_contract_id} with stake {amount_to_bet}. Starting at {datetime.fromtimestamp(trade_start_time)}")
+                           # print(f"User {email}: Placed trade {new_contract_id} with stake {amount_to_bet}. Starting at {datetime.fromtimestamp(trade_start_time)}")
                             # Update DB with new trade info
                             update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time)
                         else:
-                            print(f"User {email}: Failed to place order. Response: {order_response}")
+                           # print(f"User {email}: Failed to place order. Response: {order_response}")
                     else:
-                        print(f"User {email}: No proposal received or error in proposal response. Response: {proposal_response}")
+                       # print(f"User {email}: No proposal received or error in proposal response. Response: {proposal_response}")
             else:
-                print(f"User {email}: No tick history received or unexpected response format: {tick_data}")
+               # print(f"User {email}: No tick history received or unexpected response format: {tick_data}")
     
     except websocket._exceptions.WebSocketConnectionClosedException:
-        print(f"WebSocket connection lost for user {email}. Will try to reconnect.")
+       # print(f"WebSocket connection lost for user {email}. Will try to reconnect.")
         # Optionally, update session status or clear contract_id if connection is lost mid-trade
         if contract_id: # If trade was active, try to save current state before potentially losing it
              update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=contract_id, trade_start_time=session_data.get('trade_start_time'))
 
     except Exception as e:
-        print(f"An error occurred in run_trading_job_for_user for {email}: {e}")
+       # print(f"An error occurred in run_trading_job_for_user for {email}: {e}")
     finally:
         if ws and ws.connected:
             ws.close()
@@ -504,7 +504,7 @@ def run_trading_job_for_user(session_data, check_only=False):
 # --- Main Bot Loop Function ---
 def bot_loop():
     """Main loop that orchestrates trading jobs for all active sessions."""
-    print("Bot process started. PID:", os.getpid())
+   # print("Bot process started. PID:", os.getpid())
     update_bot_running_status(1, os.getpid()) # Mark as running with current PID
     
     while True:
@@ -537,7 +537,7 @@ def bot_loop():
                         # Check if trade duration exceeds a reasonable limit (e.g., 20 seconds for 5-tick trades)
                         # This ensures we don't miss closing an open trade if something goes wrong
                         if (time.time() - trade_start_time) >= 50: 
-                            print(f"User {email}: Trade {contract_id} might be stuck, checking status...")
+                           # print(f"User {email}: Trade {contract_id} might be stuck, checking status...")
                             run_trading_job_for_user(latest_session_data, check_only=True) # check_only=True to only process completed trades and stop criteria
                     
                     # --- Logic to place new trades ---
@@ -553,7 +553,7 @@ def bot_loop():
             
             time.sleep(1) # Wait for 1 second before the next iteration of the loop
         except Exception as e:
-            print(f"Error in bot_loop main loop: {e}. Sleeping for 5 seconds before retrying.")
+           # print(f"Error in bot_loop main loop: {e}. Sleeping for 5 seconds before retrying.")
             time.sleep(5) # Sleep longer if an error occurs to avoid rapid failure
 
 # --- Streamlit App Configuration ---
@@ -592,17 +592,17 @@ if bot_status_from_db == 0: # Bot is not running or was timed out/crashed
         
         # A better check might be: if bot_status_from_db == 0:
         # This ensures we only attempt to start it if the DB says it's not running.
-        print("Attempting to start bot process...")
+       # print("Attempting to start bot process...")
         bot_process = multiprocessing.Process(target=bot_loop, daemon=True)
         bot_process.start()
         # Update DB with new status and PID
         update_bot_running_status(1, bot_process.pid)
-        print(f"Bot process started with PID: {bot_process.pid}")
+       # print(f"Bot process started with PID: {bot_process.pid}")
     except Exception as e:
         st.error(f"❌ Error starting bot process: {e}")
 else:
     # Bot is already running (status is 1)
-    print("Bot process is already running (status from DB).")
+   # print("Bot process is already running (status from DB).")
 
 # --- Login Section ---
 if not st.session_state.logged_in:
