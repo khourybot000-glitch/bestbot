@@ -313,30 +313,29 @@ def place_order(ws, proposal_id, amount):
 # --- Trading Bot Logic ---
 def analyse_data(df_ticks):
     """
-    Analyzes tick data to generate a trading signal based on the last 2 ticks.
+    Analyzes tick data to generate a trading signal based on a 60-tick and 5-tick trend.
     """
-    if len(df_ticks) < 5: # تم التعديل
-        return "Neutral", "Insufficient data. Need at least 2 ticks."
+    if len(df_ticks) < 30: 
+        return "Neutral", "Insufficient data. Need at least 60 ticks."
 
-    # Get the last 2 ticks for the analysis
-    last_5_ticks = df_ticks.tail(5).copy()
+    # Get the last 60 ticks for the main trend analysis
+    last_30_ticks = df_ticks.tail(30).copy()
  
-    # Determine the trend of the last 2 ticks
-    trend_5 = "Neutral" # تم التعديل
-    # إذا كان سعر التيك الأخير (index 1) أكبر من سعر التيك ما قبل الأخير (index 0)
-    if last_5_ticks.iloc[-1]['price'] > last_5_ticks.iloc[0]['price']:
-        trend_5 = "Sell"
-    # إذا كان سعر التيك الأخير أقل من سعر التيك ما قبل الأخير
-    elif last_5_ticks.iloc[-1]['price'] < last_5_ticks.iloc[0]['price']:
-        trend_5 = "Buy"
 
-    if trend_5 == "Buy":
-        return "Sell", "Detected an uptrend in the last 2 ticks."
-    elif trend_5 == "Sell":
-        return "Buy", "Detected a downtrend in the last 2 ticks."
+    # Determine the trend of the last 60 ticks
+    trend_30 = "Neutral"
+    if last_30_ticks.iloc[-1]['price'] > last_30_ticks.iloc[0]['price']:
+        trend_30 = "Buy"
+    elif last_30_ticks.iloc[-1]['price'] < last_30_ticks.iloc[0]['price']:
+        trend_30 = "Sell"
+
+ 
+        if trend_30 == "Buy":
+            return "Buy", "Detected a downtrend reversal on 5 ticks against a 60-tick uptrend."
+        else:
+            return "Sell", "Detected an uptrend reversal on 5 ticks against a 60-tick downtrend."
     
-    return "Neutral", "No clear signal from 2-tick analysis." # تم التعديل
-
+    return "Neutral", "No clear reversal signal from combined analysis."
 def run_trading_job_for_user(session_data, check_only=False):
     """Executes the trading logic for a specific user's session."""
     email = session_data['email']
@@ -393,7 +392,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                     if (current_balance_float - initial_balance) >= float(tp_target):
                         print(f"User {email} reached Take Profit target. Stopping session.")
                         update_is_running_status(email, 0) # Mark session as not running
-                        clear_session_data(email)           # Clear session from DB
+                        clear_session_data(email)         # Clear session from DB
                         return
                     
                     if consecutive_losses >= max_consecutive_losses:
@@ -403,7 +402,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                         return
             # If contract_info is None or not is_sold, it means the contract is still open, do nothing.
             # This block is only for processing completed trades.
-            
+        
         # --- If not in check_only mode, or if trade was just completed, proceed to place a new trade ---
         if not check_only and not contract_id: # Place a new trade if no trade is active and not in check_only mode
             balance, currency = get_balance_and_currency(user_token)
@@ -415,7 +414,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                 update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=None, trade_start_time=None)
             
             # Get latest ticks for analysis
-            req = {"ticks_history": "R_100", "end": "latest", "count": 5, "style": "ticks"} # تم التعديل إلى 5 تيكات
+            req = {"ticks_history": "R_10", "end": "latest", "count": 30, "style": "ticks"}
             ws.send(json.dumps(req))
             tick_data = None
             # Wait for the ticks history response
@@ -430,7 +429,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                         return
                 except websocket._exceptions.WebSocketConnectionClosedException:
                     print(f"WebSocket closed while waiting for ticks history for {email}")
-                    return # Exit to force reconnect in bot_loop
+                    return
                 except Exception as e:
                     print(f"Error receiving ticks history for {email}: {e}")
                     return
@@ -450,7 +449,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                     proposal_req = {
                         "proposal": 1, "amount": amount_to_bet, "basis": "stake",
                         "contract_type": contract_type, "currency": currency,
-                        "duration": 5, "duration_unit": "t", "symbol": "R_100" # تم التأكيد أن المدة 2 تيك
+                        "duration": 5, "duration_unit": "t", "symbol": "R_10"
                     }
                     ws.send(json.dumps(proposal_req))
                     
@@ -461,13 +460,13 @@ def run_trading_job_for_user(session_data, check_only=False):
                             if response_str:
                                 proposal_response = json.loads(response_str)
                                 if proposal_response.get('error'):
-                                    print(f"Error getting proposal for {email}: {proposal_response['error']['message']}")
-                                    return
+                                     print(f"Error getting proposal for {email}: {proposal_response['error']['message']}")
+                                     return
                                 if 'proposal' in proposal_response:
-                                    break # Successfully got proposal
+                                     break # Successfully got proposal
                         except websocket._exceptions.WebSocketConnectionClosedException:
                             print(f"WebSocket closed while waiting for proposal for {email}")
-                            return # Exit to force reconnect in bot_loop
+                            return
                         except Exception as e:
                             print(f"Error receiving proposal for {email}: {e}")
                             return
@@ -531,20 +530,25 @@ def bot_loop():
                     trade_start_time = latest_session_data.get('trade_start_time')
                     
                     # --- Logic to check and close active trades ---
+                    # If a contract is active, we need to check its status.
+                    # The run_trading_job_for_user function handles this internally.
+                    # We only call it if a contract_id exists.
                     if contract_id:
-                        # Check if trade duration exceeds a reasonable limit (e.g., 5 seconds for 2-tick trades)
-                        if (time.time() - trade_start_time) >= 13: 
+                        # Check if trade duration exceeds a reasonable limit (e.g., 20 seconds for 5-tick trades)
+                        # This ensures we don't miss closing an open trade if something goes wrong
+                        if (time.time() - trade_start_time) >= 12: 
                             print(f"User {email}: Trade {contract_id} might be stuck, checking status...")
                             run_trading_job_for_user(latest_session_data, check_only=True) # check_only=True to only process completed trades and stop criteria
-                        
-                    # --- Logic to place new trades (Runs immediately if no trade is active) ---
+                    
+                    # --- Logic to place new trades ---
                     # Only attempt to place a new trade if:
                     # 1. No contract is currently active (contract_id is None)
-                    # 2. The session is still marked as running
-                    elif not contract_id: # لا يوجد شرط للثواني هنا
+                    # 2. It's a suitable time to place a trade (e.g., second is 55, for end of minute cycle)
+                    # 3. The session is still marked as running
+                    elif now.second == 0: # Trigger trade placement logic at the end of a minute cycle
                         re_checked_session_data = get_session_status_from_db(email) # Re-fetch data just in case
                         if re_checked_session_data and re_checked_session_data.get('is_running') == 1 and not re_checked_session_data.get('contract_id'):
-                            # The check_only=False ensures it will attempt to place a new trade
+                             # The check_only=False ensures it will attempt to place a new trade
                             run_trading_job_for_user(re_checked_session_data, check_only=False) 
             
             time.sleep(1) # Wait for 1 second before the next iteration of the loop
@@ -579,6 +583,12 @@ if bot_status_from_db == 0: # Bot is not running or was timed out/crashed
         # This is a safety check; if no sessions are active, no need to start the bot.
         # However, for a continuously running bot service, you might want to start it regardless
         # if it's not already running, to pick up sessions later.
+        # For now, we start it if any session is marked as running (even if UI is down).
+        # A more robust approach might be to always keep the bot running as a service if configured.
+
+        # For this example, we start the bot process only if the database indicates it should be running (status=1)
+        # or if we explicitly want it to be a background service that's always on.
+        # Let's assume we want the bot to run as a background service whenever Streamlit is launched.
         
         # A better check might be: if bot_status_from_db == 0:
         # This ensures we only attempt to start it if the DB says it's not running.
@@ -688,7 +698,7 @@ if st.session_state.logged_in:
     else:
         st.error("🔴 Global Bot Service is STOPPED.")
 
-    
+   
 
     if st.session_state.user_email:
         session_data = get_session_status_from_db(st.session_state.user_email)
