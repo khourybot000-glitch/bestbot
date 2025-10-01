@@ -315,22 +315,22 @@ def analyse_data(df_ticks):
     """
     Analyzes tick data to generate a trading signal based on a 60-tick and 5-tick trend.
     """
-    if len(df_ticks) < 30: 
+    if len(df_ticks) < 3: 
         return "Neutral", "Insufficient data. Need at least 60 ticks."
 
     # Get the last 60 ticks for the main trend analysis
-    last_30_ticks = df_ticks.tail(30).copy()
+    last_3_ticks = df_ticks.tail(3).copy()
  
 
     # Determine the trend of the last 60 ticks
-    trend_30 = "Neutral"
-    if last_30_ticks.iloc[-1]['price'] > last_30_ticks.iloc[0]['price']:
-        trend_30 = "Buy"
-    elif last_30_ticks.iloc[-1]['price'] < last_30_ticks.iloc[0]['price']:
-        trend_30 = "Sell"
+    trend_3 = "Neutral"
+    if last_3_ticks.iloc[-1]['price'] > last_3_ticks.iloc[0]['price']:
+        trend_3 = "Buy"
+    elif last_3_ticks.iloc[-1]['price'] < last_3_ticks.iloc[0]['price']:
+        trend_3 = "Sell"
 
  
-        if trend_30 == "Sell":
+        if trend_3 == "Sell":
             return "Buy", "Detected a downtrend reversal on 5 ticks against a 60-tick uptrend."
         else:
             return "Sell", "Detected an uptrend reversal on 5 ticks against a 60-tick downtrend."
@@ -414,7 +414,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                 update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=None, trade_start_time=None)
             
             # Get latest ticks for analysis
-            req = {"ticks_history": "R_100", "end": "latest", "count": 30, "style": "ticks"}
+            req = {"ticks_history": "R_100", "end": "latest", "count": 3, "style": "ticks"}
             ws.send(json.dumps(req))
             tick_data = None
             # Wait for the ticks history response
@@ -449,7 +449,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                     proposal_req = {
                         "proposal": 1, "amount": amount_to_bet, "basis": "stake",
                         "contract_type": contract_type, "currency": currency,
-                        "duration": 5, "duration_unit": "t", "symbol": "R_100"
+                        "duration": 45, "duration_unit": "s", "symbol": "R_100"
                     }
                     ws.send(json.dumps(proposal_req))
                     
@@ -536,7 +536,7 @@ def bot_loop():
                     if contract_id:
                         # Check if trade duration exceeds a reasonable limit (e.g., 20 seconds for 5-tick trades)
                         # This ensures we don't miss closing an open trade if something goes wrong
-                        if (time.time() - trade_start_time) >= 12: 
+                        if (time.time() - trade_start_time) >= 50: 
                             print(f"User {email}: Trade {contract_id} might be stuck, checking status...")
                             run_trading_job_for_user(latest_session_data, check_only=True) # check_only=True to only process completed trades and stop criteria
                     
@@ -545,7 +545,7 @@ def bot_loop():
                     # 1. No contract is currently active (contract_id is None)
                     # 2. It's a suitable time to place a trade (e.g., second is 55, for end of minute cycle)
                     # 3. The session is still marked as running
-                    elif now.second == 0: # Trigger trade placement logic at the end of a minute cycle
+                    elif now.second == 5: # Trigger trade placement logic at the end of a minute cycle
                         re_checked_session_data = get_session_status_from_db(email) # Re-fetch data just in case
                         if re_checked_session_data and re_checked_session_data.get('is_running') == 1 and not re_checked_session_data.get('contract_id'):
                              # The check_only=False ensures it will attempt to place a new trade
