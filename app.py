@@ -449,7 +449,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                     proposal_req = {
                         "proposal": 1, "amount": amount_to_bet, "basis": "stake",
                         "contract_type": contract_type, "currency": currency,
-                        "duration": 5, "duration_unit": "t", "symbol": "R_100"
+                        "duration": 2, "duration_unit": "t", "symbol": "R_100"
                     }
                     ws.send(json.dumps(proposal_req))
                     
@@ -536,7 +536,7 @@ def bot_loop():
                     if contract_id:
                         # Check if trade duration exceeds a reasonable limit (e.g., 20 seconds for 5-tick trades)
                         # This ensures we don't miss closing an open trade if something goes wrong
-                        if (time.time() - trade_start_time) >= 12: 
+                        if (time.time() - trade_start_time) >= 6: 
                            # print(f"User {email}: Trade {contract_id} might be stuck, checking status...")
                             run_trading_job_for_user(latest_session_data, check_only=True) # check_only=True to only process completed trades and stop criteria
                     
@@ -545,7 +545,7 @@ def bot_loop():
                     # 1. No contract is currently active (contract_id is None)
                     # 2. It's a suitable time to place a trade (e.g., second is 55, for end of minute cycle)
                     # 3. The session is still marked as running
-                    elif now.second == 0: # Trigger trade placement logic at the end of a minute cycle
+                    elif now.second != 1: # Trigger trade placement logic at the end of a minute cycle
                         re_checked_session_data = get_session_status_from_db(email) # Re-fetch data just in case
                         if re_checked_session_data and re_checked_session_data.get('is_running') == 1 and not re_checked_session_data.get('contract_id'):
                              # The check_only=False ensures it will attempt to place a new trade
