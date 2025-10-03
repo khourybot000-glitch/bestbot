@@ -14,7 +14,7 @@ import multiprocessing
 # --- GLOBAL CONFIGURATION (FIXED) ---
 FIXED_MAX_CONSECUTIVE_LOSSES = 2
 MARTINGALE_MULTIPLIER = 18.0
-DB_FILE = "trading_data_differ_r100_x18_maxloss2_fastreconnect_v2.db" 
+DB_FILE = "trading_data_differ_r100_x18_maxloss2_targetfix.db" # تم تحديث اسم الملف
 
 # --- Database & Utility Functions (No Change) ---
 def create_connection():
@@ -173,7 +173,7 @@ def get_all_active_sessions():
     if conn:
         try:
             with conn:
-                conn.row_factory = sqlite3.Row
+                conn.row_factory = sqliteite3.Row
                 cursor = conn.execute("SELECT * FROM sessions WHERE is_running = 1")
                 rows = cursor.fetchall()
                 sessions = []
@@ -205,7 +205,7 @@ def update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_a
         finally:
             conn.close()
 
-# --- WebSocket Helper Functions (Fast Reconnect) ---
+# --- WebSocket Helper Functions (Fast Reconnect - No Change) ---
 def connect_websocket(user_token, max_retries=5):
     for attempt in range(max_retries):
         ws = websocket.WebSocket()
@@ -300,7 +300,11 @@ def get_latest_price_digit(ws):
         if response.get('msg_type') == 'tick' and 'quote' in response['tick']:
             price = str(response['tick']['quote'])
             last_digit = int(price[-1])
-            return last_digit
+            # Added validation for safety
+            if 0 <= last_digit <= 9:
+                return last_digit
+            else:
+                return -1
             
     except Exception as e:
         print(f"Error getting latest price digit: {e}")
@@ -308,6 +312,7 @@ def get_latest_price_digit(ws):
     return -1
 
 def calculate_target_digit(current_last_digit):
+    # الاستراتيجية: توقع أن يختلف الرقم التالي عن آخر رقم شوهد.
     target = current_last_digit
     return target
 
@@ -328,13 +333,12 @@ def run_trading_job_for_user(session_data, check_only=False):
     
     ws = None
     try:
-        # Fast Reconnect Logic
         ws = connect_websocket(user_token)
         if not ws:
             print(f"Could not connect/reconnect WebSocket for {email}. Skipping trade cycle.")
             return
 
-        # --- Check for completed trades (if contract_id exists) ---
+        # --- Check for completed trades ---
         if contract_id: 
             contract_info = check_contract_status(ws, contract_id)
             if contract_info and contract_info.get('is_sold'): 
@@ -396,10 +400,15 @@ def run_trading_job_for_user(session_data, check_only=False):
             # 2. Calculate the target digit for the DIFFER contract 
             new_target_digit = calculate_target_digit(current_last_digit)
             
+            # تأكيد سلامة الرقم المستهدف
+            if not isinstance(new_target_digit, int) or not (0 <= new_target_digit <= 9):
+                print(f"User {email}: Invalid target digit calculated: {new_target_digit}. Skipping trade.")
+                return
+            
             amount_to_bet = max(0.35, round(float(current_amount), 2)) 
 
             # 3. Get proposal for the trade (DIGITDIFFER)
-            # تم تأكيد صحة صيغة الـ JSON لـ 1 تيك
+            # *** التعديل الهام: استبدال "barrier" بـ "target" ***
             proposal_req = {
                 "proposal": 1, 
                 "amount": amount_to_bet, 
@@ -408,7 +417,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                 "currency": currency,
                 "duration": 1, "duration_unit": "t", 
                 "symbol": "R_100", 
-                "barrier": new_target_digit 
+                "target": new_target_digit  # <--- تم التعديل هنا!
             }
             ws.send(json.dumps(proposal_req))
             
@@ -422,7 +431,6 @@ def run_trading_job_for_user(session_data, check_only=False):
                         proposal_response = json.loads(response_str)
                         
                         if proposal_response.get('error'):
-                            # *التعزيز:* طباعة رسالة الخطأ المحددة من Deriv
                             error_msg = proposal_response['error']['message']
                             print(f"Error getting proposal for {email}: {error_msg}")
                             return
@@ -448,7 +456,6 @@ def run_trading_job_for_user(session_data, check_only=False):
                     print(f"User {email}: Placed Differ trade {new_contract_id} (Target: {new_target_digit}) with stake {amount_to_bet}.")
                     update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time, target_digit=new_target_digit)
                 else:
-                    # *التعزيز:* طباعة رسالة الخطأ إذا فشل الشراء بعد الحصول على العرض
                     if 'error' in order_response:
                         error_msg = order_response['error']['message']
                         print(f"User {email}: Failed to place order. Error: {error_msg}")
@@ -471,13 +478,10 @@ def bot_loop():
     while True:
         try:
             update_bot_running_status(1, os.getpid()) 
-            
             active_sessions = get_all_active_sessions() 
-            
             if active_sessions:
                 for session in active_sessions:
                     email = session['email']
-                    
                     latest_session_data = get_session_status_from_db(email)
                     if not latest_session_data or latest_session_data.get('is_running') == 0:
                         continue
@@ -607,7 +611,7 @@ if st.session_state.logged_in:
     
     current_global_bot_status = get_bot_running_status()
     if current_global_bot_status == 1:
-        st.success("🟢 Global Bot Service is RUNNING (Fast Reconnect Enabled).")
+        st.success("🟢 Global Bot Service is RUNNING (Target Fix Applied).")
     else:
         st.error("🔴 Global Bot Service is STOPPED.")
 
