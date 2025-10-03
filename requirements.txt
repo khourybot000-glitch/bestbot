@@ -1,3 +1,6 @@
-iqoptionapi
-requests
-python-dotenv 
+streamlit
+psycopg2-binary
+websocket-client
+pandas
+Flask
+sqlalchemy
