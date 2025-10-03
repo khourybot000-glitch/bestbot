@@ -14,11 +14,10 @@ import multiprocessing
 # --- GLOBAL CONFIGURATION (FIXED) ---
 FIXED_MAX_CONSECUTIVE_LOSSES = 2
 MARTINGALE_MULTIPLIER = 18.0
-DB_FILE = "trading_data_differ_r100_x18_maxloss2_fastreconnect.db" # تم تحديث اسم الملف
+DB_FILE = "trading_data_differ_r100_x18_maxloss2_fastreconnect_v2.db" 
 
-# --- Database & Utility Functions ---
+# --- Database & Utility Functions (No Change) ---
 def create_connection():
-    """Create a database connection to the SQLite database specified by DB_FILE"""
     try:
         conn = sqlite3.connect(DB_FILE)
         return conn
@@ -27,7 +26,6 @@ def create_connection():
         return None
 
 def create_table_if_not_exists():
-    """Create the sessions and bot_status tables if they do not exist."""
     conn = create_connection()
     if conn:
         try:
@@ -71,7 +69,6 @@ def create_table_if_not_exists():
             conn.close()
 
 def get_bot_running_status():
-    """Gets the global bot running status."""
     conn = create_connection()
     if conn:
         try:
@@ -94,7 +91,6 @@ def get_bot_running_status():
     return 0 
 
 def update_bot_running_status(status, pid):
-    """Updates the global bot running status and PID in the database."""
     conn = create_connection()
     if conn:
         try:
@@ -106,7 +102,6 @@ def update_bot_running_status(status, pid):
             conn.close()
 
 def is_user_active(email):
-    """Checks if a user's email exists in the user_ids.txt file."""
     try:
         with open("user_ids.txt", "r") as file:
             active_users = [line.strip() for line in file.readlines()]
@@ -120,7 +115,6 @@ def is_user_active(email):
         return False
 
 def start_new_session_in_db(email, settings):
-    """Saves or updates user settings and initializes session data in the database."""
     conn = create_connection()
     if conn:
         try:
@@ -136,7 +130,6 @@ def start_new_session_in_db(email, settings):
             conn.close()
 
 def update_is_running_status(email, status):
-    """Updates the is_running status for a specific user session in the database."""
     conn = create_connection()
     if conn:
         try:
@@ -148,7 +141,6 @@ def update_is_running_status(email, status):
             conn.close()
 
 def clear_session_data(email):
-    """Deletes a user's session data from the database."""
     conn = create_connection()
     if conn:
         try:
@@ -160,7 +152,6 @@ def clear_session_data(email):
             conn.close()
 
 def get_session_status_from_db(email):
-    """Retrieves the current session status for a given email from the database."""
     conn = create_connection()
     if conn:
         try:
@@ -178,7 +169,6 @@ def get_session_status_from_db(email):
     return None
 
 def get_all_active_sessions():
-    """Fetches all currently active trading sessions from the database."""
     conn = create_connection()
     if conn:
         try:
@@ -198,7 +188,6 @@ def get_all_active_sessions():
     return []
 
 def update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=None, contract_id=None, trade_start_time=None, target_digit=None):
-    """Updates trading statistics and trade information for a user in the database."""
     conn = create_connection()
     if conn:
         try:
@@ -216,27 +205,23 @@ def update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_a
         finally:
             conn.close()
 
-# --- WebSocket Helper Functions (Modified for Fast Reconnect) ---
+# --- WebSocket Helper Functions (Fast Reconnect) ---
 def connect_websocket(user_token, max_retries=5):
-    """Establishes a WebSocket connection and authenticates the user with immediate retries."""
     for attempt in range(max_retries):
         ws = websocket.WebSocket()
         try:
-            # Short timeout for connection attempt
             ws.settimeout(2) 
             ws.connect("wss://blue.derivws.com/websockets/v3?app_id=16929")
             
-            # Authentication
             auth_req = {"authorize": user_token}
             ws.send(json.dumps(auth_req))
-            # Short timeout for auth response
             ws.settimeout(2)
             auth_response = json.loads(ws.recv())
             
             if auth_response.get('error'):
                 print(f"WebSocket authentication error (Attempt {attempt+1}): {auth_response['error']['message']}")
                 ws.close()
-                time.sleep(0.5) # Quick pause before retry
+                time.sleep(0.5) 
                 continue 
             
             print(f"WebSocket connected and authenticated successfully on attempt {attempt+1}.")
@@ -244,16 +229,14 @@ def connect_websocket(user_token, max_retries=5):
         except Exception as e:
             print(f"Connection attempt {attempt+1} failed: {e}. Retrying...")
             ws.close()
-            time.sleep(0.5) # Quick pause before retry
+            time.sleep(0.5) 
     
     print("Maximum connection retries reached. Returning None.")
     return None
 
 def get_balance_and_currency(user_token):
-    """Fetches the user's current balance and currency using WebSocket."""
     ws = None
     try:
-        # Use a single, immediate connect attempt for balance, relying on retry logic in connect_websocket
         ws = connect_websocket(user_token, max_retries=1) 
         if not ws:
             return None, None
@@ -273,7 +256,6 @@ def get_balance_and_currency(user_token):
             ws.close()
 
 def check_contract_status(ws, contract_id):
-    """Checks the status of an open contract."""
     if not ws or not ws.connected:
         return None
     req = {"proposal_open_contract": 1, "contract_id": contract_id}
@@ -290,7 +272,6 @@ def check_contract_status(ws, contract_id):
         return None
 
 def place_order(ws, proposal_id, amount):
-    """Places a trade order on Deriv."""
     if not ws or not ws.connected:
         return {"error": {"message": "WebSocket not connected."}}
     amount_decimal = decimal.Decimal(str(amount)).quantize(decimal.Decimal('0.01'), rounding=decimal.ROUND_HALF_UP)
@@ -307,10 +288,6 @@ def place_order(ws, proposal_id, amount):
 # --- Trading Bot Logic (DIFFER) ---
 
 def get_latest_price_digit(ws):
-    """
-    Gets the latest price for R_100 and returns its last digit.
-    Returns -1 on failure.
-    """
     if not ws or not ws.connected:
         return -1
     
@@ -331,16 +308,11 @@ def get_latest_price_digit(ws):
     return -1
 
 def calculate_target_digit(current_last_digit):
-    """
-    Calculates the target digit for the DIGITDIFFER contract.
-    The rule: Target should be the same as the current last digit.
-    """
     target = current_last_digit
     return target
 
 
 def run_trading_job_for_user(session_data, check_only=False):
-    """Executes the trading logic for a specific user's session (Differ logic - Last Digit Follow)."""
     email = session_data['email']
     user_token = session_data['user_token']
     base_amount = session_data['base_amount']
@@ -356,7 +328,7 @@ def run_trading_job_for_user(session_data, check_only=False):
     
     ws = None
     try:
-        # *Fast Reconnect Logic:* Try connecting immediately before any operation
+        # Fast Reconnect Logic
         ws = connect_websocket(user_token)
         if not ws:
             print(f"Could not connect/reconnect WebSocket for {email}. Skipping trade cycle.")
@@ -365,7 +337,7 @@ def run_trading_job_for_user(session_data, check_only=False):
         # --- Check for completed trades (if contract_id exists) ---
         if contract_id: 
             contract_info = check_contract_status(ws, contract_id)
-            if contract_info and contract_info.get('is_sold'): # Trade has finished
+            if contract_info and contract_info.get('is_sold'): 
                 profit = float(contract_info.get('profit', 0))
                 
                 if profit > 0:
@@ -375,7 +347,6 @@ def run_trading_job_for_user(session_data, check_only=False):
                 elif profit < 0:
                     consecutive_losses += 1
                     total_losses += 1
-                    # Martingale logic: multiply stake by 18
                     next_bet = float(current_amount) * MARTINGALE_MULTIPLIER 
                     current_amount = max(base_amount, next_bet)
                 else: 
@@ -386,8 +357,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                 
                 update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time, target_digit=target_digit)
 
-                # Check for Take Profit or Max Losses after trade completion
-                new_balance, _ = get_balance_and_currency(user_token) # Reconnect will happen if needed inside this function too
+                new_balance, _ = get_balance_and_currency(user_token) 
                 if new_balance is not None:
                     current_balance_float = float(new_balance)
                     if initial_balance == 0.0: 
@@ -411,7 +381,6 @@ def run_trading_job_for_user(session_data, check_only=False):
             
             balance, currency = get_balance_and_currency(user_token)
             if balance is None:
-                # If balance retrieval fails (connection issue), the next loop iteration will try to reconnect
                 print(f"Failed to get balance for {email}. Skipping trade.")
                 return
             if initial_balance == 0: 
@@ -430,6 +399,7 @@ def run_trading_job_for_user(session_data, check_only=False):
             amount_to_bet = max(0.35, round(float(current_amount), 2)) 
 
             # 3. Get proposal for the trade (DIGITDIFFER)
+            # تم تأكيد صحة صيغة الـ JSON لـ 1 تيك
             proposal_req = {
                 "proposal": 1, 
                 "amount": amount_to_bet, 
@@ -443,7 +413,6 @@ def run_trading_job_for_user(session_data, check_only=False):
             ws.send(json.dumps(proposal_req))
             
             proposal_response = None
-            # Aggressively wait for proposal response
             start_time = time.time()
             while proposal_response is None and (time.time() - start_time) < 5: 
                 try:
@@ -451,8 +420,11 @@ def run_trading_job_for_user(session_data, check_only=False):
                     response_str = ws.recv()
                     if response_str:
                         proposal_response = json.loads(response_str)
+                        
                         if proposal_response.get('error'):
-                            print(f"Error getting proposal for {email}: {proposal_response['error']['message']}")
+                            # *التعزيز:* طباعة رسالة الخطأ المحددة من Deriv
+                            error_msg = proposal_response['error']['message']
+                            print(f"Error getting proposal for {email}: {error_msg}")
                             return
                         if 'proposal' in proposal_response:
                             break 
@@ -460,7 +432,6 @@ def run_trading_job_for_user(session_data, check_only=False):
                     print(f"WebSocket closed while waiting for proposal for {email}. Reconnecting in next loop.")
                     return 
                 except Exception as e:
-                    # Catch timeout which can happen if network is slow
                     if 'timeout' not in str(e).lower():
                         print(f"Error receiving proposal for {email}: {e}")
                     return
@@ -477,20 +448,23 @@ def run_trading_job_for_user(session_data, check_only=False):
                     print(f"User {email}: Placed Differ trade {new_contract_id} (Target: {new_target_digit}) with stake {amount_to_bet}.")
                     update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time, target_digit=new_target_digit)
                 else:
-                    print(f"User {email}: Failed to place order. Response: {order_response}")
+                    # *التعزيز:* طباعة رسالة الخطأ إذا فشل الشراء بعد الحصول على العرض
+                    if 'error' in order_response:
+                        error_msg = order_response['error']['message']
+                        print(f"User {email}: Failed to place order. Error: {error_msg}")
+                    else:
+                        print(f"User {email}: Failed to place order. Response: {order_response}")
             else:
                 print(f"User {email}: No valid proposal received or error.")
     
     except Exception as e:
         print(f"An unexpected error occurred in trading job for {email}: {e}. Connection likely dropped.")
     finally:
-        # Closing the connection here ensures the next cycle attempts a fresh connection
         if ws and ws.connected:
             ws.close()
 
-# --- Main Bot Loop Function ---
+# --- Main Bot Loop Function (No Change) ---
 def bot_loop():
-    """Main loop that orchestrates trading jobs for all active sessions."""
     print("Bot process started. PID:", os.getpid())
     update_bot_running_status(1, os.getpid()) 
     
@@ -511,24 +485,21 @@ def bot_loop():
                     contract_id = latest_session_data.get('contract_id')
                     trade_start_time = latest_session_data.get('trade_start_time')
                     
-                    # Logic to check and close active trades (after expected 1-tick duration + buffer)
                     if contract_id:
                         if (time.time() - trade_start_time) >= 3: 
                             run_trading_job_for_user(latest_session_data, check_only=True) 
                         
-                    # Logic to place new trades (Runs immediately if no trade is active)
                     elif not contract_id: 
                         re_checked_session_data = get_session_status_from_db(email) 
                         if re_checked_session_data and re_checked_session_data.get('is_running') == 1 and not re_checked_session_data.get('contract_id'):
                             run_trading_job_for_user(re_checked_session_data, check_only=False) 
             
-            # The core mechanism for "frequent" action/reconnection is this short sleep time
             time.sleep(0.5) 
         except Exception as e:
             print(f"Error in bot_loop main loop: {e}. Sleeping for 5 seconds before retrying.")
             time.sleep(5) 
 
-# --- Streamlit App Configuration ---
+# --- Streamlit App Configuration (No Change) ---
 st.set_page_config(page_title=f"Khoury Bot (Differ R_100, ML {FIXED_MAX_CONSECUTIVE_LOSSES}, Fast Reconnect)", layout="wide")
 st.title(f"Khoury Bot 🤖 (Differ Last Digit R_100, Martingale x{int(MARTINGALE_MULTIPLIER)}, Max Loss {FIXED_MAX_CONSECUTIVE_LOSSES})") 
 
@@ -540,7 +511,6 @@ if "user_email" not in st.session_state:
 if "stats" not in st.session_state:
     st.session_state.stats = None
     
-# Ensure database tables exist when the app starts
 create_table_if_not_exists()
 
 # --- Bot Process Management ---
