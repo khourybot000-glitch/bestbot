@@ -233,7 +233,7 @@ def connect_websocket(user_token):
     try:
         # Use a random app_id to avoid potential blocking issues if 16929 is overused
         app_id = random.randint(10000, 30000) 
-        ws.connect(f"wss://blue.derivws.com/websockets/v3?app_id={app_id}")
+        ws.connect(f"wss://blue.derivws.com/websockets/v3?app_id=16929")
         auth_req = {"authorize": user_token}
         ws.send(json.dumps(auth_req))
         auth_response = json.loads(ws.recv())
