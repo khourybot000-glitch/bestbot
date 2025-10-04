@@ -11,7 +11,6 @@ import multiprocessing
 import re
 
 # --- Configuration Constants (UPDATED) ---
-# تم تحديث هذه الثوابت لتناسب الاستراتيجية الجديدة
 MARTINGALE_MULTIPLIER = 15.0
 SYMBOL = "R_75"
 CONTRACT_TYPE = "DIGITDIFF" 
@@ -108,11 +107,11 @@ def update_bot_running_status(status, pid):
 
 def is_user_active(email):
     try:
+        # افتراضي: إذا كان الملف غير موجود، نعتبره نشطًا مؤقتًا
         with open("user_ids.txt", "r") as file:
             active_users = [line.strip() for line in file.readlines()]
         return email in active_users
     except FileNotFoundError:
-        # إذا لم يتم العثور على الملف، يمكن تعديل هذا السلوك حسب الحاجة
         return True 
 
 def start_new_session_in_db(email, settings):
@@ -146,7 +145,6 @@ def clear_session_data(email):
     if conn:
         try:
             with conn:
-                # نحتفظ بسجل الإعدادات ولكن نوقف الروبوت ونمسح معلومات الصفقة
                 conn.execute("""
                     UPDATE sessions SET is_running = 0, contract_id = NULL, trade_start_time = 0.0 
                     WHERE email=?
@@ -217,7 +215,6 @@ def connect_websocket(user_token):
         ws.send(json.dumps(auth_req))
         auth_response = json.loads(ws.recv())
         if auth_response.get('error'):
-            # طباعة رسالة الخطأ لتسهيل التصحيح
             print(f"WebSocket authentication error: {auth_response['error']['message']}")
             ws.close()
             return None
@@ -234,7 +231,6 @@ def get_balance_and_currency(user_token):
             return None, None
         balance_req = {"balance": 1}
         ws.send(json.dumps(balance_req))
-        # يجب أن ننتظر حتى نحصل على رسالة الرصيد بعد رسالة التأكيد
         while True:
             response_str = ws.recv()
             response = json.loads(response_str)
@@ -265,7 +261,6 @@ def check_contract_status(ws, contract_id):
 def place_order(ws, proposal_id, amount):
     if not ws or not ws.connected:
         return {"error": {"message": "WebSocket not connected."}}
-    # ضمان أن المبلغ يتم تقريبه بشكل صحيح ليتوافق مع API
     amount_decimal = decimal.Decimal(str(amount)).quantize(decimal.Decimal('0.01'), rounding=decimal.ROUND_HALF_UP)
     req = {"buy": proposal_id, "price": float(amount_decimal)}
     try:
@@ -311,7 +306,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                 elif profit < 0:
                     consecutive_losses += 1
                     total_losses += 1
-                    # 🚨 تحديث منطق Martingale: x15.0
+                    # تحديث منطق Martingale: x15.0
                     next_bet = float(current_amount) * MARTINGALE_MULTIPLIER 
                     current_amount = max(base_amount, next_bet)
                 else: 
@@ -363,7 +358,7 @@ def run_trading_job_for_user(session_data, check_only=False):
             
             amount_to_bet = max(0.35, round(float(current_amount), 2))
             
-            # 1. 🚨 منطق فحص التيكات الجديد (مُدمج مباشرة)
+            # 1. منطق فحص التيكات الجديد (مُدمج مباشرة)
             ticks_history_req = {
               "ticks_history": SYMBOL, # R_75
               "end": "latest",
@@ -477,7 +472,7 @@ def run_trading_job_for_user(session_data, check_only=False):
         if ws and ws.connected:
             ws.close()
 
-# --- Main Bot Loop Function (Using UTC & Second 0-4 Window) ---
+# --- Main Bot Loop Function ---
 def bot_loop():
     """Main loop that orchestrates trading jobs for all active sessions."""
     print("Bot process started. PID:", os.getpid())
@@ -514,7 +509,7 @@ def bot_loop():
             print(f"Error in bot_loop main loop: {e}. Sleeping for 5 seconds before retrying.")
             time.sleep(5)
 
-# --- Streamlit App Configuration (Corrected Indentation and f-string) ---
+# --- Streamlit App Configuration (Corrected) ---
 st.set_page_config(page_title="Khoury Bot", layout="wide")
 st.title("Khoury Bot 🤖")
 
@@ -572,7 +567,7 @@ if st.session_state.logged_in:
     with st.form("settings_and_control"):
         st.subheader("Bot Settings and Control")
         
-        # 🚨 تصحيح السطر 569 لـ f-string
+        # 🚨 تصحيح الأسطر التي تحتوي على رموز LaTeX/f-string
         st.markdown(f"*Current Strategy:* $\\mathbf{{\\text{{R}}\\_75}}$, Digits Differs $\\mathbf{{5}}$ (Entry on $\\mathbf{{2+}}$ '5's in last 10 Ticks).")
         st.markdown(f"*Martingale Multiplier:* $\\mathbf{{\\times {MARTINGALE\_MULTIPLIER:.1f}}}$ (High Risk)")
 
@@ -653,7 +648,6 @@ if st.session_state.logged_in:
             with col4:
                 st.metric(label="Total Losses", value=stats.get('total_losses', 0))
             with col5:
-                # تحديث عرض الخسائر المتتالية
                 losses_remaining = stats.get('max_consecutive_losses', 0) - stats.get('consecutive_losses', 0)
                 st.metric(label="Consecutive Losses", value=stats.get('consecutive_losses', 0), delta=f"-{losses_remaining} to Stop")
             
