@@ -107,7 +107,6 @@ def update_bot_running_status(status, pid):
 
 def is_user_active(email):
     try:
-        # افتراضي: إذا كان الملف غير موجود، نعتبره نشطًا مؤقتًا
         with open("user_ids.txt", "r") as file:
             active_users = [line.strip() for line in file.readlines()]
         return email in active_users
@@ -509,7 +508,7 @@ def bot_loop():
             print(f"Error in bot_loop main loop: {e}. Sleeping for 5 seconds before retrying.")
             time.sleep(5)
 
-# --- Streamlit App Configuration (Corrected) ---
+# --- Streamlit App Configuration (Corrected Indentation) ---
 st.set_page_config(page_title="Khoury Bot", layout="wide")
 st.title("Khoury Bot 🤖")
 
@@ -564,12 +563,14 @@ if st.session_state.logged_in:
     
     global_bot_status = get_bot_running_status() 
 
+    # 4 مسافات لـ if, 4 مسافات لـ with, 4 مسافات لـ st.subheader
     with st.form("settings_and_control"):
         st.subheader("Bot Settings and Control")
         
-        # 🚨 تصحيح الأسطر التي تحتوي على رموز LaTeX/f-string
+        # 🚨 يجب أن تكون مسافة البادئة هنا متناسقة (8 مسافات)
         st.markdown(f"*Current Strategy:* $\\mathbf{{\\text{{R}}\\_75}}$, Digits Differs $\\mathbf{{5}}$ (Entry on $\\mathbf{{2+}}$ '5's in last 10 Ticks).")
-       st.markdown(f"*Martingale Multiplier:* r'$\mathbf{{\\times {MARTINGALE\_MULTIPLIER:.1f}}}$ (High Risk)'")
+        st.markdown(f"*Martingale Multiplier:* $\\mathbf{{\\times {MARTINGALE\_MULTIPLIER:.1f}}}$ (High Risk)")
+
         user_token_val = ""
         base_amount_val = 0.35
         tp_target_val = 10.0
