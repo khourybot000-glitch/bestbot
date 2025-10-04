@@ -566,7 +566,7 @@ if st.session_state.logged_in:
         st.subheader("Bot Settings and Control")
         
         # 🚨 ملاحظة: تم تحديث عرض الاستراتيجية هنا
-        st.markdown(f"*Current Strategy:* $\mathbf{{\text{{R}}\_75}}$, Digits Differs $\mathbf{5}$ (Entry on $\mathbf{2+}$ '5's in last 10 Ticks).")
+       st.markdown(f"Current Strategy: $\\mathbf{{\\text{{R}}\\_75}}$, Digits Differs $\\mathbf{{5}}$ (Entry on $\\mathbf{{2+}}$ '5's in last 10 Ticks).")
         st.markdown(f"*Martingale Multiplier:* $\mathbf{{\\times {MARTINGALE\_MULTIPLIER:.1f}}}$ (High Risk)")
 
         user_token_val = ""
