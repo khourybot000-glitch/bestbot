@@ -569,8 +569,7 @@ if st.session_state.logged_in:
         
         # 🚨 تصحيح الأسطر التي تحتوي على رموز LaTeX/f-string
         st.markdown(f"*Current Strategy:* $\\mathbf{{\\text{{R}}\\_75}}$, Digits Differs $\\mathbf{{5}}$ (Entry on $\\mathbf{{2+}}$ '5's in last 10 Ticks).")
-        st.markdown(f"*Martingale Multiplier:* $\\mathbf{{\\times {MARTINGALE\_MULTIPLIER:.1f}}}$ (High Risk)")
-
+       st.markdown(f"*Martingale Multiplier:* r'$\mathbf{{\\times {MARTINGALE\_MULTIPLIER:.1f}}}$ (High Risk)'")
         user_token_val = ""
         base_amount_val = 0.35
         tp_target_val = 10.0
