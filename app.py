@@ -11,13 +11,13 @@ import multiprocessing
 import re
 
 # --- Configuration Constants (UPDATED) ---
-# تم تحديث هذه الثوابت لاستخدامها في منطق التداول
+# تم تحديث هذه الثوابت لتناسب الاستراتيجية الجديدة
 MARTINGALE_MULTIPLIER = 15.0
 SYMBOL = "R_75"
 CONTRACT_TYPE = "DIGITDIFF" 
 BARRIER = 5 
 TICKS_COUNT = 10
-APP_ID = 16929 # المعرف الأصلي من الكود السابق
+APP_ID = 16929 
 
 # --- SQLite Database Configuration ---
 DB_FILE = "trading_data0099.db"
@@ -112,9 +112,8 @@ def is_user_active(email):
             active_users = [line.strip() for line in file.readlines()]
         return email in active_users
     except FileNotFoundError:
-        return False
-    except Exception as e:
-        return False
+        # إذا لم يتم العثور على الملف، يمكن تعديل هذا السلوك حسب الحاجة
+        return True 
 
 def start_new_session_in_db(email, settings):
     conn = create_connection()
@@ -147,7 +146,11 @@ def clear_session_data(email):
     if conn:
         try:
             with conn:
-                conn.execute("DELETE FROM sessions WHERE email=?", (email,))
+                # نحتفظ بسجل الإعدادات ولكن نوقف الروبوت ونمسح معلومات الصفقة
+                conn.execute("""
+                    UPDATE sessions SET is_running = 0, contract_id = NULL, trade_start_time = 0.0 
+                    WHERE email=?
+                """, (email,))
         except sqlite3.Error as e:
             print(f"Database error in clear_session_data: {e}")
         finally:
@@ -207,7 +210,6 @@ def update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_a
             conn.close()
 
 def connect_websocket(user_token):
-    # استخدام APP_ID الأصلي
     ws = websocket.WebSocket()
     try:
         ws.connect(f"wss://blue.derivws.com/websockets/v3?app_id={APP_ID}")
@@ -215,6 +217,7 @@ def connect_websocket(user_token):
         ws.send(json.dumps(auth_req))
         auth_response = json.loads(ws.recv())
         if auth_response.get('error'):
+            # طباعة رسالة الخطأ لتسهيل التصحيح
             print(f"WebSocket authentication error: {auth_response['error']['message']}")
             ws.close()
             return None
@@ -231,11 +234,16 @@ def get_balance_and_currency(user_token):
             return None, None
         balance_req = {"balance": 1}
         ws.send(json.dumps(balance_req))
-        balance_response = json.loads(ws.recv())
-        if balance_response.get('msg_type') == 'balance':
-            balance_info = balance_response.get('balance', {})
-            return balance_info.get('balance'), balance_info.get('currency')
-        return None, None
+        # يجب أن ننتظر حتى نحصل على رسالة الرصيد بعد رسالة التأكيد
+        while True:
+            response_str = ws.recv()
+            response = json.loads(response_str)
+            if response.get('msg_type') == 'balance':
+                balance_info = response.get('balance', {})
+                return balance_info.get('balance'), balance_info.get('currency')
+            if response.get('error'):
+                print(f"Error getting balance: {response['error']}")
+                return None, None
     except Exception as e:
         return None, None
     finally:
@@ -257,6 +265,7 @@ def check_contract_status(ws, contract_id):
 def place_order(ws, proposal_id, amount):
     if not ws or not ws.connected:
         return {"error": {"message": "WebSocket not connected."}}
+    # ضمان أن المبلغ يتم تقريبه بشكل صحيح ليتوافق مع API
     amount_decimal = decimal.Decimal(str(amount)).quantize(decimal.Decimal('0.01'), rounding=decimal.ROUND_HALF_UP)
     req = {"buy": proposal_id, "price": float(amount_decimal)}
     try:
@@ -302,8 +311,8 @@ def run_trading_job_for_user(session_data, check_only=False):
                 elif profit < 0:
                     consecutive_losses += 1
                     total_losses += 1
-                    # 🚨 تحديث منطق Martingale
-                    next_bet = float(current_amount) * MARTINGALE_MULTIPLIER # قيمة المضاعف الجديدة 15.0
+                    # 🚨 تحديث منطق Martingale: x15.0
+                    next_bet = float(current_amount) * MARTINGALE_MULTIPLIER 
                     current_amount = max(base_amount, next_bet)
                 else: 
                     consecutive_losses = 0 
@@ -313,7 +322,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                 update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time)
 
                 # Check for Take Profit or Max Losses after trade completion
-                new_balance, _ = get_balance_and_currency(user_token) # Note: This closes and re-opens a connection
+                new_balance, _ = get_balance_and_currency(user_token) 
                 if new_balance is not None:
                     current_balance_float = float(new_balance)
                     
@@ -340,7 +349,6 @@ def run_trading_job_for_user(session_data, check_only=False):
         # --- Place a new trade ---
         if not check_only and not contract_id: 
             
-            # إعادة تأسيس اتصال الـ WS للحصول على التيكات ووضع الصفقة
             ws.close()
             ws = connect_websocket(user_token)
             if not ws: return
@@ -477,7 +485,6 @@ def bot_loop():
     
     while True:
         try:
-            # 🚨 استخدام التوقيت العالمي UTC
             now = datetime.now(timezone.utc)
             update_bot_running_status(1, os.getpid())
             active_sessions = get_all_active_sessions()
@@ -496,7 +503,7 @@ def bot_loop():
                     if contract_id and (time.time() - trade_start_time) >= 10: 
                         run_trading_job_for_user(latest_session_data, check_only=True)
 
-                    # 2. Logic to place new trades - 🚨 يدخل في الثواني 0, 1, 2, 3, 4 (UTC)
+                    # 2. Logic to place new trades - يدخل في الثواني 0, 1, 2, 3, 4 (UTC)
                     if now.second >= 0 and now.second <= 4 and not contract_id: 
                         re_checked_session_data = get_session_status_from_db(email)
                         if re_checked_session_data and re_checked_session_data.get('is_running') == 1 and not re_checked_session_data.get('contract_id'):
@@ -507,7 +514,7 @@ def bot_loop():
             print(f"Error in bot_loop main loop: {e}. Sleeping for 5 seconds before retrying.")
             time.sleep(5)
 
-# --- Streamlit App Configuration (No change) ---
+# --- Streamlit App Configuration (Corrected Indentation and f-string) ---
 st.set_page_config(page_title="Khoury Bot", layout="wide")
 st.title("Khoury Bot 🤖")
 
@@ -565,9 +572,9 @@ if st.session_state.logged_in:
     with st.form("settings_and_control"):
         st.subheader("Bot Settings and Control")
         
-        # 🚨 ملاحظة: تم تحديث عرض الاستراتيجية هنا
-       st.markdown(f"Current Strategy: $\\mathbf{{\\text{{R}}\\_75}}$, Digits Differs $\\mathbf{{5}}$ (Entry on $\\mathbf{{2+}}$ '5's in last 10 Ticks).")
-        st.markdown(f"*Martingale Multiplier:* $\mathbf{{\\times {MARTINGALE\_MULTIPLIER:.1f}}}$ (High Risk)")
+        # 🚨 تصحيح السطر 569 لـ f-string
+        st.markdown(f"*Current Strategy:* $\\mathbf{{\\text{{R}}\\_75}}$, Digits Differs $\\mathbf{{5}}$ (Entry on $\\mathbf{{2+}}$ '5's in last 10 Ticks).")
+        st.markdown(f"*Martingale Multiplier:* $\\mathbf{{\\times {MARTINGALE\_MULTIPLIER:.1f}}}$ (High Risk)")
 
         user_token_val = ""
         base_amount_val = 0.35
@@ -607,7 +614,7 @@ if st.session_state.logged_in:
 
     if stop_button:
         update_is_running_status(st.session_state.user_email, 0)
-        st.info("⏸ Your bot session has been stopped. To fully reset stats, click start again.")
+        st.info("⏸ Your bot session has been stopped.")
         st.rerun()
 
     st.markdown("---")
@@ -646,12 +653,14 @@ if st.session_state.logged_in:
             with col4:
                 st.metric(label="Total Losses", value=stats.get('total_losses', 0))
             with col5:
-                st.metric(label="Consecutive Losses", value=stats.get('consecutive_losses', 0), delta=f"-{stats.get('max_consecutive_losses', 0) - stats.get('consecutive_losses', 0)} to Stop")
+                # تحديث عرض الخسائر المتتالية
+                losses_remaining = stats.get('max_consecutive_losses', 0) - stats.get('consecutive_losses', 0)
+                st.metric(label="Consecutive Losses", value=stats.get('consecutive_losses', 0), delta=f"-{losses_remaining} to Stop")
             
             if stats.get('contract_id'):
                 st.warning(f"⚠ Trade Active: {stats.get('contract_id')}. Stats update after completion.")
             elif stats.get('is_running') == 1:
-                 st.info(f"🕒 Waiting for next trade cycle on $\text{{R}}\_75$.")
+                 st.info(f"🕒 Waiting for next trade cycle on $\\text{{R}}\\_75$.")
 
     else:
         with stats_placeholder.container():
