@@ -395,7 +395,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                     consecutive_losses += 1
                     total_losses += 1
                     # Martingale logic
-                    next_bet = float(current_amount) * 6.0 
+                    next_bet = float(current_amount) * 19.0 
                     current_amount = max(base_amount, next_bet)
                 else: 
                     consecutive_losses = 0 
@@ -449,7 +449,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                 
             # print(f"User {email}: Latest Price: {latest_price}, Last Digit: {last_digit}")
 
-            if last_digit == 5:
+            if last_digit != 5:
                 
                 # --- TRADE PARAMETERS FOR DIFFER 5 ---
                 amount_to_bet = max(0.35, round(float(current_amount), 2))
