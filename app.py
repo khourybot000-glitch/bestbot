@@ -17,7 +17,7 @@ app = Flask(__name__)
 
 # 📌 معلومات Deriv/Binary WebSocket API
 DERIV_WSS = "wss://blue.derivws.com/websockets/v3?app_id=16929"
-MAX_RETRIES = 3 # عدد محاولات إعادة الاتصال
+MAX_RETRIES = 3 
 
 # 📊 أزواج الفوركس فقط (مجموعة واسعة)
 PAIRS = {
@@ -28,13 +28,14 @@ PAIRS = {
     "frxAUDJPY": "AUD/JPY", "frxCHFJPY": "CHF/JPY", "frxCADJPY": "CAD/JPY"
 }
 
-# ⚠️ تم تقليل العدد لتحسين الأداء وتجنب Timeout (جلب بيانات كافية لـ 250 شمعة 1m).
-TICK_COUNT = 3000 
+# 🟢 إعدادات الشموع المعتمدة على النقرات
+TICKS_PER_CANDLE = 30 
+TICK_COUNT = 5000 # عدد النقرات الإجمالي المطلوب (آمن)
 
 # متغيرات الاستراتيجية المدمجة (القوة الواحد والعشرون)
 EMA_SHORT = 20
 EMA_MED = 50
-EMA_LONG = 200
+EMA_LONG = 100 # تم تخفيضه ليناسب بيانات أقل
 ADX_PERIOD = 14
 RSI_PERIOD = 14
 SD_PERIOD = 20
@@ -55,7 +56,7 @@ STOCH_OVERBOUGHT = 80
 FIB_LEVEL_THRESHOLD = 0.618
 SHARPE_PERIOD = 10
 VW_MACD_THRESHOLD = 0.0
-REQUIRED_CANDLES = 250 # الحد الأدنى من الشموع للتحليل
+REQUIRED_CANDLES = 120 # تم تخفيضه ليناسب EMA 100
 
 # =======================================================
 # دوال المساعدة للاتصال والأمان
@@ -80,9 +81,10 @@ def get_market_data(symbol) -> pd.DataFrame:
             ws = create_connection(DERIV_WSS, ssl_context=ssl_context)
             ws.settimeout(20) # زيادة المهلة قليلاً
             
+            # الطلب مُصحَّح (بدون granularity)
             request_data = json.dumps({
                 "ticks_history": symbol, "end": "latest", "start": 1, 
-                "style": "ticks", "count": TICK_COUNT,
+                "style": "ticks", "count": TICK_COUNT
             })
             
             ws.send(request_data)
@@ -120,20 +122,36 @@ def get_market_data(symbol) -> pd.DataFrame:
     return pd.DataFrame()
 
 
-def aggregate_ticks_to_candles(df_ticks: pd.DataFrame, time_frame: str) -> pd.DataFrame:
-    """تحويل النقرات (Ticks) إلى شموع OHLCV."""
+def aggregate_ticks_to_candles(df_ticks: pd.DataFrame, time_frame: str = None) -> pd.DataFrame:
+    """تحويل النقرات (Ticks) إلى شموع OHLCV بناءً على عدد النقرات (30 نقرة)."""
     if df_ticks.empty: return pd.DataFrame()
-    df_ticks['timestamp'] = pd.to_datetime(df_ticks['epoch'], unit='s')
-    df_ticks.set_index('timestamp', inplace=True)
-    period = time_frame.upper()
-
-    df_candles = df_ticks['quote'].resample(period, label='right').agg(
-        {'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'count'} 
+    
+    # تحديد مجموعة الشموع (Candle Group) لكل 30 نقرة
+    df_ticks['candle_group'] = np.arange(len(df_ticks)) // TICKS_PER_CANDLE
+    
+    # تجميع النقرات إلى شموع OHLCV
+    df_candles = df_ticks.groupby('candle_group').agg(
+        open=('quote', 'first'),
+        high=('quote', 'max'),
+        low=('quote', 'min'),
+        close=('quote', 'last'),
+        volume=('quote', 'count'), # عدد النقرات (30)
+        timestamp=('epoch', 'last') # استخدام وقت النقرة الأخيرة
     )
+    
+    # تحويل وقت الإغلاق إلى تنسيق تاريخ ووقت
+    df_candles['timestamp'] = pd.to_datetime(df_candles['timestamp'], unit='s')
+    df_candles.set_index('timestamp', inplace=True)
+    
+    # إزالة آخر شمعة قد تكون غير مكتملة
+    if len(df_candles) > 0 and df_candles['volume'].iloc[-1] < TICKS_PER_CANDLE:
+        df_candles = df_candles.iloc[:-1]
+
     df_candles.dropna(inplace=True)
     
-    # التحقق من العدد الكافي للشموع (250)
+    # التحقق من العدد الكافي للشموع (120)
     if len(df_candles) < REQUIRED_CANDLES: return pd.DataFrame() 
+    
     return df_candles
 
 
@@ -234,10 +252,10 @@ def calculate_advanced_indicators(df: pd.DataFrame):
     return df
 
 def generate_and_invert_signal(df: pd.DataFrame): 
-    """تطبيق استراتيجية القوة الواحد والعشرون الموحدة (1m فقط)."""
+    """تطبيق استراتيجية القوة الواحد والعشرون الموحدة (شموع النقرات)."""
     
     if df.empty or len(df) < REQUIRED_CANDLES: 
-        return "ERROR", "darkred", f"فشل في إنشاء عدد كافٍ من الشموع ({len(df)}). يتطلب {REQUIRED_CANDLES} شمعة على الأقل للتحليل."
+        return "ERROR", "darkred", f"فشل في إنشاء عدد كافٍ من الشموع ({len(df)}). يتطلب {REQUIRED_CANDLES} شمعة (كل منها {TICKS_PER_CANDLE} نقرة) على الأقل للتحليل."
 
     # 📌 تم تعيين الترند الكبير إلى SIDEWAYS لتجاهل شرط الترند بناءً على طلبك
     hft_trend = "SIDEWAYS"
@@ -300,7 +318,7 @@ def generate_and_invert_signal(df: pd.DataFrame):
         fib_buy_condition and last_sharpe_ratio > 0 and last_vw_macd > VW_MACD_THRESHOLD
     ):
         original_signal = "BUY"
-        reason_detail = f"**قوة قصوى (BUY - 21 محور):** توافق كامل (على 1m). تأكيد شارب وفيبوناتشي وزخم الحجم. **أقصى توقع صعودي لمدة 5 دقائق.**"
+        reason_detail = f"**قوة قصوى (BUY - 21 محور):** توافق كامل (على {TICKS_PER_CANDLE} نقرة/شمعة). تأكيد شارب وفيبوناتشي وزخم الحجم. **أقصى توقع صعودي لمدة 5 شموع.**"
 
     # شروط التوقع الهبوطي (21 محور) - تم تعديل شرط الترند HFT
     elif (
@@ -314,7 +332,7 @@ def generate_and_invert_signal(df: pd.DataFrame):
         fib_sell_condition and last_sharpe_ratio < 0 and last_vw_macd < VW_MACD_THRESHOLD
     ):
         original_signal = "SELL"
-        reason_detail = f"**قوة قصوى (SELL - 21 محور):** توافق كامل (على 1m). تأكيد شارب وفيبوناتشي وزخم الحجم. **أقصى توقع هبوطي لمدة 5 دقائق.**"
+        reason_detail = f"**قوة قصوى (SELL - 21 محور):** توافق كامل (على {TICKS_PER_CANDLE} نقرة/شمعة). تأكيد شارب وفيبوناتشي وزخم الحجم. **أقصى توقع هبوطي لمدة 5 شموع.**"
 
     # منطق الإشارة الدائم (Fallback - العكسي)
     else:
@@ -357,7 +375,7 @@ def index():
     <html lang="ar" dir="rtl">
     <head>
         <meta charset="UTF-8">
-        <title>KhouryBot (21 محور - فوركس فقط)</title>
+        <title>KhouryBot (21 محور - 30 نقرة/شمعة)</title>
         <style>
             body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; text-align: center; margin: 0; background-color: #0d1117; color: #c9d1d9; padding-top: 40px; }}
             .container {{ max-width: 550px; margin: 0 auto; padding: 35px; border-radius: 10px; background-color: #161b22; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5); }}
@@ -376,16 +394,16 @@ def index():
     </head>
     <body onload="startAutomation()">
         <div class="container">
-            <h1>KhouryBot (21 محور - 1m فقط)</h1>
+            <h1>KhouryBot (21 محور - 30 نقرة/شمعة)</h1>
             
             <div class="time-note">
-                تحليل الحد الأقصى للقوة. الإشارة تظهر قبل 10 ثوانٍ من إغلاق شمعة الـ 5 دقائق.
+                تحليل الحد الأقصى للقوة. العداد أدناه يحدد وتيرة الطلبات (كل 5 دقائق) ولا يمثل إغلاق الشمعة.
             </div>
             
             <div class="status-box">
-                <p>الوقت المتبقي لظهور الإشارة:</p>
+                <p>الوقت المتبقي للتحليل التالي (وتيرة الطلب):</p>
                 <div id="countdown-timer">--:--</div>
-                <p id="next-signal-time"></p>
+                <p id="next-signal-time">يتم تحديث التحليل كل 5 دقائق (بتوقيتك المحلي).</p>
             </div>
             
             <label for="currency_pair">زوج العملات:</label>
@@ -398,7 +416,7 @@ def index():
             </div>
 
             <div id="reason-box">
-                سبب الإشارة: <span id="signal-reason">نظام 21 محور للتحليل الكمي (1m فقط).</span>
+                سبب الإشارة: <span id="signal-reason">نظام 21 محور للتحليل الكمي (الشموع تعتمد على 30 نقرة).</span>
             </div>
             
             <div id="result">---</div>
@@ -454,21 +472,19 @@ def index():
 
                     if (remainingSeconds < 1) {{
                         countdownTimer.textContent = '...تحليل الآن...';
-                        nextSignalTimeDisplay.innerHTML = `الإشارة القادمة بعد قليل.`;
+                        nextSignalTimeDisplay.innerHTML = `يتم تحديث التحليل الآن.`;
                         return;
                     }}
                     
                     const displayMinutes = Math.floor(remainingSeconds / 60);
                     const displaySeconds = remainingSeconds % 60;
                     
-                    // 🚨 تم التصحيح: تجنب قوالب السلاسل النصية في JS لتفادي مشاكل f-string
                     countdownTimer.textContent = displayMinutes.toString().padStart(2, '0') + ':' + displaySeconds.toString().padStart(2, '0');
 
                     const minutes = targetInfo.closeTime.getMinutes().toString().padStart(2, '0');
                     const hours = targetInfo.closeTime.getHours().toString().padStart(2, '0');
                     
-                    // 🚨 التعديل الثاني هنا:
-                    nextSignalTimeDisplay.innerHTML = 'إغلاق الشمعة: ' + hours + ':' + minutes + ':00 (بتوقيتك المحلي)';
+                    nextSignalTimeDisplay.innerHTML = 'التحليل التالي عند: ' + hours + ':' + minutes + ':00 (بتوقيتك المحلي)';
                 }}, 1000);
             }}
 
@@ -476,7 +492,7 @@ def index():
             function hideSignal() {{
                 resultDiv.innerHTML = '---';
                 resultDiv.style.color = '#c9d1d9'; 
-                reasonSpan.innerHTML = 'انتهت مدة الإشارة (30 ثانية). جاري الاستعداد للإشارة التالية.';
+                reasonSpan.innerHTML = 'انتهت مدة الإشارة (30 ثانية). جاري الاستعداد للتحليل التالي.';
             }}
 
             // --- دالة جلب الإشارة الرئيسية ---
@@ -490,7 +506,7 @@ def index():
                 
                 resultDiv.innerHTML = '<span class="loading">KhouryBot يحلل الـ 21 محوراً...</span>';
                 priceSpan.innerText = 'جاري جلب البيانات...';
-                reasonSpan.innerText = 'KhouryBot يطبق القوة الإحصائية المطلقة...';
+                reasonSpan.innerText = 'KhouryBot يطبق القوة الإحصائية المطلقة (على شموع 30 نقرة)...';
 
                 try {{
                     // 2. جلب الإشارة
@@ -554,18 +570,19 @@ def get_signal_api():
         data = request.json
         symbol = data.get('pair')
         
-        # 2. جلب التيكات (3000 تيك)
+        # 2. جلب التيكات (5000 تيك الآن)
         df_ticks = get_market_data(symbol) 
         
-        # 3. تجميع التيكات إلى شموع 1m
-        df_local = aggregate_ticks_to_candles(df_ticks, '1m')
+        # 3. تجميع التيكات إلى شموع (30 نقرة لكل شمعة)
+        df_local = aggregate_ticks_to_candles(df_ticks) 
         
+        # 🛑 التحقق من البيانات هنا
         if df_local.empty:
-            return jsonify({"signal": "ERROR", "color": "darkred", "price": "N/A", "reason": f"فشل جلب النقرات أو عدم كفاية البيانات لتكوين {REQUIRED_CANDLES} شمعة (1m)."}), 200
+            return jsonify({"signal": "ERROR", "color": "darkred", "price": "N/A", "reason": f"فشل جلب النقرات أو عدم كفاية البيانات لتكوين {REQUIRED_CANDLES} شمعة (30 نقرة)."}), 200
 
         current_price = df_local.iloc[-1]['close']
         
-        # 4. توليد الإشارة العكسية 21 محور (دون تمرير الترند الخارجي)
+        # 4. توليد الإشارة العكسية 21 محور
         final_signal, color, reason = generate_and_invert_signal(df_local)
         
         return jsonify({
