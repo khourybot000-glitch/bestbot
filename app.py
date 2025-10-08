@@ -7,7 +7,8 @@ import ta
 import numpy as np
 import datetime
 
-app = Flask(__name__)
+# تهيئة تطبيق Flask
+app = Flask(_name_)
 
 # 📌 معلومات Deriv/Binary WebSocket API
 DERIV_WSS = "wss://blue.derivws.com/websockets/v3?app_id=16929"
@@ -211,7 +212,13 @@ def calculate_advanced_indicators(df: pd.DataFrame):
     df['Returns'] = df['close'].pct_change() 
     df['Sharpe_Numerator'] = df['Returns'].rolling(window=SHARPE_PERIOD).mean()
     df['Sharpe_Denominator'] = df['Returns'].rolling(window=SHARPE_PERIOD).std()
-    df['Sharpe_Ratio'] = df['Sharpe_Numerator'] / df['Sharpe_Denominator']
+    
+    # 💡 التصحيح: تفادي القسمة على صفر (ZeroDivisionError)
+    df['Sharpe_Ratio'] = np.where(
+        df['Sharpe_Denominator'] == 0, 
+        0, 
+        df['Sharpe_Numerator'] / df['Sharpe_Denominator']
+    )
 
     return df
 
@@ -277,7 +284,7 @@ def generate_and_invert_signal(df: pd.DataFrame, hft_trend: str):
         fib_buy_condition and last_sharpe_ratio > 0 and last_vw_macd > VW_MACD_THRESHOLD
     ):
         original_signal = "BUY"
-        reason_detail = f"**قوة قصوى (BUY - 21 محور):** توافق كامل. تأكيد شارب وفيبوناتشي وزخم الحجم. **أقصى توقع صعودي لمدة 5 دقائق.**"
+        reason_detail = f"*قوة قصوى (BUY - 21 محور):* توافق كامل. تأكيد شارب وفيبوناتشي وزخم الحجم. *أقصى توقع صعودي لمدة 5 دقائق.*"
 
     # شروط التوقع الهبوطي (21 محور)
     elif (
@@ -289,7 +296,7 @@ def generate_and_invert_signal(df: pd.DataFrame, hft_trend: str):
         fib_sell_condition and last_sharpe_ratio < 0 and last_vw_macd < VW_MACD_THRESHOLD
     ):
         original_signal = "SELL"
-        reason_detail = f"**قوة قصوى (SELL - 21 محور):** توافق كامل. تأكيد شارب وفيبوناتشي وزخم الحجم. **أقصى توقع هبوطي لمدة 5 دقائق.**"
+        reason_detail = f"*قوة قصوى (SELL - 21 محور):* توافق كامل. تأكيد شارب وفيبوناتشي وزخم الحجم. *أقصى توقع هبوطي لمدة 5 دقائق.*"
 
     # منطق الإشارة الدائم (Fallback)
     else:
@@ -311,19 +318,20 @@ def generate_and_invert_signal(df: pd.DataFrame, hft_trend: str):
     if original_signal == "BUY":
         inverted_signal = "SELL (PUT) - معكوس"
         color = "red"
-        reason = "🛑 **تم عكس إشارة الشراء الأصلية (نظام 21 محور - الحد الأقصى).** " + reason_detail
+        reason = "🛑 *تم عكس إشارة الشراء الأصلية (نظام 21 محور - الحد الأقصى).* " + reason_detail
     elif original_signal == "SELL":
         inverted_signal = "BUY (CALL) - معكوس"
         color = "lime"
-        reason = "🟢 **تم عكس إشارة البيع الأصلية (نظام 21 محور - الحد الأقصى).** " + reason_detail
+        reason = "🟢 *تم عكس إشارة البيع الأصلية (نظام 21 محور - الحد الأقصى).* " + reason_detail
     else:
-         inverted_signal = "ERROR", color = "darkred", reason = "لم يتم تحديد إشارة بسبب خطأ في المنطق الداخلي."
+         # 🔑 تصحيح خطأ الصياغة (Syntax Error)
+         inverted_signal, color, reason = "ERROR", "darkred", "لم يتم تحديد إشارة بسبب خطأ في المنطق الداخلي."
 
 
     return inverted_signal, color, reason
 
 
-# --- مسارات Flask (مع العداد التنازلي التلقائي) ---
+# -------------------- مسارات Flask والواجهة الأمامية --------------------
 
 @app.route('/', methods=['GET'])
 def index():
@@ -476,7 +484,7 @@ def index():
             const countdownTimer = document.getElementById('countdown-timer');
             const nextSignalTimeDisplay = document.getElementById('next-signal-time');
             let countdownInterval = null; 
-            const SIGNAL_DURATION_MS = 30000; 
+            const SIGNAL_DURATION_MS = 30000; // 30 ثانية مدة ظهور الإشارة
 
             // --- التوقيت الآلي والحسابات المعقدة ---
 
@@ -519,17 +527,17 @@ def index():
 
                     if (remainingSeconds < 1) {{
                         countdownTimer.textContent = '...تحليل الآن...';
-                        nextSignalTimeDisplay.innerHTML = `الإشارة القادمة بعد قليل.`;
+                        nextSignalTimeDisplay.innerHTML = الإشارة القادمة بعد قليل.;
                         return;
                     }}
                     
                     const displayMinutes = Math.floor(remainingSeconds / 60);
                     const displaySeconds = remainingSeconds % 60;
-                    countdownTimer.textContent = `${displayMinutes.toString().padStart(2, '0')}:${displaySeconds.toString().padStart(2, '0')}`;
+                    countdownTimer.textContent = ${displayMinutes.toString().padStart(2, '0')}:${displaySeconds.toString().padStart(2, '0')};
 
                     const minutes = targetInfo.closeTime.getMinutes().toString().padStart(2, '0');
                     const hours = targetInfo.closeTime.getHours().toString().padStart(2, '0');
-                    nextSignalTimeDisplay.innerHTML = `إغلاق الشمعة: ${hours}:${minutes}:00 (بتوقيتك المحلي)`;
+                    nextSignalTimeDisplay.innerHTML = إغلاق الشمعة: ${hours}:${minutes}:00 (بتوقيتك المحلي);
                 }}, 1000);
             }}
 
@@ -641,6 +649,6 @@ def get_signal_api():
             "reason": f"خطأ غير متوقع في الخادم: {str(e)}"
         }), 500
 
-if __name__ == '__main__':
-    # تم تغيير الأمر أدناه ليكون ملائماً لبيئات الإنتاج مثل Render
+if _name_ == '_main_':
+    # هذا الأمر يستخدم لتجربة محلية، Render سيستخدم Gunicorn
     app.run(host='0.0.0.0', port=5000)
