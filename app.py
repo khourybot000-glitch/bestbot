@@ -284,7 +284,7 @@ def generate_and_invert_signal(df: pd.DataFrame, hft_trend: str):
         fib_buy_condition and last_sharpe_ratio > 0 and last_vw_macd > VW_MACD_THRESHOLD
     ):
         original_signal = "BUY"
-        reason_detail = f"*قوة قصوى (BUY - 21 محور):* توافق كامل. تأكيد شارب وفيبوناتشي وزخم الحجم. *أقصى توقع صعودي لمدة 5 دقائق.*"
+        reason_detail = f"**قوة قصوى (BUY - 21 محور):** توافق كامل. تأكيد شارب وفيبوناتشي وزخم الحجم. **أقصى توقع صعودي لمدة 5 دقائق.**"
 
     # شروط التوقع الهبوطي (21 محور)
     elif (
@@ -296,7 +296,7 @@ def generate_and_invert_signal(df: pd.DataFrame, hft_trend: str):
         fib_sell_condition and last_sharpe_ratio < 0 and last_vw_macd < VW_MACD_THRESHOLD
     ):
         original_signal = "SELL"
-        reason_detail = f"*قوة قصوى (SELL - 21 محور):* توافق كامل. تأكيد شارب وفيبوناتشي وزخم الحجم. *أقصى توقع هبوطي لمدة 5 دقائق.*"
+        reason_detail = f"**قوة قصوى (SELL - 21 محور):** توافق كامل. تأكيد شارب وفيبوناتشي وزخم الحجم. **أقصى توقع هبوطي لمدة 5 دقائق.**"
 
     # منطق الإشارة الدائم (Fallback)
     else:
@@ -318,13 +318,12 @@ def generate_and_invert_signal(df: pd.DataFrame, hft_trend: str):
     if original_signal == "BUY":
         inverted_signal = "SELL (PUT) - معكوس"
         color = "red"
-        reason = "🛑 *تم عكس إشارة الشراء الأصلية (نظام 21 محور - الحد الأقصى).* " + reason_detail
+        reason = "🛑 **تم عكس إشارة الشراء الأصلية (نظام 21 محور - الحد الأقصى).** " + reason_detail
     elif original_signal == "SELL":
         inverted_signal = "BUY (CALL) - معكوس"
         color = "lime"
-        reason = "🟢 *تم عكس إشارة البيع الأصلية (نظام 21 محور - الحد الأقصى).* " + reason_detail
+        reason = "🟢 **تم عكس إشارة البيع الأصلية (نظام 21 محور - الحد الأقصى).** " + reason_detail
     else:
-         # تصحيح خطأ الصياغة (Syntax Error)
          inverted_signal, color, reason = "ERROR", "darkred", "لم يتم تحديد إشارة بسبب خطأ في المنطق الداخلي."
 
 
@@ -413,7 +412,7 @@ def index():
                 -webkit-appearance: none; 
                 -moz-appearance: none;
                 appearance: none;
-                background-image: url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%3E%3Cpath%20fill%3D%22%23c9d1d9%22%20d%3D%22M287%20197.3L159.9%2069.1c-3-3-7.7-3-10.7%200l-127%20128.2c-3%203-3%207.7%200%2010.7l10.7%2010.7c3%203%207.7%203%2010.7%200l113.6-114.6c3-3%207.7-3%2010.7%200l113.6%20114.6c3%203%207.7%203%2010.7%200l10.7-10.7c3.1-3%203.1-7.7%200-10.7z%22%2F%3E%3C%2Fsvg%3E'); 
+                background-image: url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%2Fwww.w3.org/2000/svg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%3E%3Cpath%20fill%3D%22%23c9d1d9%22%20d%3D%22M287%20197.3L159.9%2069.1c-3-3-7.7-3-10.7%200l-127%20128.2c-3%203-3%207.7%200%2010.7l10.7%2010.7c3%203%207.7%203%2010.7%200l113.6-114.6c3-3%207.7-3%2010.7%200l113.6%20114.6c3%203%207.7%203%2010.7%200l10.7-10.7c3.1-3%203.1-7.7%200-10.7z%22%2F%3E%3C%2Fsvg%3E'); 
                 background-repeat: no-repeat;
                 background-position: left 0.7em top 50%, 0 0;
                 background-size: 0.65em auto, 100%;
@@ -527,17 +526,17 @@ def index():
 
                     if (remainingSeconds < 1) {{
                         countdownTimer.textContent = '...تحليل الآن...';
-                        nextSignalTimeDisplay.innerHTML = الإشارة القادمة بعد قليل.;
+                        nextSignalTimeDisplay.innerHTML = `الإشارة القادمة بعد قليل.`;
                         return;
                     }}
                     
                     const displayMinutes = Math.floor(remainingSeconds / 60);
                     const displaySeconds = remainingSeconds % 60;
-                    countdownTimer.textContent = ${displayMinutes.toString().padStart(2, '0')}:${displaySeconds.toString().padStart(2, '0')};
+                    countdownTimer.textContent = `${displayMinutes.toString().padStart(2, '0')}:${displaySeconds.toString().padStart(2, '0')}`;
 
                     const minutes = targetInfo.closeTime.getMinutes().toString().padStart(2, '0');
                     const hours = targetInfo.closeTime.getHours().toString().padStart(2, '0');
-                    nextSignalTimeDisplay.innerHTML = إغلاق الشمعة: ${hours}:${minutes}:00 (بتوقيتك المحلي);
+                    nextSignalTimeDisplay.innerHTML = `إغلاق الشمعة: ${hours}:${minutes}:00 (بتوقيتك المحلي)`;
                 }}, 1000);
             }}
 
@@ -649,6 +648,7 @@ def get_signal_api():
             "reason": f"خطأ غير متوقع في الخادم: {str(e)}"
         }), 500
 
-if _name_ == '_main_':
+# تصحيح الخطأ الإملائي هنا
+if __name__ == '__main__':
     # هذا الأمر يستخدم لتجربة محلية، Render سيستخدم Gunicorn
     app.run(host='0.0.0.0', port=5000)
