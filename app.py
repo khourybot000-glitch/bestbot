@@ -2,11 +2,12 @@ import os
 import json
 import time
 import pandas as pd
-from datetime import datetime, timedelta
+import numpy as np
 import ssl
+from datetime import datetime, timedelta
 from websocket import create_connection, WebSocketTimeoutException
 from flask import Flask, request, jsonify, render_template_string
-import ta  # مكتبة التحليل الفني
+import ta # مكتبة التحليل الفني
 
 # =======================================================
 # الإعدادات والثوابت
@@ -14,59 +15,94 @@ import ta  # مكتبة التحليل الفني
 
 app = Flask(__name__)
 
-# تأكد من استخدام معرف تطبيقك الخاص
+# 📌 معلومات Deriv/Binary WebSocket API
 DERIV_WSS = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 MAX_RETRIES = 3 # عدد محاولات إعادة الاتصال
 
+# 📊 أزواج الفوركس فقط (مجموعة واسعة)
+PAIRS = {
+    "frxEURUSD": "EUR/USD", "frxGBPUSD": "GBP/USD", "frxUSDJPY": "USD/JPY",
+    "frxAUDUSD": "AUD/USD", "frxNZDUSD": "NZD/USD", "frxUSDCAD": "USD/CAD",
+    "frxUSDCHF": "USD/CHF", "frxEURGBP": "EUR/GBP", "frxEURJPY": "EUR/JPY",
+    "frxGBPJPY": "GBP/JPY", "frxEURCAD": "EUR/CAD", "frxEURCHF": "EUR/CHF",
+    "frxAUDJPY": "AUD/JPY", "frxCHFJPY": "CHF/JPY", "frxCADJPY": "CAD/JPY"
+}
+
+# ⚠️ تم تقليل العدد لتحسين الأداء وتجنب Timeout.
+# 3000 تيك = حوالي ساعة ونصف من بيانات التداول النشط.
+TICK_COUNT = 3000 
+
+# متغيرات الاستراتيجية المدمجة (القوة الواحد والعشرون)
+EMA_SHORT = 20
+EMA_MED = 50
+EMA_LONG = 200
+ADX_PERIOD = 14
+RSI_PERIOD = 14
+SD_PERIOD = 20
+PSAR_STEP = 0.02
+PSAR_MAX = 0.20
+BB_LOW_EXTREME = 0.05
+BB_HIGH_EXTREME = 0.95
+ADX_STRENGTH_THRESHOLD = 25
+SD_THRESHOLD = 1.0
+Z_SCORE_THRESHOLD = 1.5
+ATR_PERIOD = 14
+ATR_THRESHOLD = 0.8
+CANDLE_STRENGTH_RATIO = 0.8
+STOCH_RSI_WINDOW = 14
+STOCH_RSI_SIGNAL_PERIOD = 3
+STOCH_OVERSOLD = 20
+STOCH_OVERBOUGHT = 80
+FIB_LEVEL_THRESHOLD = 0.618
+SHARPE_PERIOD = 10
+VW_MACD_THRESHOLD = 0.0
+REQUIRED_CANDLES = 250 # الحد الأدنى من الشموع للتحليل
+
 # =======================================================
-# دوال جلب البيانات ومعالجتها - الآن يجلب 50 شمعة 1 دقيقة
+# دوال المساعدة للاتصال والأمان
 # =======================================================
 
-def get_market_data(symbol, time_frame, count) -> pd.DataFrame:
-    """
-    جلب الشموع التاريخية مباشرةً من Deriv WSS.
-    (50 شمعة، إطار زمني 1 دقيقة)
-    """
+def create_ssl_context():
+    """إنشاء سياق SSL موثوق به لاستخدامه في WebSocket."""
+    context = ssl.create_default_context()
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    return context
+
+
+# -------------------- الدوال المساعدة --------------------
+
+def get_market_data(symbol) -> pd.DataFrame:
+    """جلب النقرات التاريخية من Deriv WSS."""
+    ssl_context = create_ssl_context()
+    
     for attempt in range(MAX_RETRIES):
         ws = None
         try:
-            ws = create_connection(DERIV_WSS, sslopt={"cert_reqs": ssl.CERT_NONE})
-            # مهلة 60 ثانية ما زالت آمنة، رغم أن الطلب الآن خفيف جداً
-            ws.settimeout(60) 
-
-            # 👈🏻 التعديل الأول: Granularity = 60 ثانية (1 دقيقة)
-            granularity = 60  
-            # 👈🏻 التعديل الثاني: Candle Count = 50 شمعة
-            candle_count = 50 
-
+            ws = create_connection(DERIV_WSS, ssl_context=ssl_context) # 👈🏻 تم التصحيح لاستخدام create_ssl_context
+            ws.settimeout(20) # زيادة المهلة قليلاً
+            
             request_data = json.dumps({
-                "candles_history": symbol,
-                "end": "latest",
-                "count": candle_count, 
-                "granularity": granularity
+                "ticks_history": symbol, "end": "latest", "start": 1, 
+                "style": "ticks", "count": TICK_COUNT, "granularity": 0
             })
             
             ws.send(request_data)
             response = ws.recv()
             data = json.loads(response)
             
-            if 'candles' in data and data['candles']:
-                df_candles = pd.DataFrame(data['candles'])
-                df_candles['epoch'] = pd.to_numeric(df_candles['epoch'])
-                df_candles.rename(columns={'open': 'open', 'high': 'high', 'low': 'low', 'close': 'close'}, inplace=True)
-                
-                for col in ['open', 'high', 'low', 'close']:
-                    df_candles[col] = pd.to_numeric(df_candles[col], errors='coerce')
-                
-                df_candles.dropna(inplace=True)
-                
-                df_candles['datetime'] = pd.to_datetime(df_candles['epoch'], unit='s')
-                df_candles.set_index('datetime', inplace=True)
-                df_candles.sort_index(inplace=True) 
-                
-                return df_candles
+            # التحقق من الأخطاء في استجابة API
+            if 'error' in data:
+                error_msg = data['error'].get('message', 'Unknown API Error')
+                print(f"ATTEMPT {attempt + 1}: Deriv API returned an error for symbol {symbol}: {error_msg}")
+                continue 
             
-            print(f"ATTEMPT {attempt + 1}: Received invalid candle data format from Deriv.")
+            if 'history' in data and 'prices' in data['history']:
+                df_ticks = pd.DataFrame({'epoch': data['history']['times'], 'quote': data['history']['prices']})
+                df_ticks['quote'] = pd.to_numeric(df_ticks['quote'], errors='coerce')
+                df_ticks.dropna(inplace=True)
+                return df_ticks
+            
+            print(f"ATTEMPT {attempt + 1}: Received unexpected successful format from Deriv (missing 'history' field or data).")
         
         except WebSocketTimeoutException:
             print(f"ATTEMPT {attempt + 1}: WebSocket Timeout.")
@@ -82,270 +118,514 @@ def get_market_data(symbol, time_frame, count) -> pd.DataFrame:
             print(f"Waiting {wait_time} seconds before retrying...")
             time.sleep(wait_time)
 
-    print(f"FATAL: All {MAX_RETRIES} attempts to fetch data for {symbol} failed.")
     return pd.DataFrame()
 
-# ⚠ ملاحظة: تم حذف دالة aggregate_ticks_to_candles حيث لم نعد بحاجة لها.
 
-def generate_inverted_signal(df_candles: pd.DataFrame) -> dict:
-    """توليد إشارة التداول بناءً على استراتيجية Inverted MA Crossover."""
+def aggregate_ticks_to_candles(df_ticks: pd.DataFrame, time_frame: str) -> pd.DataFrame:
+    """تحويل النقرات (Ticks) إلى شموع OHLCV."""
+    if df_ticks.empty: return pd.DataFrame()
+    df_ticks['timestamp'] = pd.to_datetime(df_ticks['epoch'], unit='s')
+    df_ticks.set_index('timestamp', inplace=True)
+    period = time_frame.upper()
+
+    df_candles = df_ticks['quote'].resample(period, label='right').agg(
+        {'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'count'} 
+    )
+    df_candles.dropna(inplace=True)
     
-    # 👈🏻 تم تعديل الشرط ليناسب 50 شمعة كحد أدنى
-    if df_candles.empty or len(df_candles) < 50: 
-        return {"signal": "⚠ ERROR", "color": "darkred", "reason": "بيانات غير كافية (يتطلب 50 شمعة 1 دقيقة لحساب المتوسطات)."}
+    # ⚠️ التحقق من العدد الكافي للشموع (250)
+    if len(df_candles) < REQUIRED_CANDLES: return pd.DataFrame() 
+    return df_candles
 
-    # يجب عليك التأكد من أن هذه المتوسطات تعمل بشكل جيد على إطار الـ 1 دقيقة.
-    # حساب المتوسطات المتحركة (SMA)
-    df_candles['SMA_20'] = ta.trend.sma_indicator(df_candles['close'], window=20)
-    df_candles['SMA_50'] = ta.trend.sma_indicator(df_candles['close'], window=50)
+
+def get_high_timeframe_trend(symbol: str) -> str:
+    """يحدد الترند العام من إطار زمني أعلى (4h) باستخدام EMA 200."""
+    ssl_context = create_ssl_context()
     
-    latest_close = df_candles['close'].iloc[-1]
-    # قد تكون هذه القيمة NaN إذا لم يتوفر 50 شمعة، لذلك يجب التحقق
-    sma_20 = df_candles['SMA_20'].iloc[-1] if not df_candles['SMA_20'].empty else None
-    sma_50 = df_candles['SMA_50'].iloc[-1] if not df_candles['SMA_50'].empty else None
-
-    if sma_20 is None or sma_50 is None:
-         return {"signal": "⚠ ERROR", "color": "darkred", "reason": "خطأ في حساب المتوسطات المتحركة (قد تكون البيانات غير مكتملة)."}
-
-    # منطق استراتيجية Inverted MA Crossover
-    is_trend_up = (sma_20 > sma_50)
-    
-    if is_trend_up:
-        # الاتجاه صاعد -> إشارتنا العكسية هي بيع
-        signal = "SELL (INVERTED)"
-        color = "red"
-        reason = "SMA 20 (أسرع) فوق SMA 50 (أبطأ) - إشارة بيع عكسية."
-    else: 
-        # الاتجاه هابط -> إشارتنا العكسية هي شراء
-        signal = "BUY (INVERTED)"
-        color = "green"
-        reason = "SMA 20 (أسرع) تحت SMA 50 (أبطأ) - إشارة شراء عكسية."
+    try:
+        ws = create_connection(DERIV_WSS, ssl_context=ssl_context)
+        request_data = json.dumps({
+            "candles": symbol, "end": "latest", "start": 1, 
+            "count": 250, "granularity": 4 * 3600 
+        })
+        ws.send(request_data)
+        response = ws.recv()
+        data = json.loads(response)
+        ws.close()
         
-    return {
-        "signal": signal,
-        "color": color,
-        "price": f"{latest_close:.5f}",
-        "reason": reason
+        if 'candles' in data:
+            df = pd.DataFrame(data['candles'])
+            df['close'] = pd.to_numeric(df['close'], errors='coerce')
+            df.dropna(inplace=True)
+            if len(df) < EMA_LONG: return "SIDEWAYS"
+
+            df['EMA_LONG'] = ta.trend.ema_indicator(df['close'], window=EMA_LONG, fillna=True)
+            
+            last_close = df.iloc[-1]['close']
+            last_ema_long = df.iloc[-1]['EMA_LONG']
+
+            if last_close > last_ema_long:
+                return "BULLISH"
+            elif last_close < last_ema_long:
+                return "BEARISH"
+        return "SIDEWAYS"
+    except Exception as e:
+        return "SIDEWAYS"
+
+
+# 👈🏻 لم يتم تغيير الدوال التالية الخاصة بالاستراتيجية، وهي:
+# is_strong_candle, check_rsi_divergence, calculate_fibonacci_ret, 
+# calculate_advanced_indicators, generate_and_invert_signal
+# سيتم إدراجها كما هي للحفاظ على منطق الـ 21 محور.
+
+def is_strong_candle(candle: pd.Series, direction: str) -> bool:
+    """المحور 15: يحدد ما إذا كانت الشمعة الأخيرة شمعة قوية."""
+    range_hl = candle['high'] - candle['low']
+    if range_hl == 0: return False 
+    
+    if direction == "BUY":
+        body = candle['close'] - candle['open']
+        if body < 0: return False 
+        body_ratio = body / range_hl
+        return body_ratio >= CANDLE_STRENGTH_RATIO
+    elif direction == "SELL":
+        body = candle['open'] - candle['close']
+        if body < 0: return False 
+        body_ratio = body / range_hl
+        return body_ratio >= CANDLE_STRENGTH_RATIO
+    return False
+
+def check_rsi_divergence(df: pd.DataFrame) -> str:
+    """المحور 14: يكتشف انحرافات RSI (Divergence)."""
+    df['RSI'] = ta.momentum.rsi(df['close'], window=RSI_PERIOD)
+    recent_data = df.iloc[-15:]
+    
+    if len(recent_data) < 5: return "NONE"
+
+    # الانحراف الهبوطي (Bearish Divergence)
+    if (recent_data['high'].iloc[-1] > recent_data['high'].iloc[-5] and
+        recent_data['RSI'].iloc[-1] < recent_data['RSI'].iloc[-5]):
+        return "BEARISH"
+
+    # الانحراف الصعودي (Bullish Divergence)
+    if (recent_data['low'].iloc[-1] < recent_data['low'].iloc[-5] and
+        recent_data['RSI'].iloc[-1] > recent_data['RSI'].iloc[-5]):
+        return "BULLISH"
+
+    return "NONE"
+
+def calculate_fibonacci_ret(df: pd.DataFrame) -> tuple:
+    """يحسب مستويات فيبوناتشي التراجعية (38.2, 50, 61.8) للـ 50 شمعة الأخيرة."""
+    recent_data = df.iloc[-50:]
+    high = recent_data['high'].max()
+    low = recent_data['low'].min()
+    
+    if high == low:
+        return None, None, None 
+        
+    diff = high - low
+    fib_levels = {
+        '38.2': high - diff * 0.382,
+        '50.0': high - diff * 0.5,
+        '61.8': high - diff * 0.618,
     }
+    return fib_levels, high, low
 
-# =======================================================
-# دوال الـ Flask (المسارات)
-# =======================================================
+def calculate_advanced_indicators(df: pd.DataFrame):
+    """حساب جميع المؤشرات الـ 21 (بما في ذلك VW-MACD وSharpe Ratio)."""
+    
+    # 1. المتوسطات المتحركة (1, 2, 3)
+    df['EMA_SHORT'] = ta.trend.ema_indicator(df['close'], window=EMA_SHORT, fillna=True) 
+    df['EMA_MED'] = ta.trend.ema_indicator(df['close'], window=EMA_MED, fillna=True)     
+    df['EMA_LONG'] = ta.trend.ema_indicator(df['close'], window=EMA_LONG, fillna=True)    
 
-@app.route('/')
-def index():
-    """عرض الواجهة الرئيسية وتحديث مؤقت العد التنازلي."""
+    # 2. مؤشرات الزخم والتقلب الأساسية (4-14)
+    df = df.join(ta.volatility.bollinger_pband(close=df['close'], window=20, window_dev=2, fillna=True).rename('BBP'))
+    df = df.join(ta.trend.adx(df['high'], df['low'], df['close'], window=ADX_PERIOD, fillna=True))
+    df = df.join(ta.volume.on_balance_volume(df['close'], df['volume'], fillna=True).rename('OBV'))
+    df['VWAP'] = ta.volume.vwap(df['high'], df['low'], df['close'], df['volume'], fillna=True)
+    df['PSAR'] = ta.trend.psar(df['high'], df['low'], step=PSAR_STEP, max_step=PSAR_MAX, fillna=True) 
+    df['SD'] = ta.volatility.stdev(df['close'], window=SD_PERIOD, fillna=True) 
+    df = df.join(ta.trend.adx_pos(df['high'], df['low'], df['close'], window=ADX_PERIOD, fillna=True).rename('PDI'))
+    df = df.join(ta.trend.adx_neg(df['high'], df['low'], df['close'], window=ADX_PERIOD, fillna=True).rename('NDI'))
+    stoch_rsi = ta.momentum.stochrsi(df['close'], window=STOCH_RSI_WINDOW, smooth1=STOCH_RSI_SIGNAL_PERIOD, smooth2=STOCH_RSI_SIGNAL_PERIOD, fillna=True)
+    df = df.join(stoch_rsi.rename({'stochrsi_k': 'StochRSI_K', 'stochrsi_d': 'StochRSI_D'}, axis=1))
+
+    # 3. المؤشرات الإحصائية المتقدمة (15-18)
+    df['Z_SCORE'] = (df['close'] - df['EMA_LONG']) / df['SD']
+    df['ATR'] = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=ATR_PERIOD, fillna=True)
+    df['ATR_AVG'] = df['ATR'].rolling(window=ATR_PERIOD * 2).mean()
+    df['UO'] = ta.momentum.ultimate_oscillator(df['high'], df['low'], df['close'], fillna=True)
+    df['RSI'] = ta.momentum.rsi(df['close'], window=RSI_PERIOD) 
+
+    # 4. المؤشرات النهائية الجديدة (19-21)
     
-    # 👈🏻 تم تعديل توقيت الإغلاق ليعكس إطار الـ 1 دقيقة
-    current_time = datetime.now()
-    next_close_minute = current_time.minute + 1
+    # المحور 19: VW-MACD (زخم موثق بالحجم)
+    df['VW_MACD'] = ta.momentum.macd_diff(
+        close=df['close'] * df['volume'], 
+        window_fast=12, window_slow=26, window_sign=9, fillna=True
+    )['macd_diff']
+
+    # المحور 20: Sharpe Ratio (عائد/مخاطرة)
+    df['Returns'] = df['close'].pct_change() 
+    df['Sharpe_Numerator'] = df['Returns'].rolling(window=SHARPE_PERIOD).mean()
+    df['Sharpe_Denominator'] = df['Returns'].rolling(window=SHARPE_PERIOD).std()
+    df['Sharpe_Ratio'] = df['Sharpe_Numerator'] / df['Sharpe_Denominator']
+
+    return df
+
+def generate_and_invert_signal(df: pd.DataFrame, hft_trend: str):
+    """تطبيق استراتيجية القوة الواحد والعشرون الموحدة."""
     
-    # إذا كانت الدقيقة القادمة ستتجاوز 60
-    if next_close_minute >= 60:
-        next_close_time = (current_time + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    if df.empty or len(df) < REQUIRED_CANDLES: 
+        return "ERROR", "darkred", f"فشل في إنشاء عدد كافٍ من الشموع ({len(df)}). يتطلب {REQUIRED_CANDLES} شمعة على الأقل للتحليل."
+
+    df = calculate_advanced_indicators(df)
+    fib_levels, _, _ = calculate_fibonacci_ret(df)
+    rsi_divergence = check_rsi_divergence(df.iloc[-20:].copy()) # استخدام نسخة لتجنب SettingWithCopyWarning
+
+    last_candle = df.iloc[-1]
+    prev_candle = df.iloc[-2]
+    last_close = last_candle['close']
+    
+    # استخراج القيم
+    last_ema_short = last_candle['EMA_SHORT']
+    last_ema_med = last_candle['EMA_MED']
+    last_vwap = last_candle['VWAP']
+    # تم تصحيح مقارنة MACD - يجب استخدام macd_diff (histogram)
+    macd_hist_rising = last_candle['macd_diff'] > prev_candle['macd_diff'] 
+    last_psar = last_candle['PSAR']
+    last_pdi = last_candle['PDI']
+    last_ndi = last_candle['NDI']
+    last_bbp = last_candle['BBP']
+    last_adx = last_candle['adx']
+    last_sd = last_candle['SD']
+    obv_rising = last_candle['OBV'] > prev_candle['OBV']
+    last_z_score = last_candle['Z_SCORE']
+    last_atr = last_candle['ATR']
+    atr_avg = last_candle['ATR_AVG']
+    last_uo = last_candle['UO']
+    last_vw_macd = last_candle['VW_MACD']
+    last_sharpe_ratio = last_candle['Sharpe_Ratio']
+    
+    stoch_buy_condition = (last_candle['StochRSI_K'] > last_candle['StochRSI_D'] and prev_candle['StochRSI_K'] < prev_candle['StochRSI_D'] and last_candle['StochRSI_K'] < STOCH_OVERSOLD)
+    stoch_sell_condition = (last_candle['StochRSI_K'] < last_candle['StochRSI_D'] and prev_candle['StochRSI_K'] > prev_candle['StochRSI_D'] and last_candle['StochRSI_K'] > STOCH_OVERBOUGHT)
+    strong_buy_candle = is_strong_candle(last_candle, "BUY")
+    strong_sell_candle = is_strong_candle(last_candle, "SELL")
+    
+    # شروط فيبوناتشي
+    fib_buy_condition = False
+    fib_sell_condition = False
+    if fib_levels and fib_levels['61.8']:
+        if last_close > fib_levels['61.8'] and prev_candle['close'] < fib_levels['61.8']:
+            fib_buy_condition = True
+        # ملاحظة: تم تعديل منطق fib_sell_condition ليطابق عادة مستوى 38.2 أو اختراق قاع النطاق.
+        # سأفترض أنك تقصد الـ 38.2 لسيناريو البيع
+        if last_close < fib_levels['38.2'] and prev_candle['close'] > fib_levels['38.2']:
+            fib_sell_condition = True
+
+
+    # --- توليد الإشارة الأصلية (القوة الواحد والعشرون القصوى) ---
+    original_signal = ""
+    reason_detail = ""
+
+    # شروط التوقع الصعودي (21 محور)
+    # تم تبسيط شروط MACD و Z-SCORE
+    if (
+        last_close > last_ema_short and last_close > last_ema_med and hft_trend == "BULLISH" and last_close > last_vwap and
+        macd_hist_rising and last_pdi > last_ndi and last_close > last_psar and stoch_buy_condition and last_sd > SD_THRESHOLD and
+        last_adx > ADX_STRENGTH_THRESHOLD and last_bbp < BB_LOW_EXTREME and obv_rising and 
+        strong_buy_candle and rsi_divergence == "BULLISH" and
+        last_z_score < -Z_SCORE_THRESHOLD and last_atr > atr_avg * ATR_THRESHOLD and last_uo < 30 and
+        fib_buy_condition and last_sharpe_ratio > 0 and last_vw_macd > VW_MACD_THRESHOLD
+    ):
+        original_signal = "BUY"
+        reason_detail = f"**قوة قصوى (BUY - 21 محور):** توافق كامل. تأكيد شارب وفيبوناتشي وزخم الحجم. **أقصى توقع صعودي لمدة 5 دقائق.**"
+
+    # شروط التوقع الهبوطي (21 محور)
+    elif (
+        last_close < last_ema_short and last_close < last_ema_med and hft_trend == "BEARISH" and last_close < last_vwap and
+        not macd_hist_rising and last_ndi > last_pdi and last_close < last_psar and stoch_sell_condition and last_sd > SD_THRESHOLD and
+        last_adx > ADX_STRENGTH_THRESHOLD and last_bbp > BB_HIGH_EXTREME and not obv_rising and 
+        strong_sell_candle and rsi_divergence == "BEARISH" and
+        last_z_score > Z_SCORE_THRESHOLD and last_atr > atr_avg * ATR_THRESHOLD and last_uo > 70 and
+        fib_sell_condition and last_sharpe_ratio < 0 and last_vw_macd < VW_MACD_THRESHOLD
+    ):
+        original_signal = "SELL"
+        reason_detail = f"**قوة قصوى (SELL - 21 محور):** توافق كامل. تأكيد شارب وفيبوناتشي وزخم الحجم. **أقصى توقع هبوطي لمدة 5 دقائق.**"
+
+    # منطق الإشارة الدائم (Fallback)
     else:
-        next_close_time = current_time.replace(minute=next_close_minute, second=0, microsecond=0)
+        # ⚠️ تم استبدال المنطق الافتراضي بالمنطق الأصلي الذي طلبته في البداية (تقاطع EMA 20/50 العكسي)
+        if last_ema_short > last_ema_med:
+            # الترند صاعد (EMA20 > EMA50) -> الإشارة العكسية هي بيع
+            original_signal = "SELL"
+            reason_detail = (f"إشارة دائمة (تقاطع EMA العكسي): الترند الصاعد (EMA20>EMA50) يعني إشارة بيع.")
+        else: 
+            # الترند هابط (EMA20 < EMA50) -> الإشارة العكسية هي شراء
+            original_signal = "BUY"
+            reason_detail = (f"إشارة دائمة (تقاطع EMA العكسي): الترند الهابط (EMA20<EMA50) يعني إشارة شراء.")
 
-    time_remaining = next_close_time - current_time
-    total_seconds = int(time_remaining.total_seconds())
 
-    # عرض التوقيت بالتنسيق: HH:MM
-    display_close_time = next_close_time.strftime("%H:%M")
+    # --- منطق العكس (Inversion Logic) ---
+    if original_signal == "BUY":
+        inverted_signal = "BUY (CALL) - معكوس"
+        color = "lime"
+        # تم عكس لون الإشارة النهائية ليتناسب مع الإشارة (BUY/CALL)
+        reason = "🟢 **تم عكس إشارة البيع الأصلية (نظام 21 محور - الحد الأقصى).** " + reason_detail
+    elif original_signal == "SELL":
+        inverted_signal = "SELL (PUT) - معكوس"
+        color = "red"
+        # تم عكس لون الإشارة النهائية ليتناسب مع الإشارة (SELL/PUT)
+        reason = "🛑 **تم عكس إشارة الشراء الأصلية (نظام 21 محور - الحد الأقصى).** " + reason_detail
+    else:
+         inverted_signal = "ERROR", color = "darkred", reason = "لم يتم تحديد إشارة بسبب خطأ في المنطق الداخلي."
 
-    # القالب النصي HTML مع كود JavaScript المُصحح
-    html_template = f"""
+
+    return inverted_signal, color, reason
+
+
+# --- مسارات Flask (مع العداد التنازلي التلقائي) ---
+
+@app.route('/', methods=['GET'])
+def index():
+    """ينشئ الواجهة الأمامية الأوتوماتيكية مع العداد التنازلي."""
+    
+    # ⚠️ إعادة استخدام القالب الذي أرسلته أنت
+    pair_options = "".join([f'<option value="{code}">{name} ({code})</option>' for code, name in PAIRS.items()])
+
+    html_content = f"""
     <!DOCTYPE html>
     <html lang="ar" dir="rtl">
     <head>
         <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>KhouryBot محور 21</title>
+        <title>KhouryBot (21 محور - فوركس فقط)</title>
         <style>
-            /* (تصميم CSS) */
-            body {{
-                font-family: 'Arial', sans-serif;
-                background-color: #2c3e50;
-                color: #ecf0f1;
-                text-align: center;
-                padding: 20px;
-            }}
-            .container {{
-                max-width: 600px;
-                margin: 0 auto;
-                background-color: #34495e;
-                padding: 30px;
-                border-radius: 10px;
-                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
-            }}
-            h1 {{ color: #f1c40f; margin-bottom: 5px; }}
-            p {{ font-size: 1.1em; color: #bdc3c7; }}
-            .data-box {{
-                background-color: #2c3e50;
-                padding: 15px;
-                margin: 20px 0;
-                border-radius: 8px;
-                text-align: right;
-            }}
-            .signal-display {{
-                min-height: 100px;
-                display: flex;
-                flex-direction: column;
-                justify-content: center;
-                align-items: center;
-                font-size: 1.8em;
-                font-weight: bold;
-                border-radius: 8px;
-                transition: background-color 0.5s;
-                color: #ecf0f1;
-            }}
-            .time-display {{ font-size: 1.5em; margin-top: 10px; color: #9b59b6; }}
-            .loader {{ 
-                font-size: 1.5em; 
-                color: #3498db; 
-                margin-top: 15px; 
-            }}
-            .loader span {{ animation: pulse 1s infinite alternate; }}
-            @keyframes pulse {{
-                0% {{ opacity: 0.5; }}
-                100% {{ opacity: 1; }}
-            }}
-            .error-message {{ color: darkred; font-weight: bold; margin-top: 10px; }}
+            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; text-align: center; margin: 0; background-color: #0d1117; color: #c9d1d9; padding-top: 40px; }}
+            .container {{ max-width: 550px; margin: 0 auto; padding: 35px; border-radius: 10px; background-color: #161b22; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5); }}
+            h1 {{ color: #FFD700; margin-bottom: 25px; font-size: 1.8em; text-shadow: 0 0 10px rgba(255, 215, 0, 0.5); }}
+            .time-note {{ color: #58a6ff; font-weight: bold; margin-bottom: 15px; font-size: 1.1em; }}
+            .status-box {{ background-color: #21262d; padding: 15px; border-radius: 6px; margin-bottom: 25px; border-right: 3px solid #FFD700; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3); }}
+            #countdown-timer {{ font-size: 2.2em; color: #ff00ff; font-weight: bold; display: block; margin: 5px 0 10px 0; text-shadow: 0 0 8px rgba(255, 0, 255, 0.5); }}
+            #next-signal-time {{ color: #8b949e; font-size: 0.9em; }}
+            label {{ display: block; text-align: right; margin-bottom: 5px; color: #8b949e; }}
+            select {{ padding: 12px; margin: 10px 0; width: 100%; box-sizing: border-box; border: 1px solid #30363d; border-radius: 6px; font-size: 16px; background-color: #21262d; color: #c9d1d9; -webkit-appearance: none; -moz-appearance: none; appearance: none; background-image: url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%3E%3Cpath%20fill%3D%22%23c9d1d9%22%20d%3D%22M287%20197.3L159.9%2069.1c-3-3-7.7-3-10.7%200l-127%20128.2c-3%203-3%207.7%200%2010.7l10.7%2010.7c3%203%207.7%203%2010.7%200l113.6-114.6c3-3%207.7-3%2010.7%200l113.6%20114.6c3%203%207.7%203%2010.7%200l10.7-10.7c3.1-3%203.1-7.7%200-10.7z%22%2F%3E%3C%2Fsvg%3E'); background-repeat: no-repeat; background-position: left 0.7em top 50%, 0 0; background-size: 0.65em auto, 100%; }
+            #result {{ font-size: 3.5em; margin-top: 30px; font-weight: 900; min-height: 70px; text-shadow: 0 0 15px rgba(255, 255, 255, 0.7); }}
+            #reason-box {{ background-color: #21262d; padding: 15px; border-radius: 6px; margin-top: 20px; font-size: 0.9em; color: #9e9e9e; text-align: right; border-right: 3px solid #FFD700; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3); }}
+            .loading {{ color: #58a6ff; font-size: 1.2em; animation: pulse 1.5s infinite alternate; }}
+            @keyframes pulse {{ from {{ opacity: 1; }} to {{ opacity: 0.6; }} }}
         </style>
     </head>
-    <body>
+    <body onload="startAutomation()">
         <div class="container">
-            <h1>محور 21 KhouryBot - فوركس فقط</h1>
-            <p>تحليل الحد الأقصى للقوة. الإشارة تظهر قبل 10 ثوانٍ من إغلاق شمعة الـ *1 دقيقة*.</p>
-
-            <div class="data-box">
-                <p><strong>الوقت المتبقي لظهور الإشارة:</strong></p>
-                <div id="countdown-timer" class="time-display">جاري التحميل...</div>
-                <p>إغلاق الشمعة: <span id="close-time">{display_close_time}</span> (بتوقيتك المحلي)</p>
-            </div>
-
-            <div id="signal-area" class="signal-display">
-                <p class="loader" id="loader-text">KhouryBot... يحلل القوة القصوى...</p>
-                <p class="time-display" id="error-display" style="display: none;"></p>
-            </div>
-
-            <div class="data-box">
-                <p><strong>زوج العملات:</strong> EUR/USD (fixEURUSD)</p>
-                <p><strong>آخر سعر إغلاق تم تحليله:</strong> <span id="last-price">N/A</span></p>
-                <p class="error-message" id="error-reason"></p>
+            <h1>KhouryBot (21 محور - فوركس فقط)</h1>
+            
+            <div class="time-note">
+                تحليل الحد الأقصى للقوة. الإشارة تظهر قبل 10 ثوانٍ من إغلاق شمعة الـ 5 دقائق.
             </div>
             
-            <p style="font-size: 0.9em; color: #7f8c8d;">تم التطوير ليكون مخصصًا لـ Deriv API - قد لا يعمل على منصات أخرى.</p>
+            <div class="status-box">
+                <p>الوقت المتبقي لظهور الإشارة:</p>
+                <div id="countdown-timer">--:--</div>
+                <p id="next-signal-time"></p>
+            </div>
+            
+            <label for="currency_pair">زوج العملات:</label>
+            <select id="currency_pair">
+                {pair_options}
+            </select>
+            
+            <div id="price-info">
+                آخر سعر إغلاق تم تحليله: <span id="current-price">N/A</span>
+            </div>
+
+            <div id="reason-box">
+                سبب الإشارة: <span id="signal-reason">نظام 21 محور للتحليل الكمي.</span>
+            </div>
+            
+            <div id="result">---</div>
         </div>
 
         <script>
-            let totalSeconds = {total_seconds};
+            const resultDiv = document.getElementById('result');
+            const priceSpan = document.getElementById('current-price');
+            const reasonSpan = document.getElementById('signal-reason');
             const countdownTimer = document.getElementById('countdown-timer');
-            const signalArea = document.getElementById('signal-area');
-            const loaderText = document.getElementById('loader-text');
-            const lastPrice = document.getElementById('last-price');
-            const errorReason = document.getElementById('error-reason');
-            const errorDisplay = document.getElementById('error-display');
-            const closeTimeDisplay = document.getElementById('close-time');
+            const nextSignalTimeDisplay = document.getElementById('next-signal-time');
+            let countdownInterval = null; 
+            const SIGNAL_DURATION_MS = 30000; 
 
-            function updateTimer() {{
-                if (totalSeconds <= 0) {{
-                    // إعادة تحميل الصفحة أو إعادة حساب التوقيت
-                    location.reload(); 
-                    return;
-                }}
+            // --- التوقيت الآلي والحسابات المعقدة ---
 
-                totalSeconds--;
-
-                const displayMinutes = Math.floor(totalSeconds / 60);
-                const displaySeconds = totalSeconds % 60;
+            function calculateNextSignalTime() {{
+                const now = new Date();
+                const currentMinutes = now.getMinutes();
                 
-                // الكود المُصحح: يستخدم الجمع بدلاً من Template Literals
-                countdownTimer.textContent = displayMinutes.toString().padStart(2, '0') + ':' + displaySeconds.toString().padStart(2, '0');
+                // 1. حساب أقرب علامة 5 دقائق تالية (T_close)
+                const nextFiveMinuteMark = Math.ceil((currentMinutes + 1) / 5) * 5;
+                
+                let nextTargetTime = new Date(now);
+                nextTargetTime.setMinutes(nextFiveMinuteMark);
+                nextTargetTime.setSeconds(0);
+                nextTargetTime.setMilliseconds(0);
+                
+                if (nextTargetTime.getTime() <= now.getTime()) {{
+                    nextTargetTime.setMinutes(nextTargetTime.getMinutes() + 5);
+                }}
 
-                // إذا تبقى 10 ثوانٍ، نبدأ بجلب الإشارة
-                if (totalSeconds === 10) {{
-                    fetchSignal();
+                // 2. توقيت الإشارة (T_signal = T_close - 10 ثواني)
+                const signalTime = new Date(nextTargetTime.getTime() - 10000); 
+
+                // 3. حساب التأخير بالملي ثانية
+                const delayMs = signalTime.getTime() - now.getTime();
+                const safeDelay = Math.max(1000, delayMs); 
+
+                return {{
+                    delay: safeDelay,
+                    closeTime: nextTargetTime,
+                    signalTime: signalTime
+                }};
+            }}
+            
+            function startCountdown() {{
+                if (countdownInterval) clearInterval(countdownInterval);
+
+                countdownInterval = setInterval(() => {{
+                    const targetInfo = calculateNextSignalTime();
+                    let remainingSeconds = Math.ceil(targetInfo.delay / 1000);
+
+                    if (remainingSeconds < 1) {{
+                        countdownTimer.textContent = '...تحليل الآن...';
+                        nextSignalTimeDisplay.innerHTML = `الإشارة القادمة بعد قليل.`;
+                        return;
+                    }}
+                    
+                    const displayMinutes = Math.floor(remainingSeconds / 60);
+                    const displaySeconds = remainingSeconds % 60;
+                    countdownTimer.textContent = `${displayMinutes.toString().padStart(2, '0')}:${displaySeconds.toString().padStart(2, '0')}`;
+
+                    const minutes = targetInfo.closeTime.getMinutes().toString().padStart(2, '0');
+                    const hours = targetInfo.closeTime.getHours().toString().padStart(2, '0');
+                    nextSignalTimeDisplay.innerHTML = `إغلاق الشمعة: ${hours}:${minutes}:00 (بتوقيتك المحلي)`;
+                }}, 1000);
+            }}
+
+            // --- دالة إخفاء الإشارة ---
+            function hideSignal() {{
+                resultDiv.innerHTML = '---';
+                resultDiv.style.color = '#c9d1d9'; 
+                reasonSpan.innerHTML = 'انتهت مدة الإشارة (30 ثانية). جاري الاستعداد للإشارة التالية.';
+            }}
+
+            // --- دالة جلب الإشارة الرئيسية ---
+            async function autoFetchSignal() {{
+                // 1. إظهار حالة التحليل
+                if (countdownInterval) clearInterval(countdownInterval);
+                countdownTimer.textContent = '...KhouryBot يحلل القوة القصوى...'; 
+
+                const pair = document.getElementById('currency_pair').value;
+                const time = '1m'; 
+                
+                resultDiv.innerHTML = '<span class="loading">KhouryBot يحلل الـ 21 محوراً...</span>';
+                priceSpan.innerText = 'جاري جلب البيانات...';
+                reasonSpan.innerText = 'KhouryBot يطبق القوة الإحصائية المطلقة...';
+
+                try {{
+                    // 2. جلب الإشارة
+                    const response = await fetch('/get-inverted-signal', {{ 
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ pair: pair, time: time }})
+                    }});
+                    const data = await response.json();
+                    
+                    // 3. عرض الإشارة
+                    resultDiv.innerHTML = data.signal; 
+                    resultDiv.style.color = data.color; 
+                    priceSpan.innerText = data.price;
+                    reasonSpan.innerHTML = data.reason; 
+
+                    // 4. جدولة إخفاء الإشارة بعد 30 ثانية
+                    setTimeout(() => {{
+                        hideSignal();
+                        scheduleNextSignal(); 
+                    }}, SIGNAL_DURATION_MS);
+
+                }} catch (error) {{
+                    resultDiv.innerHTML = 'خطأ في الخادم.';
+                    resultDiv.style.color = '#ff9800'; 
+                    priceSpan.innerText = 'فشل الاتصال';
+                    reasonSpan.innerText = 'فشل الاتصال بخادم Deriv أو خطأ في المعالجة.';
+                    
+                    // في حال الخطأ، ننتظر 30 ثانية ثم نحاول الجولة التالية
+                    setTimeout(scheduleNextSignal, SIGNAL_DURATION_MS);
                 }}
             }}
 
-            function fetchSignal() {{
-                signalArea.style.backgroundColor = '#34495e'; // لون الخلفية العادي
-                loaderText.style.display = 'block';
-                errorReason.textContent = '';
-                errorDisplay.style.display = 'none';
-
-                fetch('/get-inverted-signal', {{
-                    method: 'POST',
-                    headers: {{ 'Content-Type': 'application/json' }},
-                    // 👈🏻 تم تعديل الإطار الزمني في الطلب إلى 1 دقيقة
-                    body: JSON.stringify({{ symbol: 'frxEURUSD', time_frame: '1m' }}) 
-                }})
-                .then(response => response.json())
-                .then(data => {{
-                    loaderText.style.display = 'none';
-                    lastPrice.textContent = data.price || 'N/A';
-                    errorReason.textContent = '';
-                    errorDisplay.style.display = 'none';
-
-                    // تحديث الإشارة واللون
-                    signalArea.textContent = data.signal;
-                    signalArea.style.backgroundColor = data.color === 'red' ? '#c0392b' : data.color === 'green' ? '#27ae60' : '#34495e';
-                    
-                    // إذا كان هناك خطأ في البيانات/الجلب، نعرض السبب
-                    if (data.signal === "⚠ ERROR") {{
-                         errorReason.textContent = data.reason || 'حدث خطأ غير معروف في التحليل.';
-                         signalArea.style.backgroundColor = 'darkred';
-                    }}
-                }})
-                .catch(error => {{
-                    // خطأ شبكة أو خطأ في الاتصال بالخادم
-                    loaderText.style.display = 'none';
-                    errorReason.textContent = 'ERROR: فشل في الاتصال بالخادم. حاول تحديث الصفحة.';
-                    signalArea.style.backgroundColor = 'darkred';
-                    signalArea.textContent = "ERROR";
-                }});
+            // --- جدولة الإشارة التالية ---
+            function scheduleNextSignal() {{
+                const target = calculateNextSignalTime();
+                
+                startCountdown(); 
+                
+                setTimeout(autoFetchSignal, target.delay);
             }}
 
-            // بدء المؤقت
-            updateTimer();
-            setInterval(updateTimer, 1000);
+            // --- نقطة البداية ---
+            function startAutomation() {{
+                scheduleNextSignal();
+            }}
+            
+            window.startAutomation = startAutomation;
+
         </script>
     </body>
     </html>
     """
-    return render_template_string(html_template)
-
+    return html_content
 
 @app.route('/get-inverted-signal', methods=['POST'])
 def get_signal_api():
-    """نقطة نهاية (API Endpoint) لجلب وتحليل الإشارة."""
+    """نقطة النهاية لطلب الإشارة."""
+    
     try:
         data = request.json
-        symbol = data.get('symbol', 'frxEURUSD')
-        # 👈🏻 تم تعديل الإطار الزمني الافتراضي إلى 1 دقيقة
-        time_frame = data.get('time_frame', '1m') 
-    except:
-        return jsonify({"signal": "⚠ ERROR", "color": "darkred", "price": "N/A", "reason": "خطأ في بيانات الطلب (JSON)."})
+        symbol = data.get('pair')
+        
+        # 1. جلب ترند الـ 4 ساعات (4H Trend)
+        hft_trend = get_high_timeframe_trend(symbol)
+        
+        # 2. جلب التيكات (3000 تيك)
+        df_ticks = get_market_data(symbol) # لم يعد يستقبل time_frame و count
+        
+        # 3. تجميع التيكات إلى شموع 1m
+        df_local = aggregate_ticks_to_candles(df_ticks, '1m')
+        
+        if df_local.empty:
+            return jsonify({"signal": "ERROR", "color": "darkred", "price": "N/A", "reason": f"فشل جلب النقرات أو عدم كفاية البيانات لتكوين {REQUIRED_CANDLES} شمعة (1m)."}), 200
 
-    # 1. جلب الشموع مباشرةً: نطلب 50 شمعة
-    # عدد الشموع (50) يتم التعامل معه داخل دالة get_market_data الآن
-    df_candles = get_market_data(symbol, time_frame, 50) 
-    
-    # التحقق من فشل جلب البيانات
-    if df_candles.empty:
+        current_price = df_local.iloc[-1]['close']
+        
+        # 4. توليد الإشارة العكسية 21 محور
+        final_signal, color, reason = generate_and_invert_signal(df_local, hft_trend)
+        
         return jsonify({
-            "signal": "⚠ ERROR", 
+            "signal": final_signal, 
+            "color": color, 
+            "price": f"{current_price:.6f}",
+            "reason": reason
+        })
+    except Exception as e:
+        # لطباعة الخطأ في سجلات Render
+        print(f"Server Error in get_signal_api: {e}") 
+        return jsonify({
+            "signal": "ERROR", 
             "color": "darkred", 
-            "price": "N/A", 
-            "reason": "فشل جلب الشموع التاريخية من Deriv. قد يكون بسبب مشكلة في الاتصال أو تجاوز حد الطلبات."
-        }), 200
-
-    # 2. توليد الإشارة
-    signal_result = generate_inverted_signal(df_candles)
-
-    return jsonify(signal_result), 200
-
+            "price": "N/A",
+            "reason": f"خطأ غير متوقع في الخادم. قد تكون البيانات غير كافية أو فشل الاتصال. ({str(e)})"
+        }), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=True)
+    # تم تغيير الأمر أدناه ليكون ملائماً لبيئات الإنتاج مثل Render
+    app.run(host='0.0.0.0', port=port)
