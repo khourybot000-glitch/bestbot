@@ -7,7 +7,7 @@ import ssl
 from datetime import datetime, timedelta
 from websocket import create_connection, WebSocketTimeoutException
 from flask import Flask, request, jsonify, render_template_string
-import ta # مكتبة التحليل الفني
+# تم إزالة: import ta 
 
 # =======================================================
 # الإعدادات والثوابت
@@ -38,9 +38,9 @@ EMA_MED = 50
 EMA_LONG = 100 
 ADX_PERIOD = 14
 RSI_PERIOD = 14
-SD_PERIOD = 20
-PSAR_STEP = 0.02 # لم تعد تُستخدم
-PSAR_MAX = 0.20 # لم تعد تُستخدم
+SD_PERIOD = 20 # فترة الانحراف المعياري
+BB_WINDOW = 20
+BB_DEV = 2.0
 BB_LOW_EXTREME = 0.05
 BB_HIGH_EXTREME = 0.95
 ADX_STRENGTH_THRESHOLD = 25
@@ -55,8 +55,112 @@ STOCH_OVERSOLD = 20
 STOCH_OVERBOUGHT = 80
 FIB_LEVEL_THRESHOLD = 0.618
 SHARPE_PERIOD = 10
+VW_MACD_FAST = 12
+VW_MACD_SLOW = 26
+VW_MACD_SIGNAL = 9
 VW_MACD_THRESHOLD = 0.0
 REQUIRED_CANDLES = 120 
+
+# =======================================================
+# دوال المؤشرات اليدوية (بديل ta)
+# =======================================================
+
+def calculate_ema(series, window):
+    """حساب المتوسط المتحرك الأسي (EMA)."""
+    return series.ewm(span=window, adjust=False).mean()
+
+def calculate_rsi(series, window=14):
+    """حساب مؤشر القوة النسبية (RSI)."""
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(com=window - 1, adjust=False).mean()
+    avg_loss = loss.ewm(com=window - 1, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def calculate_atr(df, window=14):
+    """حساب متوسط المدى الحقيقي (ATR)."""
+    df['H-L'] = df['high'] - df['low']
+    df['H-PC'] = np.abs(df['high'] - df['close'].shift(1))
+    df['L-PC'] = np.abs(df['low'] - df['close'].shift(1))
+    tr = df[['H-L', 'H-PC', 'L-PC']].max(axis=1)
+    atr = tr.ewm(span=window, adjust=False).mean()
+    return atr
+
+def calculate_adx_ndi_pdi(df, window=14):
+    """حساب ADX, NDI, PDI."""
+    df['UpMove'] = df['high'] - df['high'].shift(1)
+    df['DownMove'] = df['low'].shift(1) - df['low']
+    
+    # +DM / -DM
+    df['+DM'] = np.where((df['UpMove'] > df['DownMove']) & (df['UpMove'] > 0), df['UpMove'], 0)
+    df['-DM'] = np.where((df['DownMove'] > df['UpMove']) & (df['DownMove'] > 0), df['DownMove'], 0)
+    
+    # ATR (للتطبيع)
+    df['ATR_ADX'] = calculate_atr(df.copy(), window=window)
+    
+    # +DI / -DI
+    df['+DI'] = (df['+DM'].rolling(window=window).sum() / df['ATR_ADX']) * 100
+    df['-DI'] = (df['-DM'].rolling(window=window).sum() / df['ATR_ADX']) * 100
+    
+    # DX
+    df['DX'] = np.abs(df['+DI'] - df['-DI']) / (df['+DI'] + df['-DI']) * 100
+    
+    # ADX (EMA of DX)
+    df['ADX'] = df['DX'].ewm(span=window, adjust=False).mean()
+    
+    return df['ADX'], df['+DI'], df['-DI']
+
+def calculate_stochrsi(series, window=14, smooth_k=3, smooth_d=3):
+    """حساب مؤشر Stochastic RSI."""
+    rsi = calculate_rsi(series, window=window)
+    
+    # %K StochRSI
+    min_rsi = rsi.rolling(window=window).min()
+    max_rsi = rsi.rolling(window=window).max()
+    stochrsi_k = (rsi - min_rsi) / (max_rsi - min_rsi)
+    stochrsi_k = stochrsi_k.fillna(0) * 100
+    
+    # Smoothing K and D
+    stochrsi_k_smooth = calculate_ema(stochrsi_k, smooth_k)
+    stochrsi_d = calculate_ema(stochrsi_k_smooth, smooth_d)
+    
+    return stochrsi_k_smooth, stochrsi_d
+
+def calculate_bollinger_bands(series, window=20, dev=2.0):
+    """حساب Bollinger Bands (%B)."""
+    sma = series.rolling(window=window).mean()
+    std = series.rolling(window=window).std()
+    upper = sma + (std * dev)
+    lower = sma - (std * dev)
+    
+    # %B (Percent Bandwidth)
+    bbp = (series - lower) / (upper - lower)
+    return bbp
+
+def calculate_uo(df, s=7, m=14, l=28):
+    """حساب Ultimate Oscillator (UO)."""
+    df['TR'] = calculate_atr(df.copy(), window=1) # True Range (for UO calculation)
+    df['BP'] = df['close'] - df[['low', 'close']].min(axis=1).shift(1) # Buying Pressure
+    
+    avg7 = (df['BP'].rolling(s).sum() / df['TR'].rolling(s).sum()).fillna(0)
+    avg14 = (df['BP'].rolling(m).sum() / df['TR'].rolling(m).sum()).fillna(0)
+    avg28 = (df['BP'].rolling(l).sum() / df['TR'].rolling(l).sum()).fillna(0)
+    
+    uo = 100 * ((4 * avg7) + (2 * avg14) + avg28) / 7
+    return uo
+
+def calculate_macd_diff(series, fast=12, slow=26, sign=9):
+    """حساب MACD Histogram (Diff)."""
+    ema_fast = calculate_ema(series, fast)
+    ema_slow = calculate_ema(series, slow)
+    macd_line = ema_fast - ema_slow
+    signal_line = calculate_ema(macd_line, sign)
+    macd_diff = macd_line - signal_line
+    return macd_diff
+
 
 # =======================================================
 # دوال المساعدة للاتصال والأمان
@@ -167,8 +271,8 @@ def is_strong_candle(candle: pd.Series, direction: str) -> bool:
 
 def check_rsi_divergence(df: pd.DataFrame) -> str:
     """المحور 14: يكتشف انحرافات RSI (Divergence)."""
-    df['RSI'] = ta.momentum.rsi(df['close'], window=RSI_PERIOD)
-    recent_data = df.iloc[-15:]
+    # يجب أن يكون RSI محسوباً مسبقاً في df['RSI']
+    recent_data = df.iloc[-15:].copy()
     
     if len(recent_data) < 5: return "NONE"
 
@@ -202,56 +306,73 @@ def calculate_fibonacci_ret(df: pd.DataFrame) -> tuple:
     return fib_levels, high, low
 
 def calculate_advanced_indicators(df: pd.DataFrame):
-    """حساب جميع المؤشرات الـ 21 (بما في ذلك VW-MACD وSharpe Ratio)."""
+    """حساب جميع المؤشرات الـ 21 يدوياً (باستخدام Pandas/NumPy فقط)."""
     
     # 1. المتوسطات المتحركة (1, 2, 3)
-    df['EMA_SHORT'] = ta.trend.ema_indicator(df['close'], window=EMA_SHORT, fillna=True) 
-    df['EMA_MED'] = ta.trend.ema_indicator(df['close'], window=EMA_MED, fillna=True)     
-    df['EMA_LONG'] = ta.trend.ema_indicator(df['close'], window=EMA_LONG, fillna=True)    
+    df['EMA_SHORT'] = calculate_ema(df['close'], window=EMA_SHORT)
+    df['EMA_MED'] = calculate_ema(df['close'], window=EMA_MED)
+    df['EMA_LONG'] = calculate_ema(df['close'], window=EMA_LONG)
 
     # 2. مؤشرات الزخم والتقلب الأساسية (4-14)
-    # ملاحظة: Bollinger Bands pband تُرجع النسبة المئوية للسعر ضمن النطاق
-    df = df.join(ta.volatility.bollinger_pband(close=df['close'], window=20, window_dev=2, fillna=True).rename('BBP'))
-    df = df.join(ta.trend.adx(df['high'], df['low'], df['close'], window=ADX_PERIOD, fillna=True))
-    df = df.join(ta.volume.on_balance_volume(df['close'], df['volume'], fillna=True).rename('OBV'))
     
-    # ✅ التصحيح لخطأ 'vwap': حساب VWAP يدوياً
+    # 4. Bollinger Band %B
+    df['BBP'] = calculate_bollinger_bands(df['close'], window=BB_WINDOW, dev=BB_DEV)
+    
+    # 11, 12, 13. ADX, PDI, NDI
+    df['ADX'], df['PDI'], df['NDI'] = calculate_adx_ndi_pdi(df.copy(), window=ADX_PERIOD)
+    
+    # 13. OBV
+    df['OBV'] = (np.sign(df['close'].diff()) * df['volume']).fillna(0).cumsum()
+    
+    # 5. VWAP (يتم حسابه يدوياً كما اتفقنا سابقاً)
     df['PV'] = (df['high'] + df['low'] + df['close']) / 3 * df['volume']
     df['Cum_PV'] = df['PV'].cumsum()
     df['Cum_Volume'] = df['volume'].cumsum()
     df['VWAP'] = df['Cum_PV'] / df['Cum_Volume']
-    df.drop(columns=['PV', 'Cum_PV', 'Cum_Volume'], inplace=True) # إزالة الأعمدة المساعدة
+    df.drop(columns=['PV', 'Cum_PV', 'Cum_Volume'], inplace=True) 
+
+    # 7. PSAR (قيمة وهمية لتعويض المؤشر المحذوف)
+    df['PSAR'] = 0.0 
     
-    # ✅ التصحيح لخطأ 'psar': حذفه واستبداله بقيمة وهمية.
-    df['PSAR'] = 0.0 # قيمة وهمية لتجنب خطأ KeyError لاحقاً
+    # 10. Standard Deviation (SD) - الانحراف المعياري
+    df['SD'] = df['close'].rolling(window=SD_PERIOD).std().fillna(0)
     
-    df['SD'] = ta.volatility.stdev(df['close'], window=SD_PERIOD, fillna=True) 
-    df = df.join(ta.trend.adx_pos(df['high'], df['low'], df['close'], window=ADX_PERIOD, fillna=True).rename('PDI'))
-    df = df.join(ta.trend.adx_neg(df['high'], df['low'], df['close'], window=ADX_PERIOD, fillna=True).rename('NDI'))
-    # StochRSI: window=14, smooth1=3, smooth2=3
-    stoch_rsi = ta.momentum.stochrsi(df['close'], window=STOCH_RSI_WINDOW, smooth1=STOCH_RSI_SIGNAL_PERIOD, smooth2=STOCH_RSI_SIGNAL_PERIOD, fillna=True)
-    df = df.join(stoch_rsi.rename({'stochrsi_k': 'StochRSI_K', 'stochrsi_d': 'StochRSI_D'}, axis=1))
+    # 9. StochRSI
+    df['StochRSI_K'], df['StochRSI_D'] = calculate_stochrsi(df['close'], window=STOCH_RSI_WINDOW, smooth_k=STOCH_RSI_SIGNAL_PERIOD, smooth_d=STOCH_RSI_SIGNAL_PERIOD)
 
     # 3. المؤشرات الإحصائية المتقدمة (15-18)
-    df['Z_SCORE'] = (df['close'] - df['EMA_LONG']) / df['SD']
-    df['ATR'] = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=ATR_PERIOD, fillna=True)
+    
+    # 16. Z-SCORE 
+    # يتم إضافة معامل صغير جداً لتجنب القسمة على صفر في حالة التذبذب الصفري
+    df['Z_SCORE'] = (df['close'] - df['EMA_LONG']) / (df['SD'] + 1e-9) 
+    
+    # 17. ATR
+    df['ATR'] = calculate_atr(df.copy(), window=ATR_PERIOD)
     df['ATR_AVG'] = df['ATR'].rolling(window=ATR_PERIOD * 2).mean()
-    df['UO'] = ta.momentum.ultimate_oscillator(df['high'], df['low'], df['close'], fillna=True)
-    df['RSI'] = ta.momentum.rsi(df['close'], window=RSI_PERIOD) 
+    
+    # 18. UO
+    df['UO'] = calculate_uo(df.copy())
+    
+    # RSI (يُحسب لأجل التباعد)
+    df['RSI'] = calculate_rsi(df['close'], window=RSI_PERIOD) 
 
     # 4. المؤشرات النهائية الجديدة (19-21)
     
-    # المحور 19: VW-MACD (زخم موثق بالحجم)
-    df['VW_MACD'] = ta.momentum.macd_diff(
-        close=df['close'] * df['volume'], 
-        window_fast=12, window_slow=26, window_sign=9, fillna=True
-    )['macd_diff']
+    # 19. VW-MACD 
+    df['VW_MACD'] = calculate_macd_diff(
+        series=df['close'] * df['volume'], 
+        fast=VW_MACD_FAST, slow=VW_MACD_SLOW, sign=VW_MACD_SIGNAL
+    )
 
-    # المحور 20: Sharpe Ratio (عائد/مخاطرة)
+    # 20. Sharpe Ratio 
     df['Returns'] = df['close'].pct_change() 
     df['Sharpe_Numerator'] = df['Returns'].rolling(window=SHARPE_PERIOD).mean()
     df['Sharpe_Denominator'] = df['Returns'].rolling(window=SHARPE_PERIOD).std()
     df['Sharpe_Ratio'] = df['Sharpe_Numerator'] / df['Sharpe_Denominator']
+
+    # تنظيف قيم Inf و NaN الناتجة عن التقسيم على الصفر
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    df.fillna(0, inplace=True)
 
     return df
 
@@ -261,11 +382,10 @@ def generate_and_invert_signal(df: pd.DataFrame):
     if df.empty or len(df) < REQUIRED_CANDLES: 
         return "ERROR", "darkred", f"فشل في إنشاء عدد كافٍ من الشموع ({len(df)}). يتطلب {REQUIRED_CANDLES} شمعة (كل منها {TICKS_PER_CANDLE} نقرة) على الأقل للتحليل."
 
-    hft_trend = "SIDEWAYS" # يمكن تعديل هذا إذا أردت إضافة منطق ترند طويل الأجل
+    hft_trend = "SIDEWAYS"
 
     df = calculate_advanced_indicators(df)
     fib_levels, _, _ = calculate_fibonacci_ret(df)
-    # ملاحظة: يتم حساب RSI هنا مرة أخرى للدقة في التباعد
     rsi_divergence = check_rsi_divergence(df.iloc[-20:].copy()) 
 
     last_candle = df.iloc[-1]
@@ -276,12 +396,11 @@ def generate_and_invert_signal(df: pd.DataFrame):
     last_ema_short = last_candle['EMA_SHORT']
     last_ema_med = last_candle['EMA_MED']
     last_vwap = last_candle['VWAP']
-    macd_hist_rising = last_candle['macd_diff'] > prev_candle['macd_diff'] 
-    # last_psar = last_candle['PSAR'] # قيمة وهمية (0.0)
+    vw_macd_hist_rising = last_candle['VW_MACD'] > prev_candle['VW_MACD'] 
     last_pdi = last_candle['PDI']
     last_ndi = last_candle['NDI']
     last_bbp = last_candle['BBP']
-    last_adx = last_candle['adx']
+    last_adx = last_candle['ADX']
     last_sd = last_candle['SD']
     obv_rising = last_candle['OBV'] > prev_candle['OBV']
     last_z_score = last_candle['Z_SCORE']
@@ -291,7 +410,6 @@ def generate_and_invert_signal(df: pd.DataFrame):
     last_vw_macd = last_candle['VW_MACD']
     last_sharpe_ratio = last_candle['Sharpe_Ratio']
     
-    # شروط الاستوكاستيك RSI: تقاطع صعودي تحت التشبع البيعي (Oversold) أو هبوطي فوق التشبع الشرائي (Overbought)
     stoch_buy_condition = (last_candle['StochRSI_K'] > last_candle['StochRSI_D'] and 
                            prev_candle['StochRSI_K'] < prev_candle['StochRSI_D'] and 
                            last_candle['StochRSI_K'] < STOCH_OVERSOLD)
@@ -306,10 +424,8 @@ def generate_and_invert_signal(df: pd.DataFrame):
     fib_buy_condition = False
     fib_sell_condition = False
     if fib_levels and fib_levels['61.8']:
-        # شراء إذا كان السعر فوق 61.8% بعد تراجعه
         if last_close > fib_levels['61.8'] and prev_candle['close'] < fib_levels['61.8']:
             fib_buy_condition = True
-        # بيع إذا كان السعر تحت 38.2% بعد ارتفاعه
         if last_close < fib_levels['38.2'] and prev_candle['close'] > fib_levels['38.2']:
             fib_sell_condition = True
 
@@ -318,12 +434,12 @@ def generate_and_invert_signal(df: pd.DataFrame):
     original_signal = ""
     reason_detail = ""
 
-    # شروط التوقع الصعودي (BUY - 21 محور، تم تعديل شرط PSAR)
+    # شروط التوقع الصعودي (BUY - 21 محور)
     if (
         last_close > last_ema_short and last_close > last_ema_med and  # 1, 2: EMA Short/Med Crossover
         (hft_trend == "BULLISH" or hft_trend == "SIDEWAYS") and # 3: HFT Trend Check
-        last_close > last_vwap and macd_hist_rising and last_pdi > last_ndi and # 5, 6, 11: VWAP, MACD, PDI
-        last_pdi > last_ndi and stoch_buy_condition and last_sd > SD_THRESHOLD and # 7 (تعويض PSAR), 9 (StochRSI), 10 (Volatility)
+        last_close > last_vwap and vw_macd_hist_rising and last_pdi > last_ndi and # 5, 6, 11: VWAP, VW-MACD Rising, PDI
+        last_pdi > last_ndi and stoch_buy_condition and last_sd > SD_THRESHOLD and # 7 (PDI>NDI - تعويض PSAR), 9 (StochRSI), 10 (Volatility)
         last_adx > ADX_STRENGTH_THRESHOLD and last_bbp < BB_LOW_EXTREME and obv_rising and # 12 (ADX), 4 (BB), 13 (OBV)
         strong_buy_candle and rsi_divergence == "BULLISH" and # 15 (Strong Candle), 14 (RSI Divergence)
         last_z_score < -Z_SCORE_THRESHOLD and last_atr > atr_avg * ATR_THRESHOLD and last_uo < 30 and # 16 (Z-Score), 17 (ATR), 18 (UO)
@@ -332,12 +448,12 @@ def generate_and_invert_signal(df: pd.DataFrame):
         original_signal = "BUY"
         reason_detail = f"**قوة قصوى (BUY - 21 محور):** توافق كامل (على {TICKS_PER_CANDLE} نقرة/شمعة). تأكيد شارب وفيبوناتشي وزخم الحجم. **أقصى توقع صعودي لمدة 5 شموع.**"
 
-    # شروط التوقع الهبوطي (SELL - 21 محور، تم تعديل شرط PSAR)
+    # شروط التوقع الهبوطي (SELL - 21 محور)
     elif (
         last_close < last_ema_short and last_close < last_ema_med and # 1, 2: EMA Short/Med Crossover
         (hft_trend == "BEARISH" or hft_trend == "SIDEWAYS") and # 3: HFT Trend Check
-        last_close < last_vwap and not macd_hist_rising and last_ndi > last_pdi and # 5, 6, 11: VWAP, MACD, NDI
-        last_ndi > last_pdi and stoch_sell_condition and last_sd > SD_THRESHOLD and # 7 (تعويض PSAR), 9 (StochRSI), 10 (Volatility)
+        last_close < last_vwap and not vw_macd_hist_rising and last_ndi > last_pdi and # 5, 6, 11: VWAP, VW-MACD Falling, NDI
+        last_ndi > last_pdi and stoch_sell_condition and last_sd > SD_THRESHOLD and # 7 (NDI>PDI - تعويض PSAR), 9 (StochRSI), 10 (Volatility)
         last_adx > ADX_STRENGTH_THRESHOLD and last_bbp > BB_HIGH_EXTREME and not obv_rising and # 12 (ADX), 4 (BB), 13 (OBV)
         strong_sell_candle and rsi_divergence == "BEARISH" and # 15 (Strong Candle), 14 (RSI Divergence)
         last_z_score > Z_SCORE_THRESHOLD and last_atr > atr_avg * ATR_THRESHOLD and last_uo > 70 and # 16 (Z-Score), 17 (ATR), 18 (UO)
@@ -387,7 +503,7 @@ def index():
     <html lang="ar" dir="rtl">
     <head>
         <meta charset="UTF-8">
-        <title>KhouryBot (21 محور - 30 نقرة/شمعة)</title>
+        <title>KhouryBot (21 محور - مستقل)</title>
         <style>
             body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; text-align: center; margin: 0; background-color: #0d1117; color: #c9d1d9; padding-top: 40px; }}
             .container {{ max-width: 550px; margin: 0 auto; padding: 35px; border-radius: 10px; background-color: #161b22; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5); }}
@@ -406,10 +522,10 @@ def index():
     </head>
     <body onload="startAutomation()">
         <div class="container">
-            <h1>KhouryBot (21 محور - 30 نقرة/شمعة)</h1>
+            <h1>KhouryBot (21 محور - مستقل)</h1>
             
             <div class="time-note">
-                تحليل الحد الأقصى للقوة. العداد أدناه يحدد وتيرة الطلبات (كل 5 دقائق) ولا يمثل إغلاق الشمعة.
+                **التحليل مستقل الآن (لا يعتمد على مكتبة TA).** يتم تحديث الوتيرة كل 5 دقائق.
             </div>
             
             <div class="status-box">
