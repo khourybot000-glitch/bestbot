@@ -213,7 +213,7 @@ def calculate_advanced_indicators(df: pd.DataFrame):
     df['Sharpe_Numerator'] = df['Returns'].rolling(window=SHARPE_PERIOD).mean()
     df['Sharpe_Denominator'] = df['Returns'].rolling(window=SHARPE_PERIOD).std()
     
-    # 💡 التصحيح: تفادي القسمة على صفر (ZeroDivisionError)
+    # تصحيح: تفادي القسمة على صفر (ZeroDivisionError)
     df['Sharpe_Ratio'] = np.where(
         df['Sharpe_Denominator'] == 0, 
         0, 
@@ -324,7 +324,7 @@ def generate_and_invert_signal(df: pd.DataFrame, hft_trend: str):
         color = "lime"
         reason = "🟢 *تم عكس إشارة البيع الأصلية (نظام 21 محور - الحد الأقصى).* " + reason_detail
     else:
-         # 🔑 تصحيح خطأ الصياغة (Syntax Error)
+         # تصحيح خطأ الصياغة (Syntax Error)
          inverted_signal, color, reason = "ERROR", "darkred", "لم يتم تحديد إشارة بسبب خطأ في المنطق الداخلي."
 
 
@@ -417,7 +417,7 @@ def index():
                 background-repeat: no-repeat;
                 background-position: left 0.7em top 50%, 0 0;
                 background-size: 0.65em auto, 100%;
-            }
+            }}
             #result {{ 
                 font-size: 3.5em; 
                 margin-top: 30px; 
