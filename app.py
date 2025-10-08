@@ -8,7 +8,7 @@ import numpy as np
 import datetime
 
 # تهيئة تطبيق Flask
-app = Flask(_name_)
+app = Flask(__name__)
 
 # 📌 معلومات Deriv/Binary WebSocket API
 DERIV_WSS = "wss://blue.derivws.com/websockets/v3?app_id=16929"
