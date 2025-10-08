@@ -532,11 +532,12 @@ def index():
                     
                     const displayMinutes = Math.floor(remainingSeconds / 60);
                     const displaySeconds = remainingSeconds % 60;
-                    countdownTimer.textContent = `${displayMinutes.toString().padStart(2, '0')}:${displaySeconds.toString().padStart(2, '0')}`;
+                    // تم تصحيح هذا السطر لتجنب تضارب علامات الاقتباس المعكوسة
+                    countdownTimer.textContent = displayMinutes.toString().padStart(2, '0') + ':' + displaySeconds.toString().padStart(2, '0');
 
                     const minutes = targetInfo.closeTime.getMinutes().toString().padStart(2, '0');
                     const hours = targetInfo.closeTime.getHours().toString().padStart(2, '0');
-                    nextSignalTimeDisplay.innerHTML = `إغلاق الشمعة: ${hours}:${minutes}:00 (بتوقيتك المحلي)`;
+                    nextSignalTimeDisplay.innerHTML = 'إغلاق الشمعة: ' + hours + ':' + minutes + ':00 (بتوقيتك المحلي)';
                 }}, 1000);
             }}
 
@@ -648,7 +649,6 @@ def get_signal_api():
             "reason": f"خطأ غير متوقع في الخادم: {str(e)}"
         }), 500
 
-# تصحيح الخطأ الإملائي هنا
 if __name__ == '__main__':
     # هذا الأمر يستخدم لتجربة محلية، Render سيستخدم Gunicorn
     app.run(host='0.0.0.0', port=5000)
