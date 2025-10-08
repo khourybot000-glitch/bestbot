@@ -461,12 +461,14 @@ def index():
                     const displayMinutes = Math.floor(remainingSeconds / 60);
                     const displaySeconds = remainingSeconds % 60;
                     
-                    // 🚨 التعديل هنا: استخدام دمج السلاسل النصية بدلاً من قوالب السلاسل (${...})
+                    // 🚨 تم التصحيح: تجنب قوالب السلاسل النصية في JS لتفادي مشاكل f-string
                     countdownTimer.textContent = displayMinutes.toString().padStart(2, '0') + ':' + displaySeconds.toString().padStart(2, '0');
 
                     const minutes = targetInfo.closeTime.getMinutes().toString().padStart(2, '0');
                     const hours = targetInfo.closeTime.getHours().toString().padStart(2, '0');
-                    nextSignalTimeDisplay.innerHTML = `إغلاق الشمعة: ${hours}:${minutes}:00 (بتوقيتك المحلي)`;
+                    
+                    // 🚨 التعديل الثاني هنا:
+                    nextSignalTimeDisplay.innerHTML = 'إغلاق الشمعة: ' + hours + ':' + minutes + ':00 (بتوقيتك المحلي)';
                 }}, 1000);
             }}
 
