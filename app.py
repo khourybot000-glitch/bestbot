@@ -13,7 +13,7 @@ import ta # مكتبة التحليل الفني
 # الإعدادات والثوابت
 # =======================================================
 
-app = Flask(_name_)
+app = Flask(__name__)
 
 # 📌 معلومات Deriv/Binary WebSocket API
 DERIV_WSS = "wss://blue.derivws.com/websockets/v3?app_id=16929"
@@ -28,7 +28,7 @@ PAIRS = {
     "frxAUDJPY": "AUD/JPY", "frxCHFJPY": "CHF/JPY", "frxCADJPY": "CAD/JPY"
 }
 
-# ⚠ تم تقليل العدد لتحسين الأداء وتجنب Timeout (جلب بيانات كافية لـ 250 شمعة 1m).
+# ⚠️ تم تقليل العدد لتحسين الأداء وتجنب Timeout (جلب بيانات كافية لـ 250 شمعة 1m).
 TICK_COUNT = 3000 
 
 # متغيرات الاستراتيجية المدمجة (القوة الواحد والعشرون)
@@ -137,9 +137,6 @@ def aggregate_ticks_to_candles(df_ticks: pd.DataFrame, time_frame: str) -> pd.Da
     return df_candles
 
 
-# 🗑 تم حذف دالة get_high_timeframe_trend بناءً على طلب المستخدم.
-
-
 def is_strong_candle(candle: pd.Series, direction: str) -> bool:
     """المحور 15: يحدد ما إذا كانت الشمعة الأخيرة شمعة قوية."""
     range_hl = candle['high'] - candle['low']
@@ -236,18 +233,18 @@ def calculate_advanced_indicators(df: pd.DataFrame):
 
     return df
 
-def generate_and_invert_signal(df: pd.DataFrame): # 📝 تم حذف hft_trend: str
+def generate_and_invert_signal(df: pd.DataFrame): 
     """تطبيق استراتيجية القوة الواحد والعشرون الموحدة (1m فقط)."""
     
     if df.empty or len(df) < REQUIRED_CANDLES: 
         return "ERROR", "darkred", f"فشل في إنشاء عدد كافٍ من الشموع ({len(df)}). يتطلب {REQUIRED_CANDLES} شمعة على الأقل للتحليل."
 
-    # 📌 يتم تعيين الترند الكبير إلى SIDEWAYS لتجاهل شرط الترند في الشروط أدناه
+    # 📌 تم تعيين الترند الكبير إلى SIDEWAYS لتجاهل شرط الترند بناءً على طلبك
     hft_trend = "SIDEWAYS"
     
     df = calculate_advanced_indicators(df)
     fib_levels, _, _ = calculate_fibonacci_ret(df)
-    rsi_divergence = check_rsi_divergence(df.iloc[-20:].copy()) # استخدام نسخة لتجنب SettingWithCopyWarning
+    rsi_divergence = check_rsi_divergence(df.iloc[-20:].copy()) 
 
     last_candle = df.iloc[-1]
     prev_candle = df.iloc[-2]
@@ -294,7 +291,7 @@ def generate_and_invert_signal(df: pd.DataFrame): # 📝 تم حذف hft_trend: 
     # شروط التوقع الصعودي (21 محور) - تم تعديل شرط الترند HFT
     if (
         last_close > last_ema_short and last_close > last_ema_med and 
-        (hft_trend == "BULLISH" or hft_trend == "SIDEWAYS") and # 📝 أصبح شرط الترند الآن أكثر مرونة/يتم تجاهله
+        (hft_trend == "BULLISH" or hft_trend == "SIDEWAYS") and 
         last_close > last_vwap and macd_hist_rising and last_pdi > last_ndi and 
         last_close > last_psar and stoch_buy_condition and last_sd > SD_THRESHOLD and
         last_adx > ADX_STRENGTH_THRESHOLD and last_bbp < BB_LOW_EXTREME and obv_rising and 
@@ -303,12 +300,12 @@ def generate_and_invert_signal(df: pd.DataFrame): # 📝 تم حذف hft_trend: 
         fib_buy_condition and last_sharpe_ratio > 0 and last_vw_macd > VW_MACD_THRESHOLD
     ):
         original_signal = "BUY"
-        reason_detail = f"*قوة قصوى (BUY - 21 محور):* توافق كامل (على 1m). تأكيد شارب وفيبوناتشي وزخم الحجم. *أقصى توقع صعودي لمدة 5 دقائق.*"
+        reason_detail = f"**قوة قصوى (BUY - 21 محور):** توافق كامل (على 1m). تأكيد شارب وفيبوناتشي وزخم الحجم. **أقصى توقع صعودي لمدة 5 دقائق.**"
 
     # شروط التوقع الهبوطي (21 محور) - تم تعديل شرط الترند HFT
     elif (
         last_close < last_ema_short and last_close < last_ema_med and 
-        (hft_trend == "BEARISH" or hft_trend == "SIDEWAYS") and # 📝 أصبح شرط الترند الآن أكثر مرونة/يتم تجاهله
+        (hft_trend == "BEARISH" or hft_trend == "SIDEWAYS") and 
         last_close < last_vwap and not macd_hist_rising and last_ndi > last_pdi and 
         last_close < last_psar and stoch_sell_condition and last_sd > SD_THRESHOLD and
         last_adx > ADX_STRENGTH_THRESHOLD and last_bbp > BB_HIGH_EXTREME and not obv_rising and 
@@ -317,7 +314,7 @@ def generate_and_invert_signal(df: pd.DataFrame): # 📝 تم حذف hft_trend: 
         fib_sell_condition and last_sharpe_ratio < 0 and last_vw_macd < VW_MACD_THRESHOLD
     ):
         original_signal = "SELL"
-        reason_detail = f"*قوة قصوى (SELL - 21 محور):* توافق كامل (على 1m). تأكيد شارب وفيبوناتشي وزخم الحجم. *أقصى توقع هبوطي لمدة 5 دقائق.*"
+        reason_detail = f"**قوة قصوى (SELL - 21 محور):** توافق كامل (على 1m). تأكيد شارب وفيبوناتشي وزخم الحجم. **أقصى توقع هبوطي لمدة 5 دقائق.**"
 
     # منطق الإشارة الدائم (Fallback - العكسي)
     else:
@@ -335,11 +332,11 @@ def generate_and_invert_signal(df: pd.DataFrame): # 📝 تم حذف hft_trend: 
     if original_signal == "BUY":
         inverted_signal = "SELL (PUT) - معكوس"
         color = "red"
-        reason = "🛑 *تم عكس إشارة الشراء الأصلية (نظام 21 محور - الحد الأقصى).* " + reason_detail
+        reason = "🛑 **تم عكس إشارة الشراء الأصلية (نظام 21 محور - الحد الأقصى).** " + reason_detail
     elif original_signal == "SELL":
         inverted_signal = "BUY (CALL) - معكوس"
         color = "lime"
-        reason = "🟢 *تم عكس إشارة البيع الأصلية (نظام 21 محور - الحد الأقصى).* " + reason_detail
+        reason = "🟢 **تم عكس إشارة البيع الأصلية (نظام 21 محور - الحد الأقصى).** " + reason_detail
     else:
         inverted_signal, color, reason = "ERROR", "darkred", "لم يتم تحديد إشارة بسبب خطأ في المنطق الداخلي."
 
@@ -370,7 +367,7 @@ def index():
             #countdown-timer {{ font-size: 2.2em; color: #ff00ff; font-weight: bold; display: block; margin: 5px 0 10px 0; text-shadow: 0 0 8px rgba(255, 0, 255, 0.5); }}
             #next-signal-time {{ color: #8b949e; font-size: 0.9em; }}
             label {{ display: block; text-align: right; margin-bottom: 5px; color: #8b949e; }}
-            select {{ padding: 12px; margin: 10px 0; width: 100%; box-sizing: border-box; border: 1px solid #30363d; border-radius: 6px; font-size: 16px; background-color: #21262d; color: #c9d1d9; -webkit-appearance: none; -moz-appearance: none; appearance: none; background-image: url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%3E%3Cpath%20fill%3D%22%23c9d1d9%22%20d%3D%22M287%20197.3L159.9%2069.1c-3-3-7.7-3-10.7%200l-127%20128.2c-3%203-3%207.7%200%2010.7l10.7%2010.7c3%203%207.7%203%2010.7%200l113.6-114.6c3-3%207.7-3%2010.7%200l113.6%20114.6c3%203%207.7%203%2010.7%200l10.7-10.7c3.1-3%203.1-7.7%200-10.7z%22%2F%3E%3C%2Fsvg%3E'); background-repeat: no-repeat; background-position: left 0.7em top 50%, 0 0; background-size: 0.65em auto, 100%; }
+            select {{ padding: 12px; margin: 10px 0; width: 100%; box-sizing: border-box; border: 1px solid #30363d; border-radius: 6px; font-size: 16px; background-color: #21262d; color: #c9d1d9; -webkit-appearance: none; -moz-appearance: none; appearance: none; background-image: url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%3E%3Cpath%20fill%3D%22%23c9d1d9%22%20d%3D%22M287%20197.3L159.9%2069.1c-3-3-7.7-3-10.7%200l-127%20128.2c-3%203-3%207.7%200%2010.7l10.7%2010.7c3%203%207.7%203%2010.7%200l113.6-114.6c3-3%207.7-3%2010.7%200l113.6%20114.6c3%203%207.7%203%2010.7%200l10.7-10.7c3.1-3%203.1-7.7%200-10.7z%22%2F%3E%3C%2Fsvg%3E'); background-repeat: no-repeat; background-position: left 0.7em top 50%, 0 0; background-size: 0.65em auto, 100%; }}
             #result {{ font-size: 3.5em; margin-top: 30px; font-weight: 900; min-height: 70px; text-shadow: 0 0 15px rgba(255, 255, 255, 0.7); }}
             #reason-box {{ background-color: #21262d; padding: 15px; border-radius: 6px; margin-top: 20px; font-size: 0.9em; color: #9e9e9e; text-align: right; border-right: 3px solid #FFD700; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3); }}
             .loading {{ color: #58a6ff; font-size: 1.2em; animation: pulse 1.5s infinite alternate; }}
@@ -457,17 +454,17 @@ def index():
 
                     if (remainingSeconds < 1) {{
                         countdownTimer.textContent = '...تحليل الآن...';
-                        nextSignalTimeDisplay.innerHTML = الإشارة القادمة بعد قليل.;
+                        nextSignalTimeDisplay.innerHTML = `الإشارة القادمة بعد قليل.`;
                         return;
                     }}
                     
                     const displayMinutes = Math.floor(remainingSeconds / 60);
                     const displaySeconds = remainingSeconds % 60;
-                    countdownTimer.textContent = ${displayMinutes.toString().padStart(2, '0')}:${displaySeconds.toString().padStart(2, '0')};
+                    countdownTimer.textContent = `${displayMinutes.toString().padStart(2, '0')}:${displaySeconds.toString().padStart(2, '0')}`;
 
                     const minutes = targetInfo.closeTime.getMinutes().toString().padStart(2, '0');
                     const hours = targetInfo.closeTime.getHours().toString().padStart(2, '0');
-                    nextSignalTimeDisplay.innerHTML = إغلاق الشمعة: ${hours}:${minutes}:00 (بتوقيتك المحلي);
+                    nextSignalTimeDisplay.innerHTML = `إغلاق الشمعة: ${hours}:${minutes}:00 (بتوقيتك المحلي)`;
                 }}, 1000);
             }}
 
@@ -553,8 +550,6 @@ def get_signal_api():
         data = request.json
         symbol = data.get('pair')
         
-        # 🗑 تم إلغاء جلب ترند الـ 4 ساعات (4H Trend) بناءً على طلبك
-        
         # 2. جلب التيكات (3000 تيك)
         df_ticks = get_market_data(symbol) 
         
@@ -585,6 +580,6 @@ def get_signal_api():
             "reason": f"خطأ غير متوقع في الخادم. قد تكون البيانات غير كافية أو فشل الاتصال. ({str(e)})"
         }), 500
 
-if _name_ == '_main_':
+if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
