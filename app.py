@@ -220,7 +220,14 @@ def calculate_advanced_indicators(df: pd.DataFrame):
     df = df.join(ta.volatility.bollinger_pband(close=df['close'], window=20, window_dev=2, fillna=True).rename('BBP'))
     df = df.join(ta.trend.adx(df['high'], df['low'], df['close'], window=ADX_PERIOD, fillna=True))
     df = df.join(ta.volume.on_balance_volume(df['close'], df['volume'], fillna=True).rename('OBV'))
-    df['VWAP'] = ta.volume.vwap(df['high'], df['low'], df['close'], df['volume'], fillna=True)
+    
+    # ✅ التصحيح لخطأ 'vwap': حساب VWAP يدوياً
+    df['PV'] = (df['high'] + df['low'] + df['close']) / 3 * df['volume']
+    df['Cum_PV'] = df['PV'].cumsum()
+    df['Cum_Volume'] = df['volume'].cumsum()
+    df['VWAP'] = df['Cum_PV'] / df['Cum_Volume']
+    df.drop(columns=['PV', 'Cum_PV', 'Cum_Volume'], inplace=True) # إزالة الأعمدة المساعدة
+    
     df['PSAR'] = ta.trend.psar(df['high'], df['low'], step=PSAR_STEP, max_step=PSAR_MAX, fillna=True) 
     df['SD'] = ta.volatility.stdev(df['close'], window=SD_PERIOD, fillna=True) 
     df = df.join(ta.trend.adx_pos(df['high'], df['low'], df['close'], window=ADX_PERIOD, fillna=True).rename('PDI'))
@@ -257,7 +264,6 @@ def generate_and_invert_signal(df: pd.DataFrame):
     if df.empty or len(df) < REQUIRED_CANDLES: 
         return "ERROR", "darkred", f"فشل في إنشاء عدد كافٍ من الشموع ({len(df)}). يتطلب {REQUIRED_CANDLES} شمعة (كل منها {TICKS_PER_CANDLE} نقرة) على الأقل للتحليل."
 
-    # 📌 تم تعيين الترند الكبير إلى SIDEWAYS لتجاهل شرط الترند بناءً على طلبك
     hft_trend = "SIDEWAYS"
     
     df = calculate_advanced_indicators(df)
