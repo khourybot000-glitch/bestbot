@@ -82,7 +82,7 @@ def get_market_data(symbol) -> pd.DataFrame:
             
             request_data = json.dumps({
                 "ticks_history": symbol, "end": "latest", "start": 1, 
-                "style": "ticks", "count": TICK_COUNT, "granularity": 0
+                "style": "ticks", "count": TICK_COUNT,
             })
             
             ws.send(request_data)
