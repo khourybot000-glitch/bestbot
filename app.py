@@ -13,7 +13,7 @@ import ta # مكتبة التحليل الفني
 # الإعدادات والثوابت
 # =======================================================
 
-app = Flask(__name__)
+app = Flask(_name_)
 
 # 📌 معلومات Deriv/Binary WebSocket API
 DERIV_WSS = "wss://blue.derivws.com/websockets/v3?app_id=16929"
@@ -28,8 +28,7 @@ PAIRS = {
     "frxAUDJPY": "AUD/JPY", "frxCHFJPY": "CHF/JPY", "frxCADJPY": "CAD/JPY"
 }
 
-# ⚠️ تم تقليل العدد لتحسين الأداء وتجنب Timeout.
-# 3000 تيك = حوالي ساعة ونصف من بيانات التداول النشط.
+# ⚠ تم تقليل العدد لتحسين الأداء وتجنب Timeout (جلب بيانات كافية لـ 250 شمعة 1m).
 TICK_COUNT = 3000 
 
 # متغيرات الاستراتيجية المدمجة (القوة الواحد والعشرون)
@@ -78,7 +77,7 @@ def get_market_data(symbol) -> pd.DataFrame:
     for attempt in range(MAX_RETRIES):
         ws = None
         try:
-            ws = create_connection(DERIV_WSS, ssl_context=ssl_context) # 👈🏻 تم التصحيح لاستخدام create_ssl_context
+            ws = create_connection(DERIV_WSS, ssl_context=ssl_context)
             ws.settimeout(20) # زيادة المهلة قليلاً
             
             request_data = json.dumps({
@@ -133,50 +132,13 @@ def aggregate_ticks_to_candles(df_ticks: pd.DataFrame, time_frame: str) -> pd.Da
     )
     df_candles.dropna(inplace=True)
     
-    # ⚠️ التحقق من العدد الكافي للشموع (250)
+    # التحقق من العدد الكافي للشموع (250)
     if len(df_candles) < REQUIRED_CANDLES: return pd.DataFrame() 
     return df_candles
 
 
-def get_high_timeframe_trend(symbol: str) -> str:
-    """يحدد الترند العام من إطار زمني أعلى (4h) باستخدام EMA 200."""
-    ssl_context = create_ssl_context()
-    
-    try:
-        ws = create_connection(DERIV_WSS, ssl_context=ssl_context)
-        request_data = json.dumps({
-            "candles": symbol, "end": "latest", "start": 1, 
-            "count": 250, "granularity": 4 * 3600 
-        })
-        ws.send(request_data)
-        response = ws.recv()
-        data = json.loads(response)
-        ws.close()
-        
-        if 'candles' in data:
-            df = pd.DataFrame(data['candles'])
-            df['close'] = pd.to_numeric(df['close'], errors='coerce')
-            df.dropna(inplace=True)
-            if len(df) < EMA_LONG: return "SIDEWAYS"
+# 🗑 تم حذف دالة get_high_timeframe_trend بناءً على طلب المستخدم.
 
-            df['EMA_LONG'] = ta.trend.ema_indicator(df['close'], window=EMA_LONG, fillna=True)
-            
-            last_close = df.iloc[-1]['close']
-            last_ema_long = df.iloc[-1]['EMA_LONG']
-
-            if last_close > last_ema_long:
-                return "BULLISH"
-            elif last_close < last_ema_long:
-                return "BEARISH"
-        return "SIDEWAYS"
-    except Exception as e:
-        return "SIDEWAYS"
-
-
-# 👈🏻 لم يتم تغيير الدوال التالية الخاصة بالاستراتيجية، وهي:
-# is_strong_candle, check_rsi_divergence, calculate_fibonacci_ret, 
-# calculate_advanced_indicators, generate_and_invert_signal
-# سيتم إدراجها كما هي للحفاظ على منطق الـ 21 محور.
 
 def is_strong_candle(candle: pd.Series, direction: str) -> bool:
     """المحور 15: يحدد ما إذا كانت الشمعة الأخيرة شمعة قوية."""
@@ -274,12 +236,15 @@ def calculate_advanced_indicators(df: pd.DataFrame):
 
     return df
 
-def generate_and_invert_signal(df: pd.DataFrame, hft_trend: str):
-    """تطبيق استراتيجية القوة الواحد والعشرون الموحدة."""
+def generate_and_invert_signal(df: pd.DataFrame): # 📝 تم حذف hft_trend: str
+    """تطبيق استراتيجية القوة الواحد والعشرون الموحدة (1m فقط)."""
     
     if df.empty or len(df) < REQUIRED_CANDLES: 
         return "ERROR", "darkred", f"فشل في إنشاء عدد كافٍ من الشموع ({len(df)}). يتطلب {REQUIRED_CANDLES} شمعة على الأقل للتحليل."
 
+    # 📌 يتم تعيين الترند الكبير إلى SIDEWAYS لتجاهل شرط الترند في الشروط أدناه
+    hft_trend = "SIDEWAYS"
+    
     df = calculate_advanced_indicators(df)
     fib_levels, _, _ = calculate_fibonacci_ret(df)
     rsi_divergence = check_rsi_divergence(df.iloc[-20:].copy()) # استخدام نسخة لتجنب SettingWithCopyWarning
@@ -292,7 +257,6 @@ def generate_and_invert_signal(df: pd.DataFrame, hft_trend: str):
     last_ema_short = last_candle['EMA_SHORT']
     last_ema_med = last_candle['EMA_MED']
     last_vwap = last_candle['VWAP']
-    # تم تصحيح مقارنة MACD - يجب استخدام macd_diff (histogram)
     macd_hist_rising = last_candle['macd_diff'] > prev_candle['macd_diff'] 
     last_psar = last_candle['PSAR']
     last_pdi = last_candle['PDI']
@@ -319,8 +283,6 @@ def generate_and_invert_signal(df: pd.DataFrame, hft_trend: str):
     if fib_levels and fib_levels['61.8']:
         if last_close > fib_levels['61.8'] and prev_candle['close'] < fib_levels['61.8']:
             fib_buy_condition = True
-        # ملاحظة: تم تعديل منطق fib_sell_condition ليطابق عادة مستوى 38.2 أو اختراق قاع النطاق.
-        # سأفترض أنك تقصد الـ 38.2 لسيناريو البيع
         if last_close < fib_levels['38.2'] and prev_candle['close'] > fib_levels['38.2']:
             fib_sell_condition = True
 
@@ -329,57 +291,57 @@ def generate_and_invert_signal(df: pd.DataFrame, hft_trend: str):
     original_signal = ""
     reason_detail = ""
 
-    # شروط التوقع الصعودي (21 محور)
-    # تم تبسيط شروط MACD و Z-SCORE
+    # شروط التوقع الصعودي (21 محور) - تم تعديل شرط الترند HFT
     if (
-        last_close > last_ema_short and last_close > last_ema_med and hft_trend == "BULLISH" and last_close > last_vwap and
-        macd_hist_rising and last_pdi > last_ndi and last_close > last_psar and stoch_buy_condition and last_sd > SD_THRESHOLD and
+        last_close > last_ema_short and last_close > last_ema_med and 
+        (hft_trend == "BULLISH" or hft_trend == "SIDEWAYS") and # 📝 أصبح شرط الترند الآن أكثر مرونة/يتم تجاهله
+        last_close > last_vwap and macd_hist_rising and last_pdi > last_ndi and 
+        last_close > last_psar and stoch_buy_condition and last_sd > SD_THRESHOLD and
         last_adx > ADX_STRENGTH_THRESHOLD and last_bbp < BB_LOW_EXTREME and obv_rising and 
         strong_buy_candle and rsi_divergence == "BULLISH" and
         last_z_score < -Z_SCORE_THRESHOLD and last_atr > atr_avg * ATR_THRESHOLD and last_uo < 30 and
         fib_buy_condition and last_sharpe_ratio > 0 and last_vw_macd > VW_MACD_THRESHOLD
     ):
         original_signal = "BUY"
-        reason_detail = f"**قوة قصوى (BUY - 21 محور):** توافق كامل. تأكيد شارب وفيبوناتشي وزخم الحجم. **أقصى توقع صعودي لمدة 5 دقائق.**"
+        reason_detail = f"*قوة قصوى (BUY - 21 محور):* توافق كامل (على 1m). تأكيد شارب وفيبوناتشي وزخم الحجم. *أقصى توقع صعودي لمدة 5 دقائق.*"
 
-    # شروط التوقع الهبوطي (21 محور)
+    # شروط التوقع الهبوطي (21 محور) - تم تعديل شرط الترند HFT
     elif (
-        last_close < last_ema_short and last_close < last_ema_med and hft_trend == "BEARISH" and last_close < last_vwap and
-        not macd_hist_rising and last_ndi > last_pdi and last_close < last_psar and stoch_sell_condition and last_sd > SD_THRESHOLD and
+        last_close < last_ema_short and last_close < last_ema_med and 
+        (hft_trend == "BEARISH" or hft_trend == "SIDEWAYS") and # 📝 أصبح شرط الترند الآن أكثر مرونة/يتم تجاهله
+        last_close < last_vwap and not macd_hist_rising and last_ndi > last_pdi and 
+        last_close < last_psar and stoch_sell_condition and last_sd > SD_THRESHOLD and
         last_adx > ADX_STRENGTH_THRESHOLD and last_bbp > BB_HIGH_EXTREME and not obv_rising and 
         strong_sell_candle and rsi_divergence == "BEARISH" and
         last_z_score > Z_SCORE_THRESHOLD and last_atr > atr_avg * ATR_THRESHOLD and last_uo > 70 and
         fib_sell_condition and last_sharpe_ratio < 0 and last_vw_macd < VW_MACD_THRESHOLD
     ):
         original_signal = "SELL"
-        reason_detail = f"**قوة قصوى (SELL - 21 محور):** توافق كامل. تأكيد شارب وفيبوناتشي وزخم الحجم. **أقصى توقع هبوطي لمدة 5 دقائق.**"
+        reason_detail = f"*قوة قصوى (SELL - 21 محور):* توافق كامل (على 1m). تأكيد شارب وفيبوناتشي وزخم الحجم. *أقصى توقع هبوطي لمدة 5 دقائق.*"
 
-    # منطق الإشارة الدائم (Fallback)
+    # منطق الإشارة الدائم (Fallback - العكسي)
     else:
-        # ⚠️ تم استبدال المنطق الافتراضي بالمنطق الأصلي الذي طلبته في البداية (تقاطع EMA 20/50 العكسي)
+        # نظام EMA العكسي: إذا كان EMA20 > EMA50 (صاعد)، فالإشارة هي بيع (SELL).
         if last_ema_short > last_ema_med:
-            # الترند صاعد (EMA20 > EMA50) -> الإشارة العكسية هي بيع
             original_signal = "SELL"
-            reason_detail = (f"إشارة دائمة (تقاطع EMA العكسي): الترند الصاعد (EMA20>EMA50) يعني إشارة بيع.")
+            reason_detail = (f"إشارة دائمة (تقاطع EMA العكسي): الترند الصاعد (EMA20>EMA50) يعني إشارة بيع (عكسي).")
+        # إذا كان EMA20 < EMA50 (هابط)، فالإشارة هي شراء (BUY).
         else: 
-            # الترند هابط (EMA20 < EMA50) -> الإشارة العكسية هي شراء
             original_signal = "BUY"
-            reason_detail = (f"إشارة دائمة (تقاطع EMA العكسي): الترند الهابط (EMA20<EMA50) يعني إشارة شراء.")
+            reason_detail = (f"إشارة دائمة (تقاطع EMA العكسي): الترند الهابط (EMA20<EMA50) يعني إشارة شراء (عكسي).")
 
 
     # --- منطق العكس (Inversion Logic) ---
     if original_signal == "BUY":
-        inverted_signal = "BUY (CALL) - معكوس"
-        color = "lime"
-        # تم عكس لون الإشارة النهائية ليتناسب مع الإشارة (BUY/CALL)
-        reason = "🟢 **تم عكس إشارة البيع الأصلية (نظام 21 محور - الحد الأقصى).** " + reason_detail
-    elif original_signal == "SELL":
         inverted_signal = "SELL (PUT) - معكوس"
         color = "red"
-        # تم عكس لون الإشارة النهائية ليتناسب مع الإشارة (SELL/PUT)
-        reason = "🛑 **تم عكس إشارة الشراء الأصلية (نظام 21 محور - الحد الأقصى).** " + reason_detail
+        reason = "🛑 *تم عكس إشارة الشراء الأصلية (نظام 21 محور - الحد الأقصى).* " + reason_detail
+    elif original_signal == "SELL":
+        inverted_signal = "BUY (CALL) - معكوس"
+        color = "lime"
+        reason = "🟢 *تم عكس إشارة البيع الأصلية (نظام 21 محور - الحد الأقصى).* " + reason_detail
     else:
-         inverted_signal = "ERROR", color = "darkred", reason = "لم يتم تحديد إشارة بسبب خطأ في المنطق الداخلي."
+        inverted_signal, color, reason = "ERROR", "darkred", "لم يتم تحديد إشارة بسبب خطأ في المنطق الداخلي."
 
 
     return inverted_signal, color, reason
@@ -391,7 +353,6 @@ def generate_and_invert_signal(df: pd.DataFrame, hft_trend: str):
 def index():
     """ينشئ الواجهة الأمامية الأوتوماتيكية مع العداد التنازلي."""
     
-    # ⚠️ إعادة استخدام القالب الذي أرسلته أنت
     pair_options = "".join([f'<option value="{code}">{name} ({code})</option>' for code, name in PAIRS.items()])
 
     html_content = f"""
@@ -418,7 +379,7 @@ def index():
     </head>
     <body onload="startAutomation()">
         <div class="container">
-            <h1>KhouryBot (21 محور - فوركس فقط)</h1>
+            <h1>KhouryBot (21 محور - 1m فقط)</h1>
             
             <div class="time-note">
                 تحليل الحد الأقصى للقوة. الإشارة تظهر قبل 10 ثوانٍ من إغلاق شمعة الـ 5 دقائق.
@@ -440,7 +401,7 @@ def index():
             </div>
 
             <div id="reason-box">
-                سبب الإشارة: <span id="signal-reason">نظام 21 محور للتحليل الكمي.</span>
+                سبب الإشارة: <span id="signal-reason">نظام 21 محور للتحليل الكمي (1m فقط).</span>
             </div>
             
             <div id="result">---</div>
@@ -496,17 +457,17 @@ def index():
 
                     if (remainingSeconds < 1) {{
                         countdownTimer.textContent = '...تحليل الآن...';
-                        nextSignalTimeDisplay.innerHTML = `الإشارة القادمة بعد قليل.`;
+                        nextSignalTimeDisplay.innerHTML = الإشارة القادمة بعد قليل.;
                         return;
                     }}
                     
                     const displayMinutes = Math.floor(remainingSeconds / 60);
                     const displaySeconds = remainingSeconds % 60;
-                    countdownTimer.textContent = `${displayMinutes.toString().padStart(2, '0')}:${displaySeconds.toString().padStart(2, '0')}`;
+                    countdownTimer.textContent = ${displayMinutes.toString().padStart(2, '0')}:${displaySeconds.toString().padStart(2, '0')};
 
                     const minutes = targetInfo.closeTime.getMinutes().toString().padStart(2, '0');
                     const hours = targetInfo.closeTime.getHours().toString().padStart(2, '0');
-                    nextSignalTimeDisplay.innerHTML = `إغلاق الشمعة: ${hours}:${minutes}:00 (بتوقيتك المحلي)`;
+                    nextSignalTimeDisplay.innerHTML = إغلاق الشمعة: ${hours}:${minutes}:00 (بتوقيتك المحلي);
                 }}, 1000);
             }}
 
@@ -592,11 +553,10 @@ def get_signal_api():
         data = request.json
         symbol = data.get('pair')
         
-        # 1. جلب ترند الـ 4 ساعات (4H Trend)
-        hft_trend = get_high_timeframe_trend(symbol)
+        # 🗑 تم إلغاء جلب ترند الـ 4 ساعات (4H Trend) بناءً على طلبك
         
         # 2. جلب التيكات (3000 تيك)
-        df_ticks = get_market_data(symbol) # لم يعد يستقبل time_frame و count
+        df_ticks = get_market_data(symbol) 
         
         # 3. تجميع التيكات إلى شموع 1m
         df_local = aggregate_ticks_to_candles(df_ticks, '1m')
@@ -606,8 +566,8 @@ def get_signal_api():
 
         current_price = df_local.iloc[-1]['close']
         
-        # 4. توليد الإشارة العكسية 21 محور
-        final_signal, color, reason = generate_and_invert_signal(df_local, hft_trend)
+        # 4. توليد الإشارة العكسية 21 محور (دون تمرير الترند الخارجي)
+        final_signal, color, reason = generate_and_invert_signal(df_local)
         
         return jsonify({
             "signal": final_signal, 
@@ -625,7 +585,6 @@ def get_signal_api():
             "reason": f"خطأ غير متوقع في الخادم. قد تكون البيانات غير كافية أو فشل الاتصال. ({str(e)})"
         }), 500
 
-if __name__ == '__main__':
+if _name_ == '_main_':
     port = int(os.environ.get('PORT', 5000))
-    # تم تغيير الأمر أدناه ليكون ملائماً لبيئات الإنتاج مثل Render
     app.run(host='0.0.0.0', port=port)
