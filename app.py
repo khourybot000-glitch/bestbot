@@ -12,7 +12,7 @@ import ta  # مكتبة التحليل الفني
 # الإعدادات والثوابت
 # =======================================================
 
-app = Flask(_name_)
+app = Flask(__name__)
 
 # تأكد من استخدام معرف تطبيقك الخاص
 DERIV_WSS = "wss://blue.derivws.com/websockets/v3?app_id=16929"
@@ -346,6 +346,6 @@ def get_signal_api():
     return jsonify(signal_result), 200
 
 
-if _name_ == '_main_':
+if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=True)
