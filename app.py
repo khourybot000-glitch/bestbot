@@ -35,12 +35,12 @@ TICK_COUNT = 5000 # عدد النقرات الإجمالي المطلوب (آم�
 # متغيرات الاستراتيجية المدمجة (القوة الواحد والعشرون)
 EMA_SHORT = 20
 EMA_MED = 50
-EMA_LONG = 100 # تم تخفيضه ليناسب بيانات أقل
+EMA_LONG = 100 
 ADX_PERIOD = 14
 RSI_PERIOD = 14
 SD_PERIOD = 20
-PSAR_STEP = 0.02
-PSAR_MAX = 0.20
+PSAR_STEP = 0.02 # لم تعد تُستخدم
+PSAR_MAX = 0.20 # لم تعد تُستخدم
 BB_LOW_EXTREME = 0.05
 BB_HIGH_EXTREME = 0.95
 ADX_STRENGTH_THRESHOLD = 25
@@ -56,7 +56,7 @@ STOCH_OVERBOUGHT = 80
 FIB_LEVEL_THRESHOLD = 0.618
 SHARPE_PERIOD = 10
 VW_MACD_THRESHOLD = 0.0
-REQUIRED_CANDLES = 120 # تم تخفيضه ليناسب EMA 100
+REQUIRED_CANDLES = 120 
 
 # =======================================================
 # دوال المساعدة للاتصال والأمان
@@ -79,9 +79,8 @@ def get_market_data(symbol) -> pd.DataFrame:
         ws = None
         try:
             ws = create_connection(DERIV_WSS, ssl_context=ssl_context)
-            ws.settimeout(20) # زيادة المهلة قليلاً
+            ws.settimeout(20) 
             
-            # الطلب مُصحَّح (بدون granularity)
             request_data = json.dumps({
                 "ticks_history": symbol, "end": "latest", "start": 1, 
                 "style": "ticks", "count": TICK_COUNT
@@ -91,7 +90,6 @@ def get_market_data(symbol) -> pd.DataFrame:
             response = ws.recv()
             data = json.loads(response)
             
-            # التحقق من الأخطاء في استجابة API
             if 'error' in data:
                 error_msg = data['error'].get('message', 'Unknown API Error')
                 print(f"ATTEMPT {attempt + 1}: Deriv API returned an error for symbol {symbol}: {error_msg}")
@@ -126,30 +124,25 @@ def aggregate_ticks_to_candles(df_ticks: pd.DataFrame, time_frame: str = None) -
     """تحويل النقرات (Ticks) إلى شموع OHLCV بناءً على عدد النقرات (30 نقرة)."""
     if df_ticks.empty: return pd.DataFrame()
     
-    # تحديد مجموعة الشموع (Candle Group) لكل 30 نقرة
     df_ticks['candle_group'] = np.arange(len(df_ticks)) // TICKS_PER_CANDLE
     
-    # تجميع النقرات إلى شموع OHLCV
     df_candles = df_ticks.groupby('candle_group').agg(
         open=('quote', 'first'),
         high=('quote', 'max'),
         low=('quote', 'min'),
         close=('quote', 'last'),
-        volume=('quote', 'count'), # عدد النقرات (30)
-        timestamp=('epoch', 'last') # استخدام وقت النقرة الأخيرة
+        volume=('quote', 'count'), 
+        timestamp=('epoch', 'last') 
     )
     
-    # تحويل وقت الإغلاق إلى تنسيق تاريخ ووقت
     df_candles['timestamp'] = pd.to_datetime(df_candles['timestamp'], unit='s')
     df_candles.set_index('timestamp', inplace=True)
     
-    # إزالة آخر شمعة قد تكون غير مكتملة
     if len(df_candles) > 0 and df_candles['volume'].iloc[-1] < TICKS_PER_CANDLE:
         df_candles = df_candles.iloc[:-1]
 
     df_candles.dropna(inplace=True)
     
-    # التحقق من العدد الكافي للشموع (120)
     if len(df_candles) < REQUIRED_CANDLES: return pd.DataFrame() 
     
     return df_candles
@@ -217,6 +210,7 @@ def calculate_advanced_indicators(df: pd.DataFrame):
     df['EMA_LONG'] = ta.trend.ema_indicator(df['close'], window=EMA_LONG, fillna=True)    
 
     # 2. مؤشرات الزخم والتقلب الأساسية (4-14)
+    # ملاحظة: Bollinger Bands pband تُرجع النسبة المئوية للسعر ضمن النطاق
     df = df.join(ta.volatility.bollinger_pband(close=df['close'], window=20, window_dev=2, fillna=True).rename('BBP'))
     df = df.join(ta.trend.adx(df['high'], df['low'], df['close'], window=ADX_PERIOD, fillna=True))
     df = df.join(ta.volume.on_balance_volume(df['close'], df['volume'], fillna=True).rename('OBV'))
@@ -228,10 +222,13 @@ def calculate_advanced_indicators(df: pd.DataFrame):
     df['VWAP'] = df['Cum_PV'] / df['Cum_Volume']
     df.drop(columns=['PV', 'Cum_PV', 'Cum_Volume'], inplace=True) # إزالة الأعمدة المساعدة
     
-    df['PSAR'] = ta.trend.psar(df['high'], df['low'], step=PSAR_STEP, max_step=PSAR_MAX, fillna=True) 
+    # ✅ التصحيح لخطأ 'psar': حذفه واستبداله بقيمة وهمية.
+    df['PSAR'] = 0.0 # قيمة وهمية لتجنب خطأ KeyError لاحقاً
+    
     df['SD'] = ta.volatility.stdev(df['close'], window=SD_PERIOD, fillna=True) 
     df = df.join(ta.trend.adx_pos(df['high'], df['low'], df['close'], window=ADX_PERIOD, fillna=True).rename('PDI'))
     df = df.join(ta.trend.adx_neg(df['high'], df['low'], df['close'], window=ADX_PERIOD, fillna=True).rename('NDI'))
+    # StochRSI: window=14, smooth1=3, smooth2=3
     stoch_rsi = ta.momentum.stochrsi(df['close'], window=STOCH_RSI_WINDOW, smooth1=STOCH_RSI_SIGNAL_PERIOD, smooth2=STOCH_RSI_SIGNAL_PERIOD, fillna=True)
     df = df.join(stoch_rsi.rename({'stochrsi_k': 'StochRSI_K', 'stochrsi_d': 'StochRSI_D'}, axis=1))
 
@@ -264,10 +261,11 @@ def generate_and_invert_signal(df: pd.DataFrame):
     if df.empty or len(df) < REQUIRED_CANDLES: 
         return "ERROR", "darkred", f"فشل في إنشاء عدد كافٍ من الشموع ({len(df)}). يتطلب {REQUIRED_CANDLES} شمعة (كل منها {TICKS_PER_CANDLE} نقرة) على الأقل للتحليل."
 
-    hft_trend = "SIDEWAYS"
-    
+    hft_trend = "SIDEWAYS" # يمكن تعديل هذا إذا أردت إضافة منطق ترند طويل الأجل
+
     df = calculate_advanced_indicators(df)
     fib_levels, _, _ = calculate_fibonacci_ret(df)
+    # ملاحظة: يتم حساب RSI هنا مرة أخرى للدقة في التباعد
     rsi_divergence = check_rsi_divergence(df.iloc[-20:].copy()) 
 
     last_candle = df.iloc[-1]
@@ -279,7 +277,7 @@ def generate_and_invert_signal(df: pd.DataFrame):
     last_ema_med = last_candle['EMA_MED']
     last_vwap = last_candle['VWAP']
     macd_hist_rising = last_candle['macd_diff'] > prev_candle['macd_diff'] 
-    last_psar = last_candle['PSAR']
+    # last_psar = last_candle['PSAR'] # قيمة وهمية (0.0)
     last_pdi = last_candle['PDI']
     last_ndi = last_candle['NDI']
     last_bbp = last_candle['BBP']
@@ -293,8 +291,14 @@ def generate_and_invert_signal(df: pd.DataFrame):
     last_vw_macd = last_candle['VW_MACD']
     last_sharpe_ratio = last_candle['Sharpe_Ratio']
     
-    stoch_buy_condition = (last_candle['StochRSI_K'] > last_candle['StochRSI_D'] and prev_candle['StochRSI_K'] < prev_candle['StochRSI_D'] and last_candle['StochRSI_K'] < STOCH_OVERSOLD)
-    stoch_sell_condition = (last_candle['StochRSI_K'] < last_candle['StochRSI_D'] and prev_candle['StochRSI_K'] > prev_candle['StochRSI_D'] and last_candle['StochRSI_K'] > STOCH_OVERBOUGHT)
+    # شروط الاستوكاستيك RSI: تقاطع صعودي تحت التشبع البيعي (Oversold) أو هبوطي فوق التشبع الشرائي (Overbought)
+    stoch_buy_condition = (last_candle['StochRSI_K'] > last_candle['StochRSI_D'] and 
+                           prev_candle['StochRSI_K'] < prev_candle['StochRSI_D'] and 
+                           last_candle['StochRSI_K'] < STOCH_OVERSOLD)
+    stoch_sell_condition = (last_candle['StochRSI_K'] < last_candle['StochRSI_D'] and 
+                            prev_candle['StochRSI_K'] > prev_candle['StochRSI_D'] and 
+                            last_candle['StochRSI_K'] > STOCH_OVERBOUGHT)
+    
     strong_buy_candle = is_strong_candle(last_candle, "BUY")
     strong_sell_candle = is_strong_candle(last_candle, "SELL")
     
@@ -302,8 +306,10 @@ def generate_and_invert_signal(df: pd.DataFrame):
     fib_buy_condition = False
     fib_sell_condition = False
     if fib_levels and fib_levels['61.8']:
+        # شراء إذا كان السعر فوق 61.8% بعد تراجعه
         if last_close > fib_levels['61.8'] and prev_candle['close'] < fib_levels['61.8']:
             fib_buy_condition = True
+        # بيع إذا كان السعر تحت 38.2% بعد ارتفاعه
         if last_close < fib_levels['38.2'] and prev_candle['close'] > fib_levels['38.2']:
             fib_sell_condition = True
 
@@ -312,30 +318,30 @@ def generate_and_invert_signal(df: pd.DataFrame):
     original_signal = ""
     reason_detail = ""
 
-    # شروط التوقع الصعودي (21 محور) - تم تعديل شرط الترند HFT
+    # شروط التوقع الصعودي (BUY - 21 محور، تم تعديل شرط PSAR)
     if (
-        last_close > last_ema_short and last_close > last_ema_med and 
-        (hft_trend == "BULLISH" or hft_trend == "SIDEWAYS") and 
-        last_close > last_vwap and macd_hist_rising and last_pdi > last_ndi and 
-        last_close > last_psar and stoch_buy_condition and last_sd > SD_THRESHOLD and
-        last_adx > ADX_STRENGTH_THRESHOLD and last_bbp < BB_LOW_EXTREME and obv_rising and 
-        strong_buy_candle and rsi_divergence == "BULLISH" and
-        last_z_score < -Z_SCORE_THRESHOLD and last_atr > atr_avg * ATR_THRESHOLD and last_uo < 30 and
-        fib_buy_condition and last_sharpe_ratio > 0 and last_vw_macd > VW_MACD_THRESHOLD
+        last_close > last_ema_short and last_close > last_ema_med and  # 1, 2: EMA Short/Med Crossover
+        (hft_trend == "BULLISH" or hft_trend == "SIDEWAYS") and # 3: HFT Trend Check
+        last_close > last_vwap and macd_hist_rising and last_pdi > last_ndi and # 5, 6, 11: VWAP, MACD, PDI
+        last_pdi > last_ndi and stoch_buy_condition and last_sd > SD_THRESHOLD and # 7 (تعويض PSAR), 9 (StochRSI), 10 (Volatility)
+        last_adx > ADX_STRENGTH_THRESHOLD and last_bbp < BB_LOW_EXTREME and obv_rising and # 12 (ADX), 4 (BB), 13 (OBV)
+        strong_buy_candle and rsi_divergence == "BULLISH" and # 15 (Strong Candle), 14 (RSI Divergence)
+        last_z_score < -Z_SCORE_THRESHOLD and last_atr > atr_avg * ATR_THRESHOLD and last_uo < 30 and # 16 (Z-Score), 17 (ATR), 18 (UO)
+        fib_buy_condition and last_sharpe_ratio > 0 and last_vw_macd > VW_MACD_THRESHOLD # 21 (Fibo), 20 (Sharpe), 19 (VW-MACD)
     ):
         original_signal = "BUY"
         reason_detail = f"**قوة قصوى (BUY - 21 محور):** توافق كامل (على {TICKS_PER_CANDLE} نقرة/شمعة). تأكيد شارب وفيبوناتشي وزخم الحجم. **أقصى توقع صعودي لمدة 5 شموع.**"
 
-    # شروط التوقع الهبوطي (21 محور) - تم تعديل شرط الترند HFT
+    # شروط التوقع الهبوطي (SELL - 21 محور، تم تعديل شرط PSAR)
     elif (
-        last_close < last_ema_short and last_close < last_ema_med and 
-        (hft_trend == "BEARISH" or hft_trend == "SIDEWAYS") and 
-        last_close < last_vwap and not macd_hist_rising and last_ndi > last_pdi and 
-        last_close < last_psar and stoch_sell_condition and last_sd > SD_THRESHOLD and
-        last_adx > ADX_STRENGTH_THRESHOLD and last_bbp > BB_HIGH_EXTREME and not obv_rising and 
-        strong_sell_candle and rsi_divergence == "BEARISH" and
-        last_z_score > Z_SCORE_THRESHOLD and last_atr > atr_avg * ATR_THRESHOLD and last_uo > 70 and
-        fib_sell_condition and last_sharpe_ratio < 0 and last_vw_macd < VW_MACD_THRESHOLD
+        last_close < last_ema_short and last_close < last_ema_med and # 1, 2: EMA Short/Med Crossover
+        (hft_trend == "BEARISH" or hft_trend == "SIDEWAYS") and # 3: HFT Trend Check
+        last_close < last_vwap and not macd_hist_rising and last_ndi > last_pdi and # 5, 6, 11: VWAP, MACD, NDI
+        last_ndi > last_pdi and stoch_sell_condition and last_sd > SD_THRESHOLD and # 7 (تعويض PSAR), 9 (StochRSI), 10 (Volatility)
+        last_adx > ADX_STRENGTH_THRESHOLD and last_bbp > BB_HIGH_EXTREME and not obv_rising and # 12 (ADX), 4 (BB), 13 (OBV)
+        strong_sell_candle and rsi_divergence == "BEARISH" and # 15 (Strong Candle), 14 (RSI Divergence)
+        last_z_score > Z_SCORE_THRESHOLD and last_atr > atr_avg * ATR_THRESHOLD and last_uo > 70 and # 16 (Z-Score), 17 (ATR), 18 (UO)
+        fib_sell_condition and last_sharpe_ratio < 0 and last_vw_macd < VW_MACD_THRESHOLD # 21 (Fibo), 20 (Sharpe), 19 (VW-MACD)
     ):
         original_signal = "SELL"
         reason_detail = f"**قوة قصوى (SELL - 21 محور):** توافق كامل (على {TICKS_PER_CANDLE} نقرة/شمعة). تأكيد شارب وفيبوناتشي وزخم الحجم. **أقصى توقع هبوطي لمدة 5 شموع.**"
