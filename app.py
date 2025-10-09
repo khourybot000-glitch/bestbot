@@ -119,7 +119,6 @@ def calculate_adx_ndi_pdi(df, window=14):
     denom[denom == 0] = 1e-9 
     
     # +DI / -DI
-    # يتم استخدام PDI و NDI هنا للوضوح في التسمية
     df['PDI'] = (plus_dm_sum / denom) * 100
     df['NDI'] = (minus_dm_sum / denom) * 100
     
@@ -307,7 +306,7 @@ def calculate_advanced_indicators(df: pd.DataFrame):
     # 4. Bollinger Band %B
     df['BBP'] = calculate_bollinger_bands(df['close'], window=BB_WINDOW, dev=BB_DEV)
     
-    # 11, 12, 13. ADX, PDI, NDI (تم تصحيح هذه الدالة)
+    # 11, 12, 13. ADX, PDI, NDI 
     df['ADX'], df['PDI'], df['NDI'] = calculate_adx_ndi_pdi(df.copy(), window=ADX_PERIOD)
     
     # 13. OBV
@@ -361,7 +360,7 @@ def calculate_advanced_indicators(df: pd.DataFrame):
     return df
 
 def generate_and_confirm_signal(df: pd.DataFrame): 
-    """تطبيق نظام التصويت بالأغلبية المباشرة (21 محور)."""
+    """تطبيق نظام التصويت بالأغلبية البسيطة (21 محور)."""
     
     if df.empty or len(df) < REQUIRED_CANDLES: 
         return "ERROR", "darkred", f"فشل في إنشاء عدد كافٍ من الشموع ({len(df)})."
@@ -469,27 +468,28 @@ def generate_and_confirm_signal(df: pd.DataFrame):
     signal_score.append(1 if last_candle['EMA_SHORT'] > last_candle['EMA_MED'] else -1)
 
     # ------------------------------------------------
-    # 5. القرار النهائي (الأغلبية)
+    # 5. القرار النهائي (الأغلبية البسيطة)
     # ------------------------------------------------
 
     total_score = sum(signal_score)
-    majority_threshold = 7 # نطلب فارقًا لا يقل عن 7 أصوات (14 مقابل 7) للحصول على إشارة قوية. 
-
-    if total_score >= majority_threshold:
-        final_signal = "BUY (CALL) - أغلبية مؤكدة"
-        color = "lime"
-        reason = f"🟢 **توافق مباشر (BUY):** {total_score} صوت صعود مقابل {21 - total_score} صوت هبوط/حياد. الأغلبية الساحقة تؤكد الصعود."
-    elif total_score <= -majority_threshold:
-        final_signal = "SELL (PUT) - أغلبية مؤكدة"
-        color = "red"
-        reason = f"🛑 **توافق مباشر (SELL):** {total_score * -1} صوت هبوط مقابل {21 + total_score} صوت صعود/حياد. الأغلبية الساحقة تؤكد الهبوط."
-    else:
-        final_signal = "WAIT (Neutral) - حياد"
-        color = "yellow"
-        reason = f"🟡 **عدم توافق (WAIT):** النتيجة النهائية {total_score}. لا توجد أغلبية كافية (المطلوب 7+ أصوات صافية) لتأكيد أي اتجاه. البقاء على الحياد."
+    buy_votes = sum(s == 1 for s in signal_score)
+    sell_votes = sum(s == -1 for s in signal_score)
     
-    # إضافة تفاصيل إضافية:
-    reason += f" (إجمالي الأصوات: {total_score} من 21)."
+    # **تعديل: صوت واحد زيادة يكفي (الأغلبية البسيطة)**
+    if total_score > 0:
+        final_signal = "BUY (CALL) - أغلبية بسيطة"
+        color = "lime"
+        reason = f"🟢 **توافق بسيط (BUY):** {buy_votes} صوت صعود مقابل {sell_votes} صوت هبوط. الأغلبية تؤكد الصعود بفارق {total_score} صوت."
+    elif total_score < 0:
+        final_signal = "SELL (PUT) - أغلبية بسيطة"
+        color = "red"
+        reason = f"🛑 **توافق بسيط (SELL):** {sell_votes} صوت هبوط مقابل {buy_votes} صوت صعود. الأغلبية تؤكد الهبوط بفارق {total_score * -1} صوت."
+    else:
+        final_signal = "WAIT (Neutral) - تعادل"
+        color = "yellow"
+        reason = f"🟡 **تعادل (WAIT):** النتيجة النهائية {total_score}. لا توجد أغلبية لتأكيد أي اتجاه ({buy_votes} صوت شراء مقابل {sell_votes} صوت بيع)."
+    
+    reason += f" (إجمالي الأصوات الصافية: {total_score} من 21)."
 
     return final_signal, color, reason
 
@@ -507,7 +507,7 @@ def index():
     <html lang="ar" dir="rtl">
     <head>
         <meta charset="UTF-8">
-        <title>KhouryBot (تصويت الأغلبية المباشر)</title>
+        <title>KhouryBot (تصويت الأغلبية البسيطة)</title>
         <style>
             body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; text-align: center; margin: 0; background-color: #0d1117; color: #c9d1d9; padding-top: 40px; }}
             .container {{ max-width: 550px; margin: 0 auto; padding: 35px; border-radius: 10px; background-color: #161b22; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5); }}
@@ -526,10 +526,10 @@ def index():
     </head>
     <body onload="startAutomation()">
         <div class="container">
-            <h1>KhouryBot (تصويت الأغلبية المباشر)</h1>
+            <h1>KhouryBot (تصويت الأغلبية البسيطة)</h1>
             
             <div class="time-note">
-                **النظام يعتمد الآن على إشارة الأغلبية المباشرة (BUY لأغلبية الأصوات، SELL لأغلبية الأصوات).**
+                **النظام يعتمد الآن على الأغلبية البسيطة: صوت واحد صافٍ زيادة يكفي لصفقة (BUY أو SELL).**
             </div>
             
             <div class="status-box">
@@ -638,7 +638,7 @@ def index():
                 
                 resultDiv.innerHTML = '<span class="loading">KhouryBot يحلل الـ 21 محوراً...</span>';
                 priceSpan.innerText = 'جاري جلب البيانات...';
-                reasonSpan.innerText = 'KhouryBot يطبق تصويت الأغلبية المباشر (على شموع 30 نقرة)...';
+                reasonSpan.innerText = 'KhouryBot يطبق تصويت الأغلبية البسيطة (على شموع 30 نقرة)...';
 
                 try {{
                     // 2. جلب الإشارة
