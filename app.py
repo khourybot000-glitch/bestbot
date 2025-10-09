@@ -21,15 +21,15 @@ MAX_RETRIES = 3
 # 📊 أزواج الفوركس فقط
 PAIRS = {
     "frxEURUSD": "EUR/USD", "frxGBPUSD": "GBP/USD", "frxUSDJPY": "USD/JPY",
-    "frxAUDUSD": "AUD/USD", "frxNZDUSD": "NZD/USD", "frxUSDCAD": "USD/CAD",
+    "frxAUDUSD": "AUD/USD", "frxNZDUSD": "NZD/JPY", "frxUSDCAD": "USD/CAD",
     "frxUSDCHF": "USD/CHF", "frxEURGBP": "EUR/GBP", "frxEURJPY": "EUR/JPY",
     "frxGBPJPY": "GBR/JPY", "frxEURCAD": "EUR/CAD", "frxEURCHF": "EUR/CHF",
     "frxAUDJPY": "AUD/JPY", "frxCHFJPY": "CHF/JPY", "frxCADJPY": "CAD/JPY"
 }
 
 # 🟢 إعدادات الشموع المعتمدة على النقرات (لحظية جداً)
-TICKS_PER_CANDLE = 10 # 💥 10 نقرات لكل شمعة لصفقات الدقيقة
-TICK_COUNT = 3000     # عدد النقرات الإجمالي المطلوب 
+TICKS_PER_CANDLE = 10 
+TICK_COUNT = 3000     
 
 # متغيرات الاستراتيجية المدمجة (انعكاس قوي وزخم لحظي)
 EMA_SHORT = 5
@@ -38,14 +38,14 @@ EMA_LONG = 26
 RSI_PERIOD = 7
 SD_PERIOD = 14 
 BB_WINDOW = 14
-BB_DEV = 2.5    # انحراف معياري أعلى للاختراق القوي
+BB_DEV = 2.5    
 ADX_PERIOD = 7
-Z_SCORE_THRESHOLD_STRICT = 2.5 # صرامة قصوى للانحراف
+Z_SCORE_THRESHOLD_STRICT = 2.5 
 ATR_PERIOD = 5
-CANDLE_STRENGTH_RATIO = 0.9 # شمعة قوية جداً
+CANDLE_STRENGTH_RATIO = 0.9 
 STOCH_RSI_WINDOW = 5
-STOCH_OVERSOLD_STRICT = 5   # تشبع قصوى
-STOCH_OVERBOUGHT_STRICT = 95 # تشبع قصوى
+STOCH_OVERSOLD_STRICT = 5   
+STOCH_OVERBOUGHT_STRICT = 95 
 SNR_WINDOW = 30 
 REQUIRED_CANDLES = 100 
 CCI_PERIOD = 10
@@ -54,21 +54,19 @@ VW_MACD_SLOW = 10
 VW_MACD_SIGNAL = 3
 
 # =======================================================
-# دوال المؤشرات المساعدة
+# دوال المؤشرات المساعدة (لن يتم تكرارها هنا لتجنب الإطالة، لكنها موجودة في ملف app.py)
 # =======================================================
+# *يجب التأكد من أن جميع دوال المؤشرات موجودة هنا في ملف app.py*
 
 def create_ssl_context():
-    """إنشاء سياق SSL موثوق به."""
     context = ssl.create_default_context()
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     return context
 
 def calculate_ema(series, window):
-    """حساب المتوسط المتحرك الأسي (EMA)."""
     return series.ewm(span=window, adjust=False).mean()
 
 def calculate_rsi(series, window):
-    """حساب مؤشر القوة النسبية (RSI)."""
     delta = series.diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
@@ -79,7 +77,6 @@ def calculate_rsi(series, window):
     return rsi.fillna(0)
 
 def calculate_atr(df, window):
-    """حساب متوسط المدى الحقيقي (ATR)."""
     df['H-L'] = df['high'] - df['low']
     df['H-PC'] = np.abs(df['high'] - df['close'].shift(1))
     df['L-PC'] = np.abs(df['low'] - df['close'].shift(1))
@@ -87,7 +84,6 @@ def calculate_atr(df, window):
     return tr.ewm(span=window, adjust=False).mean()
 
 def calculate_cci(df, window):
-    """حساب مؤشر قناة السلع (CCI)."""
     df['TP'] = (df['high'] + df['low'] + df['close']) / 3
     df['SMA_TP'] = df['TP'].rolling(window=window).mean()
     df['MAD'] = df['TP'].rolling(window=window).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
@@ -96,7 +92,6 @@ def calculate_cci(df, window):
     return cci.fillna(0)
 
 def calculate_adx_ndi_pdi(df, window):
-    """حساب ADX, NDI, PDI."""
     df['UpMove'] = df['high'] - df['high'].shift(1)
     df['DownMove'] = df['low'].shift(1) - df['low']
     df['+DM'] = np.where((df['UpMove'] > df['DownMove']) & (df['UpMove'] > 0), df['UpMove'], 0)
@@ -120,7 +115,6 @@ def calculate_adx_ndi_pdi(df, window):
     return df['ADX'], df['PDI'], df['NDI']
 
 def calculate_stochrsi(series, window, smooth_k=3, smooth_d=3):
-    """حساب مؤشر Stochastic RSI."""
     rsi = calculate_rsi(series, window=window)
     min_rsi = rsi.rolling(window=window).min()
     max_rsi = rsi.rolling(window=window).max()
@@ -131,7 +125,6 @@ def calculate_stochrsi(series, window, smooth_k=3, smooth_d=3):
     return stochrsi_k_smooth.fillna(0), stochrsi_d.fillna(0)
 
 def calculate_bollinger_bands(series, window, dev):
-    """حساب Bollinger Bands (%B)."""
     sma = series.rolling(window=window).mean()
     std = series.rolling(window=window).std()
     upper = sma + (std * dev)
@@ -140,7 +133,6 @@ def calculate_bollinger_bands(series, window, dev):
     return bbp.fillna(0)
 
 def calculate_uo(df, s=5, m=10, l=20):
-    """حساب Ultimate Oscillator (UO)."""
     df['TR'] = calculate_atr(df.copy(), window=1) 
     df['BP'] = df['close'] - df[['low', 'close']].min(axis=1).shift(1)
     df['BP'] = df['BP'].clip(lower=0)
@@ -154,7 +146,6 @@ def calculate_uo(df, s=5, m=10, l=20):
     return uo.fillna(0)
 
 def calculate_macd_diff(series, fast, slow, sign):
-    """حساب MACD Histogram (Diff)."""
     ema_fast = calculate_ema(series, fast)
     ema_slow = calculate_ema(series, slow)
     macd_line = ema_fast - ema_slow
@@ -163,7 +154,6 @@ def calculate_macd_diff(series, fast, slow, sign):
     return macd_diff.fillna(0)
 
 def find_snr_levels(df: pd.DataFrame, window: int) -> tuple:
-    """تحدد مستويات الدعم والمقاومة القريبة."""
     recent_data = df.iloc[-window:]
     if recent_data.empty: return None, None
     resistance = recent_data['high'].max()
@@ -176,18 +166,15 @@ def find_snr_levels(df: pd.DataFrame, window: int) -> tuple:
     return final_support, final_resistance
 
 def check_snr_reaction(close_price: float, support: float, resistance: float, prev_close: float) -> str:
-    """تحدد إذا كان هناك اختراق (Breakout) أو ارتداد (Rejection) من الدعم/المقاومة."""
     if support is None or resistance is None: return "NONE"
     tolerance = 0.0001 
     if close_price > resistance + tolerance and prev_close < resistance - tolerance: return "BREAKOUT_UP"
     if close_price < support - tolerance and prev_close > support + tolerance: return "BREAKOUT_DOWN"
-    # الارتداد هو المهم لصفقة الدقيقة
     if close_price < resistance and resistance - close_price < tolerance * 5 and close_price < prev_close: return "REJECTION_DOWN"
     if close_price > support and close_price - support < tolerance * 5 and close_price > prev_close: return "REJECTION_UP"
     return "NONE"
 
 def get_market_data(symbol) -> pd.DataFrame:
-    """جلب النقرات التاريخية من Deriv WSS."""
     ssl_context = create_ssl_context()
     for attempt in range(MAX_RETRIES):
         ws = None
@@ -216,7 +203,6 @@ def get_market_data(symbol) -> pd.DataFrame:
     return pd.DataFrame()
 
 def aggregate_ticks_to_candles(df_ticks: pd.DataFrame) -> pd.DataFrame:
-    """تحويل النقرات إلى شموع OHLCV بناءً على 10 نقرات."""
     if df_ticks.empty: return pd.DataFrame()
     df_ticks['candle_group'] = np.arange(len(df_ticks)) // TICKS_PER_CANDLE
     df_candles = df_ticks.groupby('candle_group').agg(
@@ -232,7 +218,6 @@ def aggregate_ticks_to_candles(df_ticks: pd.DataFrame) -> pd.DataFrame:
     return df_candles
 
 def is_strong_candle(candle: pd.Series, direction: str) -> bool:
-    """يحدد ما إذا كانت الشمعة الأخيرة شمعة قوية (90% من الجسم)."""
     range_hl = candle['high'] - candle['low']
     if range_hl == 0: return False 
     if direction == "BUY":
@@ -246,56 +231,37 @@ def is_strong_candle(candle: pd.Series, direction: str) -> bool:
     return False
 
 def calculate_advanced_indicators(df: pd.DataFrame):
-    """حساب جميع المؤشرات الـ 20 (لحظية)."""
-    
     df['EMA_SHORT'] = calculate_ema(df['close'], window=EMA_SHORT)
     df['EMA_MED'] = calculate_ema(df['close'], window=EMA_MED)
     df['EMA_LONG'] = calculate_ema(df['close'], window=EMA_LONG)
-
     df['BBP'] = calculate_bollinger_bands(df['close'], window=BB_WINDOW, dev=BB_DEV)
-    
     df['ADX'], df['PDI'], df['NDI'] = calculate_adx_ndi_pdi(df.copy(), window=ADX_PERIOD)
-    
     df['OBV'] = (np.sign(df['close'].diff()) * df['volume']).fillna(0).cumsum()
-    
     df['PV'] = (df['high'] + df['low'] + df['close']) / 3 * df['volume']
     df['Cum_PV'] = df['PV'].cumsum()
     df['Cum_Volume'] = df['volume'].cumsum()
     df['VWAP'] = df['Cum_PV'] / (df['Cum_Volume'] + 1e-9)
-
     df['SD'] = df['close'].rolling(window=SD_PERIOD).std().fillna(0)
-    
     df['StochRSI_K'], df['StochRSI_D'] = calculate_stochrsi(df['close'], window=STOCH_RSI_WINDOW)
-
     df['Z_SCORE'] = (df['close'] - df['EMA_LONG']) / (df['SD'] + 1e-9) 
-    
     df['ATR'] = calculate_atr(df.copy(), window=ATR_PERIOD)
     df['ATR_AVG'] = df['ATR'].rolling(window=ATR_PERIOD * 2).mean()
-    
     df['UO'] = calculate_uo(df.copy())
-    
     df['RSI'] = calculate_rsi(df['close'], window=RSI_PERIOD) 
-
     df['VW_MACD'] = calculate_macd_diff(
         series=df['close'] * df['volume'], 
         fast=VW_MACD_FAST, slow=VW_MACD_SLOW, sign=VW_MACD_SIGNAL
     )
-    
     df['CCI'] = calculate_cci(df.copy(), window=CCI_PERIOD)
-
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df.fillna(0, inplace=True)
-
     return df
 
 def generate_and_confirm_signal(df: pd.DataFrame): 
-    """تطبيق نظام التصويت بالأغلبية الموزونة (20 محوراً للانعكاس السريع)."""
-    
     if df.empty or len(df) < REQUIRED_CANDLES: 
         return "ERROR", "darkred", "N/A", f"فشل في إنشاء عدد كافٍ من الشموع ({len(df)})."
 
     df = calculate_advanced_indicators(df)
-    
     support_level, resistance_level = find_snr_levels(df, SNR_WINDOW)
     snr_reaction = check_snr_reaction(df.iloc[-1]['close'], support_level, resistance_level, df.iloc[-2]['close'])
 
@@ -328,14 +294,14 @@ def generate_and_confirm_signal(df: pd.DataFrame):
     else: signal_score.append(0)
     
     # 6. Bollinger Band (%B) - اختراق النطاق
-    bb_buy = last_candle['BBP'] < 0.05
+    bb_buy = last_candle['BBP'] < 0.05 
     bb_sell = last_candle['BBP'] > 0.95
     if bb_buy: signal_score.append(1)
     elif bb_sell: signal_score.append(-1)
     else: signal_score.append(0)
 
     # 7. RSI (تشبع سريع)
-    rsi_buy = last_candle['RSI'] < 25
+    rsi_buy = last_candle['RSI'] < 25 
     rsi_sell = last_candle['RSI'] > 75
     if rsi_buy: signal_score.append(1)
     elif rsi_sell: signal_score.append(-1)
@@ -387,7 +353,6 @@ def generate_and_confirm_signal(df: pd.DataFrame):
     # 20. MACD Histogram (إيجابي/سلبي)
     signal_score.append(1 if last_candle['VW_MACD'] > 0 else -1)
 
-
     # 5. القرار النهائي وحساب نسبة الربح (Profit Ratio)
 
     total_score = sum(signal_score)
@@ -424,10 +389,11 @@ def generate_and_confirm_signal(df: pd.DataFrame):
 
 @app.route('/', methods=['GET'])
 def index():
-    """ينشئ الواجهة الأمامية النظيفة التي طلبها المستخدم مع جدولة الدقيقة الواحدة."""
+    """ينشئ الواجهة الأمامية النظيفة التي طلبها المستخدم مع جدولة الدقيقة الواحدة. (تم تصحيح الـ f-string)"""
     
     pair_options = "".join([f'<option value="{code}">{name} ({code})</option>' for code, name in PAIRS.items()])
 
+    # 🛑 تم مضاعفة جميع الأقواس المتعرجة في كود HTML/JavaScript (مثل {{ و }}) لحل مشكلة f-string
     html_content = f"""
     <!DOCTYPE html>
     <html lang="ar" dir="rtl">
@@ -435,17 +401,89 @@ def index():
         <meta charset="UTF-8">
         <title>KhouryBot</title>
         <style>
-            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; text-align: center; margin: 0; background-color: #0d1117; color: #c9d1d9; padding-top: 40px; }}
-            .container {{ max-width: 550px; margin: 0 auto; padding: 35px; border-radius: 10px; background-color: #161b22; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5); }}
-            h1 {{ color: #FFD700; margin-bottom: 25px; font-size: 1.8em; }}
-            .status-box {{ background-color: #21262d; padding: 15px; border-radius: 6px; margin-bottom: 25px; border-right: 3px solid #FFD700; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3); }}
-            #countdown-timer {{ font-size: 2.2em; color: #ff00ff; font-weight: bold; display: block; margin: 5px 0 10px 0; text-shadow: 0 0 8px rgba(255, 0, 255, 0.5); }}
-            label {{ display: block; text-align: right; margin-bottom: 5px; color: #8b949e; }}
-            select {{ padding: 12px; margin: 10px 0; width: 100%; box-sizing: border-box; border: 1px solid #30363d; border-radius: 6px; font-size: 16px; background-color: #21262d; color: #c9d1d9; -webkit-appearance: none; -moz-appearance: none; appearance: none; background-image: url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%3E%3Cpath%20fill%3D%22%23c9d1d9%22%20d%3D%22M287%20197.3L159.9%2069.1c-3-3-7.7-3-10.7%200l-127%20128.2c-3%203-3%207.7%200%2010.7l10.7%2010.7c3%203%207.7%203%2010.7%200l113.6-114.6c3-3%207.7-3%2010.7%200l113.6%20114.6c3%203%207.7%203%2010.7%200l10.7-10.7c3.1-3%203.1-7.7%200-10.7z%22%2F%3E%3C%2Fsvg%3E'); background-repeat: no-repeat; background-position: left 0.7em top 50%, 0 0; background-size: 0.65em auto, 100%; }}
-            #result {{ font-size: 3.5em; margin-top: 30px; font-weight: 900; min-height: 70px; text-shadow: 0 0 15px rgba(255, 255, 255, 0.7); }}
-            #profit-ratio {{ font-size: 1.5em; margin-top: 10px; font-weight: bold; color: #58a6ff; }}
-            .loading {{ color: #58a6ff; font-size: 1.2em; animation: pulse 1.5s infinite alternate; }}
-            @keyframes pulse {{ from {{ opacity: 1; }} to {{ opacity: 0.6; }} }}
+            body {{
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                text-align: center;
+                margin: 0;
+                background-color: #0d1117;
+                color: #c9d1d9;
+                padding-top: 40px;
+            }}
+            .container {{
+                max-width: 550px;
+                margin: 0 auto;
+                padding: 35px;
+                border-radius: 10px;
+                background-color: #161b22;
+                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+            }}
+            h1 {{
+                color: #FFD700;
+                margin-bottom: 25px;
+                font-size: 1.8em;
+            }}
+            .status-box {{
+                background-color: #21262d;
+                padding: 15px;
+                border-radius: 6px;
+                margin-bottom: 25px;
+                border-right: 3px solid #FFD700;
+                box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+            }}
+            #countdown-timer {{
+                font-size: 2.2em;
+                color: #ff00ff;
+                font-weight: bold;
+                display: block;
+                margin: 5px 0 10px 0;
+                text-shadow: 0 0 8px rgba(255, 0, 255, 0.5);
+            }}
+            label {{
+                display: block;
+                text-align: right;
+                margin-bottom: 5px;
+                color: #8b949e;
+            }}
+            select {{
+                padding: 12px;
+                margin: 10px 0;
+                width: 100%;
+                box-sizing: border-box;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                font-size: 16px;
+                background-color: #21262d;
+                color: #c9d1d9;
+                -webkit-appearance: none;
+                -moz-appearance: none;
+                appearance: none;
+                background-image: url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%3E%3Cpath%20fill%3D%22%23c9d1d9%22%20d%3D%22M287%20197.3L159.9%2069.1c-3-3-7.7-3-10.7%200l-127%20128.2c-3%203-3%207.7%200%2010.7l10.7%2010.7c3%203%207.7%203%2010.7%200l113.6-114.6c3-3%207.7-3%2010.7%200l113.6%20114.6c3%203%207.7%203%2010.7%200l10.7-10.7c3.1-3%203.1-7.7%200-10.7z%22%2F%3E%3C%2Fsvg%3E');
+                background-repeat: no-repeat;
+                background-position: left 0.7em top 50%, 0 0;
+                background-size: 0.65em auto, 100%;
+            }}
+            #result {{
+                font-size: 3.5em;
+                margin-top: 30px;
+                font-weight: 900;
+                min-height: 70px;
+                text-shadow: 0 0 15px rgba(255, 255, 255, 0.7);
+            }}
+            #profit-ratio {{
+                font-size: 1.5em;
+                margin-top: 10px;
+                font-weight: bold;
+                color: #58a6ff;
+            }}
+            .loading {{
+                color: #58a6ff;
+                font-size: 1.2em;
+                animation: pulse 1.5s infinite alternate;
+            }}
+            @keyframes pulse {{
+                from {{ opacity: 1; }}
+                to {{ opacity: 0.6; }}
+            }}
         </style>
     </head>
     <body onload="startAutomation()">
@@ -472,24 +510,21 @@ def index():
             const countdownTimer = document.getElementById('countdown-timer');
             let countdownInterval = null; 
             
-            // 🛑 مدة عرض الإشارة في الواجهة (15 ثانية)
             const SIGNAL_DURATION_MS = 15000; 
             
             function calculateNextSignalTime() {{
                 const now = new Date();
                 
-                // 1. تحديد بداية الدقيقة التالية
                 let nextTargetTime = new Date(now);
                 nextTargetTime.setMinutes(now.getMinutes() + 1);
                 nextTargetTime.setSeconds(0);
                 nextTargetTime.setMilliseconds(0);
                 
-                // 2. توقيت الإشارة: قبل 10 ثوانٍ من الدقيقة التالية (الثانية 50)
+                // توقيت الإشارة: قبل 10 ثوانٍ من بداية الدقيقة التالية (الثانية 50)
                 const signalTime = new Date(nextTargetTime.getTime() - 10000); 
 
-                // 3. حساب التأخير بالملي ثانية
                 const delayMs = signalTime.getTime() - now.getTime();
-                const safeDelay = Math.max(100, delayMs); // حد أدنى 100 ملي ثانية
+                const safeDelay = Math.max(100, delayMs); 
 
                 return {{ delay: safeDelay }};
             }}
@@ -508,10 +543,9 @@ def index():
                     
                     const displaySeconds = remainingSeconds % 60;
                     
-                    // عرض الثواني فقط
                     countdownTimer.textContent = '00:' + displaySeconds.toString().padStart(2, '0');
 
-                }, 1000);
+                }}, 1000);
             }}
 
             function hideSignal() {{
@@ -554,7 +588,6 @@ def index():
                     resultDiv.style.color = '#ff9800'; 
                     profitRatioDiv.innerHTML = '';
                     
-                    // في حالة الخطأ، حاول مرة أخرى بعد 5 ثوانٍ
                     setTimeout(scheduleNextSignal, 5000);
                 }}
             }}
@@ -591,7 +624,6 @@ def get_signal_api():
         if df_local.empty:
             return jsonify({"signal": "ERROR", "color": "darkred", "ratio_text": "N/A", "reason": f"فشل جلب البيانات."}), 200
 
-        # 4. توليد الإشارة بناءً على الأغلبية وحساب نسبة الربح
         final_signal, color, profit_ratio_text, reason = generate_and_confirm_signal(df_local)
         
         return jsonify({
@@ -609,8 +641,7 @@ def get_signal_api():
         }), 500
 
 if __name__ == '__main__':
-    # لتشغيل البوت محليًا، استخدم:
-    # app.run(host='0.0.0.0', port=5000, debug=True)
-    # ملاحظة: يجب إزالة debug=True عند النشر على خادم إنتاج
     port = int(os.environ.get('PORT', 5000))
+    # عند النشر، تأكد من استخدام الأمر: gunicorn app:app -b 0.0.0.0:$PORT
+    # إذا كنت تقوم بالتشغيل محليًا:
     app.run(host='0.0.0.0', port=port)
