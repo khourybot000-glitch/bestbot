@@ -61,7 +61,7 @@ VW_MACD_THRESHOLD = 0.0
 REQUIRED_CANDLES = 120 
 
 # =======================================================
-# دوال المؤشرات اليدوية (بديل ta - مصححة)
+# دوال المؤشرات اليدوية (مصححة)
 # =======================================================
 
 def create_ssl_context():
@@ -97,7 +97,7 @@ def calculate_atr(df, window=14):
 def calculate_adx_ndi_pdi(df, window=14):
     """
     حساب ADX, NDI, PDI.
-    **مُعدَّلة لتجنب خطأ القسمة على صفر وإضافة الأعمدة بشكل سليم.**
+    **مُعدَّلة لتجنب خطأ القسمة على صفر وإصلاح خطأ التسمية.**
     """
     df['UpMove'] = df['high'] - df['high'].shift(1)
     df['DownMove'] = df['low'].shift(1) - df['low']
@@ -119,26 +119,27 @@ def calculate_adx_ndi_pdi(df, window=14):
     denom[denom == 0] = 1e-9 
     
     # +DI / -DI
-    df['+DI'] = (plus_dm_sum / denom) * 100
-    df['-DI'] = (minus_dm_sum / denom) * 100
+    # يتم استخدام PDI و NDI هنا للوضوح في التسمية
+    df['PDI'] = (plus_dm_sum / denom) * 100
+    df['NDI'] = (minus_dm_sum / denom) * 100
     
     # DX
-    sum_di = df['+DI'] + df['-DI']
+    sum_di = df['PDI'] + df['NDI']
     sum_di_safe = sum_di.copy()
     sum_di_safe[sum_di_safe == 0] = 1e-9 
     
-    df['DX'] = np.abs(df['+DI'] - df['-DI']) / sum_di_safe * 100
+    df['DX'] = np.abs(df['PDI'] - df['NDI']) / sum_di_safe * 100
     
     # ADX (EMA of DX)
     df['ADX'] = df['DX'].ewm(span=window, adjust=False).mean()
     
     # تنظيف وتصفير القيم NaN
     df['ADX'] = df['ADX'].fillna(0)
-    df['+DI'] = df['+DI'].fillna(0)
-    df['-DI'] = df['-DI'].fillna(0)
+    df['PDI'] = df['PDI'].fillna(0)
+    df['NDI'] = df['NDI'].fillna(0)
     
-    # إرجاع الأعمدة الثلاثة: ADX, PDI (هو +DI), NDI (هو -DI)
-    return df['ADX'], df['+DI'], df[' -DI']
+    # إرجاع الأعمدة الثلاثة: ADX, PDI, NDI
+    return df['ADX'], df['PDI'], df['NDI']
 
 def calculate_stochrsi(series, window=14, smooth_k=3, smooth_d=3):
     """حساب مؤشر Stochastic RSI."""
@@ -306,8 +307,7 @@ def calculate_advanced_indicators(df: pd.DataFrame):
     # 4. Bollinger Band %B
     df['BBP'] = calculate_bollinger_bands(df['close'], window=BB_WINDOW, dev=BB_DEV)
     
-    # 11, 12, 13. ADX, PDI, NDI (هنا يتم استخدام الدوال المُعدلة)
-    # نستخدم df.copy() لضمان عدم حدوث Side Effects
+    # 11, 12, 13. ADX, PDI, NDI (تم تصحيح هذه الدالة)
     df['ADX'], df['PDI'], df['NDI'] = calculate_adx_ndi_pdi(df.copy(), window=ADX_PERIOD)
     
     # 13. OBV
