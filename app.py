@@ -9,7 +9,7 @@ from websocket import create_connection, WebSocketTimeoutException
 from flask import Flask, request, jsonify, render_template_string
 
 # =======================================================
-# الإعدادات والثوابت (كما هي)
+# الإعدادات والثوابت
 # =======================================================
 
 app = Flask(__name__)
@@ -61,8 +61,14 @@ VW_MACD_THRESHOLD = 0.0
 REQUIRED_CANDLES = 120 
 
 # =======================================================
-# دوال المؤشرات اليدوية (بديل ta - كما هي)
+# دوال المؤشرات اليدوية (بديل ta - مصححة)
 # =======================================================
+
+def create_ssl_context():
+    """إنشاء سياق SSL موثوق به لاستخدامه في WebSocket."""
+    context = ssl.create_default_context()
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    return context
 
 def calculate_ema(series, window):
     """حساب المتوسط المتحرك الأسي (EMA)."""
@@ -89,7 +95,10 @@ def calculate_atr(df, window=14):
     return atr
 
 def calculate_adx_ndi_pdi(df, window=14):
-    """حساب ADX, NDI, PDI."""
+    """
+    حساب ADX, NDI, PDI.
+    **مُعدَّلة لتجنب خطأ القسمة على صفر وإضافة الأعمدة بشكل سليم.**
+    """
     df['UpMove'] = df['high'] - df['high'].shift(1)
     df['DownMove'] = df['low'].shift(1) - df['low']
     
@@ -100,19 +109,36 @@ def calculate_adx_ndi_pdi(df, window=14):
     # ATR (للتطبيع)
     df['ATR_ADX'] = calculate_atr(df.copy(), window=window)
     
+    # Smoothed DM sums and ATR
+    plus_dm_sum = df['+DM'].rolling(window=window).sum()
+    minus_dm_sum = df['-DM'].rolling(window=window).sum()
+    
+    # Denominator (ATR Sum) - حماية من القسمة على صفر
+    atr_sum = df['ATR_ADX'].rolling(window=window).sum()
+    denom = atr_sum.copy()
+    denom[denom == 0] = 1e-9 
+    
     # +DI / -DI
-    # إضافة قيمة صغيرة لتجنب القسمة على الصفر
-    df['+DI'] = (df['+DM'].rolling(window=window).sum() / (df['ATR_ADX'] + 1e-9)) * 100
-    df['-DI'] = (df['-DM'].rolling(window=window).sum() / (df['ATR_ADX'] + 1e-9)) * 100
+    df['+DI'] = (plus_dm_sum / denom) * 100
+    df['-DI'] = (minus_dm_sum / denom) * 100
     
     # DX
-    df['DX'] = np.abs(df['+DI'] - df['-DI']) / (df['+DI'] + df['NDI']) * 100
-    df['DX'] = df['DX'].fillna(0) # تصفير NaN/Inf
+    sum_di = df['+DI'] + df['-DI']
+    sum_di_safe = sum_di.copy()
+    sum_di_safe[sum_di_safe == 0] = 1e-9 
+    
+    df['DX'] = np.abs(df['+DI'] - df['-DI']) / sum_di_safe * 100
     
     # ADX (EMA of DX)
     df['ADX'] = df['DX'].ewm(span=window, adjust=False).mean()
     
-    return df['ADX'], df['+DI'].fillna(0), df['-DI'].fillna(0)
+    # تنظيف وتصفير القيم NaN
+    df['ADX'] = df['ADX'].fillna(0)
+    df['+DI'] = df['+DI'].fillna(0)
+    df['-DI'] = df['-DI'].fillna(0)
+    
+    # إرجاع الأعمدة الثلاثة: ADX, PDI (هو +DI), NDI (هو -DI)
+    return df['ADX'], df['+DI'], df[' -DI']
 
 def calculate_stochrsi(series, window=14, smooth_k=3, smooth_d=3):
     """حساب مؤشر Stochastic RSI."""
@@ -139,7 +165,7 @@ def calculate_bollinger_bands(series, window=20, dev=2.0):
     lower = sma - (std * dev)
     
     # %B (Percent Bandwidth)
-    bbp = (series - lower) / (upper - lower)
+    bbp = (series - lower) / ((upper - lower) + 1e-9)
     return bbp.fillna(0)
 
 def calculate_uo(df, s=7, m=14, l=28):
@@ -170,16 +196,9 @@ def calculate_macd_diff(series, fast=12, slow=26, sign=9):
     macd_diff = macd_line - signal_line
     return macd_diff.fillna(0)
 
-
 # =======================================================
-# دوال جلب البيانات والتجميع (كما هي)
+# دوال جلب البيانات والتجميع
 # =======================================================
-
-def create_ssl_context():
-    """إنشاء سياق SSL موثوق به لاستخدامه في WebSocket."""
-    context = ssl.create_default_context()
-    context.minimum_version = ssl.TLSVersion.TLSv1_2
-    return context
 
 def get_market_data(symbol) -> pd.DataFrame:
     """جلب النقرات التاريخية من Deriv WSS."""
@@ -287,7 +306,8 @@ def calculate_advanced_indicators(df: pd.DataFrame):
     # 4. Bollinger Band %B
     df['BBP'] = calculate_bollinger_bands(df['close'], window=BB_WINDOW, dev=BB_DEV)
     
-    # 11, 12, 13. ADX, PDI, NDI
+    # 11, 12, 13. ADX, PDI, NDI (هنا يتم استخدام الدوال المُعدلة)
+    # نستخدم df.copy() لضمان عدم حدوث Side Effects
     df['ADX'], df['PDI'], df['NDI'] = calculate_adx_ndi_pdi(df.copy(), window=ADX_PERIOD)
     
     # 13. OBV
@@ -297,8 +317,8 @@ def calculate_advanced_indicators(df: pd.DataFrame):
     df['PV'] = (df['high'] + df['low'] + df['close']) / 3 * df['volume']
     df['Cum_PV'] = df['PV'].cumsum()
     df['Cum_Volume'] = df['volume'].cumsum()
-    df['VWAP'] = df['Cum_PV'] / df['Cum_Volume']
-    df.drop(columns=['PV', 'Cum_PV', 'Cum_Volume'], inplace=True) 
+    df['VWAP'] = df['Cum_PV'] / (df['Cum_Volume'] + 1e-9)
+    df.drop(columns=['PV', 'Cum_PV', 'Cum_Volume'], inplace=True, errors='ignore') 
 
     # 7. PSAR (قيمة وهمية لتعويض المؤشر المحذوف، يتم استخدام PDI/NDI لتعويضه في العد)
     df['PSAR'] = 0.0 
@@ -430,7 +450,7 @@ def generate_and_confirm_signal(df: pd.DataFrame):
     signal_score.append(1 if last_candle['Z_SCORE'] < -0.5 else -1 if last_candle['Z_SCORE'] > 0.5 else 0)
     
     # 17. ATR
-    signal_score.append(1 if last_candle['ATR'] > last_candle['ATR_AVG'] else -1)
+    signal_score.append(1 if last_candle['ATR'] < last_candle['ATR_AVG'] else -1) # تفضيل التداول في التقلب المنخفض
     
     # 18. UO (فوق 50 شراء، تحت 50 بيع)
     signal_score.append(1 if last_candle['UO'] > 50 else -1)
@@ -474,7 +494,7 @@ def generate_and_confirm_signal(df: pd.DataFrame):
     return final_signal, color, reason
 
 
-# --- مسارات Flask (كما هي) ---
+# --- مسارات Flask ---
 
 @app.route('/', methods=['GET'])
 def index():
