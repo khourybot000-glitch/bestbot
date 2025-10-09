@@ -9,7 +9,7 @@ from websocket import create_connection, WebSocketTimeoutException
 from flask import Flask, request, jsonify, render_template_string
 
 # =======================================================
-# الإعدادات والثوابت
+# الإعدادات والثوابت (FOCUS: HIGH FREQUENCY & REVERSION)
 # =======================================================
 
 app = Flask(__name__)
@@ -18,7 +18,7 @@ app = Flask(__name__)
 DERIV_WSS = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 MAX_RETRIES = 3 
 
-# 📊 أزواج الفوركس فقط (مجموعة واسعة)
+# 📊 أزواج الفوركس فقط
 PAIRS = {
     "frxEURUSD": "EUR/USD", "frxGBPUSD": "GBP/USD", "frxUSDJPY": "USD/JPY",
     "frxAUDUSD": "AUD/USD", "frxNZDUSD": "NZD/USD", "frxUSDCAD": "USD/CAD",
@@ -27,42 +27,38 @@ PAIRS = {
     "frxAUDJPY": "AUD/JPY", "frxCHFJPY": "CHF/JPY", "frxCADJPY": "CAD/JPY"
 }
 
-# 🟢 إعدادات الشموع المعتمدة على النقرات
-TICKS_PER_CANDLE = 30 
-TICK_COUNT = 5000 # عدد النقرات الإجمالي المطلوب (آمن)
+# 🟢 إعدادات الشموع المعتمدة على النقرات (لحظية جداً)
+TICKS_PER_CANDLE = 10 # 💥 10 نقرات لكل شمعة لصفقات الدقيقة
+TICK_COUNT = 3000     # عدد النقرات الإجمالي المطلوب 
 
-# متغيرات الاستراتيجية المدمجة (القوة الواحد والعشرون + 2 دعم ومقاومة = 23 محور)
-EMA_SHORT = 10
-EMA_MED = 30
-EMA_LONG = 50
-ADX_PERIOD = 14
-RSI_PERIOD = 14
-SD_PERIOD = 20 
-BB_WINDOW = 20
-BB_DEV = 2.0
-ADX_STRENGTH_THRESHOLD = 25
-Z_SCORE_THRESHOLD_STRICT = 2.0 
-ATR_PERIOD = 14
-CANDLE_STRENGTH_RATIO = 0.8
-STOCH_RSI_WINDOW = 14
-STOCH_RSI_SIGNAL_PERIOD = 3
-STOCH_OVERSOLD_STRICT = 10
-STOCH_OVERBOUGHT_STRICT = 90
-FIB_LEVEL_THRESHOLD = 0.618
-SHARPE_PERIOD = 10
-VW_MACD_FAST = 12
-VW_MACD_SLOW = 26
-VW_MACD_SIGNAL = 9
-VW_MACD_THRESHOLD = 0.0
-REQUIRED_CANDLES = 120 
-SNR_WINDOW = 50 # الشموع المستخدمة لتحديد الدعم والمقاومة
+# متغيرات الاستراتيجية المدمجة (انعكاس قوي وزخم لحظي)
+EMA_SHORT = 5
+EMA_MED = 12
+EMA_LONG = 26
+RSI_PERIOD = 7
+SD_PERIOD = 14 
+BB_WINDOW = 14
+BB_DEV = 2.5    # انحراف معياري أعلى للاختراق القوي
+ADX_PERIOD = 7
+Z_SCORE_THRESHOLD_STRICT = 2.5 # صرامة قصوى للانحراف
+ATR_PERIOD = 5
+CANDLE_STRENGTH_RATIO = 0.9 # شمعة قوية جداً
+STOCH_RSI_WINDOW = 5
+STOCH_OVERSOLD_STRICT = 5   # تشبع قصوى
+STOCH_OVERBOUGHT_STRICT = 95 # تشبع قصوى
+SNR_WINDOW = 30 
+REQUIRED_CANDLES = 100 
+CCI_PERIOD = 10
+VW_MACD_FAST = 5
+VW_MACD_SLOW = 10
+VW_MACD_SIGNAL = 3
 
 # =======================================================
 # دوال المؤشرات المساعدة
 # =======================================================
 
 def create_ssl_context():
-    """إنشاء سياق SSL موثوق به لاستخدامه في WebSocket."""
+    """إنشاء سياق SSL موثوق به."""
     context = ssl.create_default_context()
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     return context
@@ -71,7 +67,7 @@ def calculate_ema(series, window):
     """حساب المتوسط المتحرك الأسي (EMA)."""
     return series.ewm(span=window, adjust=False).mean()
 
-def calculate_rsi(series, window=14):
+def calculate_rsi(series, window):
     """حساب مؤشر القوة النسبية (RSI)."""
     delta = series.diff()
     gain = delta.where(delta > 0, 0)
@@ -82,75 +78,24 @@ def calculate_rsi(series, window=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi.fillna(0)
 
-def calculate_atr(df, window=14):
+def calculate_atr(df, window):
     """حساب متوسط المدى الحقيقي (ATR)."""
     df['H-L'] = df['high'] - df['low']
     df['H-PC'] = np.abs(df['high'] - df['close'].shift(1))
     df['L-PC'] = np.abs(df['low'] - df['close'].shift(1))
     tr = df[['H-L', 'H-PC', 'L-PC']].max(axis=1)
-    atr = tr.ewm(span=window, adjust=False).mean()
-    return atr
+    return tr.ewm(span=window, adjust=False).mean()
 
-# دالة لتحديد الدعم والمقاومة (نقاط انعكاس)
-def find_snr_levels(df: pd.DataFrame, window: int) -> tuple:
-    """
-    تحدد مستويات الدعم والمقاومة القريبة بناءً على أعلى وأدنى مستويات الشموع.
-    """
-    recent_data = df.iloc[-window:]
-    if recent_data.empty:
-        return None, None
-    
-    # تحديد المستويات الرئيسية (أعلى وأدنى الشموع)
-    resistance = recent_data['high'].max()
-    support = recent_data['low'].min()
-    
-    # تحديد مستويات فرعية (الإغلاقات الرئيسية)
-    resistance_close = recent_data['close'].nlargest(3).mean()
-    support_close = recent_data['close'].nsmallest(3).mean()
+def calculate_cci(df, window):
+    """حساب مؤشر قناة السلع (CCI)."""
+    df['TP'] = (df['high'] + df['low'] + df['close']) / 3
+    df['SMA_TP'] = df['TP'].rolling(window=window).mean()
+    df['MAD'] = df['TP'].rolling(window=window).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
+    denom = df['MAD'] + 1e-9
+    cci = (df['TP'] - df['SMA_TP']) / (0.015 * denom)
+    return cci.fillna(0)
 
-    # استخدام المتوسط بين أعلى/أدنى الشموع وأعلى/أدنى الإغلاقات 
-    # لتقليل الاعتماد على مجرد "ظلال" الشموع.
-    final_resistance = max(resistance, resistance_close) 
-    final_support = min(support, support_close)
-    
-    # للتأكد من وجود فارق معقول
-    if final_resistance == final_support:
-        return None, None
-    
-    return final_support, final_resistance
-
-def check_snr_reaction(close_price: float, support: float, resistance: float, prev_close: float) -> str:
-    """
-    تحدد إذا كان هناك اختراق (Breakout) أو ارتداد (Rejection) من الدعم/المقاومة.
-    التحمل: 0.0001 (نقطة واحدة)
-    """
-    if support is None or resistance is None:
-        return "NONE"
-
-    tolerance = 0.0001 
-    
-    # **اختراق للأعلى (Breakout UP):** السعر الحالي فوق المقاومة، والسعر السابق كان أسفلها.
-    if close_price > resistance + tolerance and prev_close < resistance - tolerance:
-        return "BREAKOUT_UP"
-    
-    # **اختراق للأسفل (Breakout DOWN):** السعر الحالي أسفل الدعم، والسعر السابق كان فوقه.
-    if close_price < support - tolerance and prev_close > support + tolerance:
-        return "BREAKOUT_DOWN"
-        
-    # **ارتداد من المقاومة (Rejection DOWN):** السعر الحالي أسفل المقاومة بعد ملامستها.
-    if close_price < resistance and resistance - close_price < tolerance * 5 and close_price < prev_close:
-        return "REJECTION_DOWN"
-        
-    # **ارتداد من الدعم (Rejection UP):** السعر الحالي فوق الدعم بعد ملامسته.
-    if close_price > support and close_price - support < tolerance * 5 and close_price > prev_close:
-        return "REJECTION_UP"
-
-    return "NONE"
-
-
-# (باقي دوال المؤشرات الأخرى مثل ADX, StochRSI, Bollinger Bands, UO, MACD_diff تبقى كما هي من الكود السابق)
-
-def calculate_adx_ndi_pdi(df, window=14):
+def calculate_adx_ndi_pdi(df, window):
     """حساب ADX, NDI, PDI."""
     df['UpMove'] = df['high'] - df['high'].shift(1)
     df['DownMove'] = df['low'].shift(1) - df['low']
@@ -174,7 +119,7 @@ def calculate_adx_ndi_pdi(df, window=14):
     df['NDI'] = df['NDI'].fillna(0)
     return df['ADX'], df['PDI'], df['NDI']
 
-def calculate_stochrsi(series, window=14, smooth_k=3, smooth_d=3):
+def calculate_stochrsi(series, window, smooth_k=3, smooth_d=3):
     """حساب مؤشر Stochastic RSI."""
     rsi = calculate_rsi(series, window=window)
     min_rsi = rsi.rolling(window=window).min()
@@ -185,7 +130,7 @@ def calculate_stochrsi(series, window=14, smooth_k=3, smooth_d=3):
     stochrsi_d = calculate_ema(stochrsi_k_smooth, smooth_d)
     return stochrsi_k_smooth.fillna(0), stochrsi_d.fillna(0)
 
-def calculate_bollinger_bands(series, window=20, dev=2.0):
+def calculate_bollinger_bands(series, window, dev):
     """حساب Bollinger Bands (%B)."""
     sma = series.rolling(window=window).mean()
     std = series.rolling(window=window).std()
@@ -194,7 +139,7 @@ def calculate_bollinger_bands(series, window=20, dev=2.0):
     bbp = (series - lower) / ((upper - lower) + 1e-9)
     return bbp.fillna(0)
 
-def calculate_uo(df, s=7, m=14, l=28):
+def calculate_uo(df, s=5, m=10, l=20):
     """حساب Ultimate Oscillator (UO)."""
     df['TR'] = calculate_atr(df.copy(), window=1) 
     df['BP'] = df['close'] - df[['low', 'close']].min(axis=1).shift(1)
@@ -208,7 +153,7 @@ def calculate_uo(df, s=7, m=14, l=28):
     uo = 100 * ((4 * avg7) + (2 * avg14) + avg28) / 7
     return uo.fillna(0)
 
-def calculate_macd_diff(series, fast=12, slow=26, sign=9):
+def calculate_macd_diff(series, fast, slow, sign):
     """حساب MACD Histogram (Diff)."""
     ema_fast = calculate_ema(series, fast)
     ema_slow = calculate_ema(series, slow)
@@ -217,6 +162,29 @@ def calculate_macd_diff(series, fast=12, slow=26, sign=9):
     macd_diff = macd_line - signal_line
     return macd_diff.fillna(0)
 
+def find_snr_levels(df: pd.DataFrame, window: int) -> tuple:
+    """تحدد مستويات الدعم والمقاومة القريبة."""
+    recent_data = df.iloc[-window:]
+    if recent_data.empty: return None, None
+    resistance = recent_data['high'].max()
+    support = recent_data['low'].min()
+    resistance_close = recent_data['close'].nlargest(3).mean()
+    support_close = recent_data['close'].nsmallest(3).mean()
+    final_resistance = max(resistance, resistance_close) 
+    final_support = min(support, support_close)
+    if final_resistance == final_support: return None, None
+    return final_support, final_resistance
+
+def check_snr_reaction(close_price: float, support: float, resistance: float, prev_close: float) -> str:
+    """تحدد إذا كان هناك اختراق (Breakout) أو ارتداد (Rejection) من الدعم/المقاومة."""
+    if support is None or resistance is None: return "NONE"
+    tolerance = 0.0001 
+    if close_price > resistance + tolerance and prev_close < resistance - tolerance: return "BREAKOUT_UP"
+    if close_price < support - tolerance and prev_close > support + tolerance: return "BREAKOUT_DOWN"
+    # الارتداد هو المهم لصفقة الدقيقة
+    if close_price < resistance and resistance - close_price < tolerance * 5 and close_price < prev_close: return "REJECTION_DOWN"
+    if close_price > support and close_price - support < tolerance * 5 and close_price > prev_close: return "REJECTION_UP"
+    return "NONE"
 
 def get_market_data(symbol) -> pd.DataFrame:
     """جلب النقرات التاريخية من Deriv WSS."""
@@ -230,17 +198,14 @@ def get_market_data(symbol) -> pd.DataFrame:
             ws.send(request_data)
             response = ws.recv()
             data = json.loads(response)
-            if 'error' in data:
-                continue 
+            if 'error' in data: continue 
             if 'history' in data and 'prices' in data['history']:
                 df_ticks = pd.DataFrame({'epoch': data['history']['times'], 'quote': data['history']['prices']})
                 df_ticks['quote'] = pd.to_numeric(df_ticks['quote'], errors='coerce')
                 df_ticks.dropna(inplace=True)
                 return df_ticks
-        except WebSocketTimeoutException:
-            pass
-        except Exception as e:
-            pass
+        except WebSocketTimeoutException: pass
+        except Exception as e: pass
         finally:
             if ws:
                 try: ws.close() 
@@ -250,8 +215,8 @@ def get_market_data(symbol) -> pd.DataFrame:
             time.sleep(wait_time)
     return pd.DataFrame()
 
-def aggregate_ticks_to_candles(df_ticks: pd.DataFrame, time_frame: str = None) -> pd.DataFrame:
-    """تحويل النقرات (Ticks) إلى شموع OHLCV بناءً على عدد النقرات (30 نقرة)."""
+def aggregate_ticks_to_candles(df_ticks: pd.DataFrame) -> pd.DataFrame:
+    """تحويل النقرات إلى شموع OHLCV بناءً على 10 نقرات."""
     if df_ticks.empty: return pd.DataFrame()
     df_ticks['candle_group'] = np.arange(len(df_ticks)) // TICKS_PER_CANDLE
     df_candles = df_ticks.groupby('candle_group').agg(
@@ -267,7 +232,7 @@ def aggregate_ticks_to_candles(df_ticks: pd.DataFrame, time_frame: str = None) -
     return df_candles
 
 def is_strong_candle(candle: pd.Series, direction: str) -> bool:
-    """المحور 15: يحدد ما إذا كانت الشمعة الأخيرة شمعة قوية."""
+    """يحدد ما إذا كانت الشمعة الأخيرة شمعة قوية (90% من الجسم)."""
     range_hl = candle['high'] - candle['low']
     if range_hl == 0: return False 
     if direction == "BUY":
@@ -280,86 +245,43 @@ def is_strong_candle(candle: pd.Series, direction: str) -> bool:
         return (body / range_hl) >= CANDLE_STRENGTH_RATIO
     return False
 
-def check_rsi_divergence(df: pd.DataFrame) -> str:
-    """المحور 14: يكتشف انحرافات RSI (Divergence)."""
-    recent_data = df.iloc[-15:].copy()
-    if len(recent_data) < 5: return "NONE"
-
-    if (recent_data['high'].iloc[-1] > recent_data['high'].iloc[-5] and
-        recent_data['RSI'].iloc[-1] < recent_data['RSI'].iloc[-5]):
-        return "BEARISH"
-    if (recent_data['low'].iloc[-1] < recent_data['low'].iloc[-5] and
-        recent_data['RSI'].iloc[-1] > recent_data['RSI'].iloc[-5]):
-        return "BULLISH"
-    return "NONE"
-
-def calculate_fibonacci_ret(df: pd.DataFrame) -> tuple:
-    """يحسب مستويات فيبوناتشي التراجعية."""
-    recent_data = df.iloc[-50:]
-    high = recent_data['high'].max()
-    low = recent_data['low'].min()
-    if high == low: return None, None, None 
-    diff = high - low
-    fib_levels = {
-        '38.2': high - diff * 0.382,
-        '50.0': high - diff * 0.5,
-        '61.8': high - diff * 0.618,
-    }
-    return fib_levels, high, low
-
 def calculate_advanced_indicators(df: pd.DataFrame):
-    """حساب جميع المؤشرات الـ 23 (21 أساسي + 2 دعم/مقاومة)."""
+    """حساب جميع المؤشرات الـ 20 (لحظية)."""
     
-    # المتوسطات المتحركة (1, 2, 3)
     df['EMA_SHORT'] = calculate_ema(df['close'], window=EMA_SHORT)
     df['EMA_MED'] = calculate_ema(df['close'], window=EMA_MED)
     df['EMA_LONG'] = calculate_ema(df['close'], window=EMA_LONG)
 
-    # 4. Bollinger Band %B
     df['BBP'] = calculate_bollinger_bands(df['close'], window=BB_WINDOW, dev=BB_DEV)
     
-    # 11, 12, 13. ADX, PDI, NDI 
     df['ADX'], df['PDI'], df['NDI'] = calculate_adx_ndi_pdi(df.copy(), window=ADX_PERIOD)
     
-    # 13. OBV
     df['OBV'] = (np.sign(df['close'].diff()) * df['volume']).fillna(0).cumsum()
     
-    # 5. VWAP (سيولة)
     df['PV'] = (df['high'] + df['low'] + df['close']) / 3 * df['volume']
     df['Cum_PV'] = df['PV'].cumsum()
     df['Cum_Volume'] = df['volume'].cumsum()
     df['VWAP'] = df['Cum_PV'] / (df['Cum_Volume'] + 1e-9)
 
-    # 10. Standard Deviation (SD)
     df['SD'] = df['close'].rolling(window=SD_PERIOD).std().fillna(0)
     
-    # 9. StochRSI
-    df['StochRSI_K'], df['StochRSI_D'] = calculate_stochrsi(df['close'], window=STOCH_RSI_WINDOW, smooth_k=STOCH_RSI_SIGNAL_PERIOD, smooth_d=STOCH_RSI_SIGNAL_PERIOD)
+    df['StochRSI_K'], df['StochRSI_D'] = calculate_stochrsi(df['close'], window=STOCH_RSI_WINDOW)
 
-    # 16. Z-SCORE 
     df['Z_SCORE'] = (df['close'] - df['EMA_LONG']) / (df['SD'] + 1e-9) 
     
-    # 17. ATR (سيولة/تقلب)
     df['ATR'] = calculate_atr(df.copy(), window=ATR_PERIOD)
     df['ATR_AVG'] = df['ATR'].rolling(window=ATR_PERIOD * 2).mean()
     
-    # 18. UO
     df['UO'] = calculate_uo(df.copy())
     
-    # RSI (يُحسب لأجل التباعد)
     df['RSI'] = calculate_rsi(df['close'], window=RSI_PERIOD) 
 
-    # 19. VW-MACD (زخم السيولة)
     df['VW_MACD'] = calculate_macd_diff(
         series=df['close'] * df['volume'], 
         fast=VW_MACD_FAST, slow=VW_MACD_SLOW, sign=VW_MACD_SIGNAL
     )
-
-    # 20. Sharpe Ratio 
-    df['Returns'] = df['close'].pct_change() 
-    df['Sharpe_Numerator'] = df['Returns'].rolling(window=SHARPE_PERIOD).mean()
-    df['Sharpe_Denominator'] = df['Returns'].rolling(window=SHARPE_PERIOD).std()
-    df['Sharpe_Ratio'] = df['Sharpe_Numerator'] / (df['Sharpe_Denominator'] + 1e-9)
+    
+    df['CCI'] = calculate_cci(df.copy(), window=CCI_PERIOD)
 
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df.fillna(0, inplace=True)
@@ -367,16 +289,13 @@ def calculate_advanced_indicators(df: pd.DataFrame):
     return df
 
 def generate_and_confirm_signal(df: pd.DataFrame): 
-    """تطبيق نظام التصويت بالأغلبية البسيطة مع شروط مشددة وحساب نسبة الربح."""
+    """تطبيق نظام التصويت بالأغلبية الموزونة (20 محوراً للانعكاس السريع)."""
     
     if df.empty or len(df) < REQUIRED_CANDLES: 
         return "ERROR", "darkred", "N/A", f"فشل في إنشاء عدد كافٍ من الشموع ({len(df)})."
 
     df = calculate_advanced_indicators(df)
-    fib_levels, _, _ = calculate_fibonacci_ret(df)
-    rsi_divergence = check_rsi_divergence(df.iloc[-20:].copy()) 
     
-    # حساب الدعم والمقاومة
     support_level, resistance_level = find_snr_levels(df, SNR_WINDOW)
     snr_reaction = check_snr_reaction(df.iloc[-1]['close'], support_level, resistance_level, df.iloc[-2]['close'])
 
@@ -386,125 +305,126 @@ def generate_and_confirm_signal(df: pd.DataFrame):
     
     signal_score = []
     
-    # ------------------------------------------------
-    # 1. نقاط المتوسطات والترند (3) - فترات قصيرة لحساسية النقرات
-    # ------------------------------------------------
+    # **إجمالي المحاور = 20 محوراً موزوناً** (بعضها قيمته 2)
+
+    # 1. نقاط المتوسطات والترند اللحظي (3)
     signal_score.append(1 if last_close > last_candle['EMA_SHORT'] else -1)
     signal_score.append(1 if last_close > last_candle['EMA_MED'] else -1)
-    signal_score.append(1 if last_candle['EMA_SHORT'] > last_candle['EMA_LONG'] else -1) # ترند طويل
+    signal_score.append(1 if last_candle['EMA_SHORT'] > last_candle['EMA_LONG'] else -1) 
     
-    # ------------------------------------------------
-    # 2. نقاط السيولة والزخم (7)
-    # ------------------------------------------------
-    # 4. Bollinger Band %B
-    signal_score.append(1 if last_candle['BBP'] > 0.5 else -1)
-    # 5. VWAP (سيولة قوية)
-    signal_score.append(1 if last_close > last_candle['VWAP'] else -1)
-    # 6. VW-MACD (زخم السيولة)
-    signal_score.append(1 if last_candle['VW_MACD'] > 0 and last_candle['VW_MACD'] > prev_candle['VW_MACD'] else -1)
-    # 7. ADX Trend Strength
-    if last_candle['ADX'] > ADX_STRENGTH_THRESHOLD:
-        signal_score.append(1 if last_candle['PDI'] > last_candle['NDI'] else -1)
-    else: signal_score.append(0)
-    # 8. OBV 
-    signal_score.append(1 if last_candle['OBV'] > prev_candle['OBV'] else -1)
-    # 9. StochRSI (تشديد التشبع)
+    # 2. نقاط الانعكاس والتشبع القصوى (4) - أصوات مزدوجة
+    # 4. StochRSI (تشبع قصوى)
     stoch_buy = (last_candle['StochRSI_K'] < STOCH_OVERSOLD_STRICT) and (last_candle['StochRSI_K'] > last_candle['StochRSI_D'])
     stoch_sell = (last_candle['StochRSI_K'] > STOCH_OVERBOUGHT_STRICT) and (last_candle['StochRSI_K'] < last_candle['StochRSI_D'])
-    if stoch_buy: signal_score.append(1)
-    elif stoch_sell: signal_score.append(-1)
-    else: signal_score.append(0)
-    # 10. UO
-    signal_score.append(1 if last_candle['UO'] > 50 else -1)
-
-    # ------------------------------------------------
-    # 3. نقاط الدعم والمقاومة (2)
-    # ------------------------------------------------
-    # 11. Reaction to SNR (اختراق/ارتداد)
-    if snr_reaction in ["BREAKOUT_UP", "REJECTION_UP"]: signal_score.append(1)
-    elif snr_reaction in ["BREAKOUT_DOWN", "REJECTION_DOWN"]: signal_score.append(-1)
+    if stoch_buy: signal_score.append(2)
+    elif stoch_sell: signal_score.append(-2)
     else: signal_score.append(0)
     
-    # 12. Price Location relative to Resistance/Support
+    # 5. Z-Score (انحراف قصوى)
+    z_buy = last_candle['Z_SCORE'] < -Z_SCORE_THRESHOLD_STRICT
+    z_sell = last_candle['Z_SCORE'] > Z_SCORE_THRESHOLD_STRICT
+    if z_buy: signal_score.append(2)
+    elif z_sell: signal_score.append(-2)
+    else: signal_score.append(0)
+    
+    # 6. Bollinger Band (%B) - اختراق النطاق
+    bb_buy = last_candle['BBP'] < 0.05
+    bb_sell = last_candle['BBP'] > 0.95
+    if bb_buy: signal_score.append(1)
+    elif bb_sell: signal_score.append(-1)
+    else: signal_score.append(0)
+
+    # 7. RSI (تشبع سريع)
+    rsi_buy = last_candle['RSI'] < 25
+    rsi_sell = last_candle['RSI'] > 75
+    if rsi_buy: signal_score.append(1)
+    elif rsi_sell: signal_score.append(-1)
+    else: signal_score.append(0)
+
+    # 3. نقاط الزخم والسيولة (7)
+    # 8. VWAP (سيولة قوية)
+    signal_score.append(1 if last_close > last_candle['VWAP'] else -1)
+    # 9. VW-MACD (زخم السيولة)
+    signal_score.append(1 if last_candle['VW_MACD'] > 0 and last_candle['VW_MACD'] > prev_candle['VW_MACD'] else -1)
+    # 10. OBV (زخم الحجم)
+    signal_score.append(1 if last_candle['OBV'] > prev_candle['OBV'] else -1)
+    # 11. CCI (زخم) 
+    cci_buy = last_candle['CCI'] < -100
+    cci_sell = last_candle['CCI'] > 100
+    if cci_buy: signal_score.append(1)
+    elif cci_sell: signal_score.append(-1)
+    else: signal_score.append(0)
+    # 12. UO (زخم قصير)
+    signal_score.append(1 if last_candle['UO'] > 50 else -1)
+    # 13. Strong Candle
+    if is_strong_candle(last_candle, "BUY"): signal_score.append(1)
+    elif is_strong_candle(last_candle, "SELL"): signal_score.append(-1)
+    else: signal_score.append(0)
+    # 14. ATR (تقلب مناسب)
+    signal_score.append(1 if last_candle['ATR'] < last_candle['ATR_AVG'] else -1) 
+
+    # 4. نقاط الدعم والمقاومة والترند (6)
+    # 15. Reaction to SNR (ارتداد فقط)
+    if snr_reaction in ["REJECTION_UP"]: signal_score.append(2)
+    elif snr_reaction in ["REJECTION_DOWN"]: signal_score.append(-2)
+    else: signal_score.append(0)
+    
+    # 16. Price Location relative to Support/Resistance (القرب من الدعم/المقاومة)
     if resistance_level and last_close < resistance_level and last_close > support_level:
-        # السعر بين الدعم والمقاومة، نفضل الشراء إذا كان أقرب للدعم (نقطة واحدة)
         distance_to_support = abs(last_close - support_level)
         distance_to_resistance = abs(last_close - resistance_level)
         signal_score.append(1 if distance_to_support < distance_to_resistance else -1)
     else: signal_score.append(0)
-
-    # ------------------------------------------------
-    # 4. نقاط الإحصاء والتباعد (11) (لإكمال الـ 23 نقطة)
-    # ------------------------------------------------
-    # 13. PDI
+    
+    # 17. PDI (لحظي)
     signal_score.append(1 if last_candle['PDI'] > last_candle['NDI'] else -1)
-    # 14. NDI
+    # 18. NDI (لحظي)
     signal_score.append(1 if last_candle['NDI'] < last_candle['PDI'] else -1)
-    # 15. RSI Divergence
-    if rsi_divergence == "BULLISH": signal_score.append(1)
-    elif rsi_divergence == "BEARISH": signal_score.append(-1)
-    else: signal_score.append(0)
-    # 16. Strong Candle
-    if is_strong_candle(last_candle, "BUY"): signal_score.append(1)
-    elif is_strong_candle(last_candle, "SELL"): signal_score.append(-1)
-    else: signal_score.append(0)
-    # 17. Z-Score (تشديد العودة للمتوسط)
-    signal_score.append(1 if last_candle['Z_SCORE'] < -Z_SCORE_THRESHOLD_STRICT else -1 if last_candle['Z_SCORE'] > Z_SCORE_THRESHOLD_STRICT else 0)
-    # 18. ATR (تقلب منخفض)
-    signal_score.append(1 if last_candle['ATR'] < last_candle['ATR_AVG'] else -1)
-    # 19. Fibonacci
-    fib_buy = fib_levels and last_close > fib_levels['61.8']
-    fib_sell = fib_levels and last_close < fib_levels['38.2']
-    if fib_buy: signal_score.append(1)
-    elif fib_sell: signal_score.append(-1)
-    else: signal_score.append(0)
-    # 20. Sharpe Ratio 
-    signal_score.append(1 if last_candle['Sharpe_Ratio'] > 0 else -1)
-    # 21. EMA Short/Med Crossover
-    signal_score.append(1 if last_candle['EMA_SHORT'] > last_candle['EMA_MED'] else -1)
-    # 22. MACD Histogram (إيجابي/سلبي)
+    
+    # 19. ADX (قوة الترند)
+    signal_score.append(1 if last_candle['ADX'] > 20 and last_candle['PDI'] > last_candle['NDI'] else -1 if last_candle['ADX'] > 20 and last_candle['PDI'] < last_candle['NDI'] else 0)
+    
+    # 20. MACD Histogram (إيجابي/سلبي)
     signal_score.append(1 if last_candle['VW_MACD'] > 0 else -1)
-    # 23. Z-Score Trend Confirmation (تأكيد الترند)
-    signal_score.append(1 if last_candle['Z_SCORE'] < 0.5 and last_candle['Z_SCORE'] > -0.5 else 0)
 
 
-    # ------------------------------------------------
-    # 5. القرار النهائي وحساب نسبة الربح
-    # ------------------------------------------------
+    # 5. القرار النهائي وحساب نسبة الربح (Profit Ratio)
 
     total_score = sum(signal_score)
-    buy_votes = sum(s == 1 for s in signal_score)
-    sell_votes = sum(s == -1 for s in signal_score)
-    total_axes = 23 # عدد المحاور الكلي
-
-    # حساب نسبة قوة الصفقة كنسبة مئوية (Profit Ratio)
+    buy_votes = sum(s for s in signal_score if s > 0)
+    sell_votes = sum(s for s in signal_score if s < 0) * -1
+    
+    max_possible_score = sum(abs(s) for s in signal_score) 
+    
     if total_score > 0:
-        strength_ratio = (buy_votes / total_axes) * 100
+        strength_ratio = (buy_votes / max_possible_score) * 100
         final_signal = "BUY (CALL)"
         color = "lime"
-        reason = f"🟢 **توافق (BUY):** {buy_votes} صعود مقابل {sell_votes} هبوط. (قوة الصفقة: {strength_ratio:.1f}%)"
     elif total_score < 0:
-        strength_ratio = (sell_votes / total_axes) * 100
+        strength_ratio = (sell_votes / max_possible_score) * 100
         final_signal = "SELL (PUT)"
         color = "red"
-        reason = f"🛑 **توافق (SELL):** {sell_votes} هبوط مقابل {buy_votes} صعود. (قوة الصفقة: {strength_ratio:.1f}%)"
     else:
         strength_ratio = 0
         final_signal = "WAIT (Neutral)"
         color = "yellow"
-        reason = f"🟡 **تعادل (WAIT):** لا توجد أغلبية. (قوة الصفقة: 0%)"
     
-    # إضافة نسبة الربح كنص بسيط لعرضه في الواجهة
+    # **الفلتر الإضافي لضمان قوة الإشارة (70% حد أدنى)**
+    if strength_ratio < 70 and final_signal != "WAIT (Neutral)":
+         final_signal = "WAIT (Weak Signal)"
+         color = "orange"
+         strength_ratio = 0
+         
     profit_ratio_text = f"الربح المتوقع: **{strength_ratio:.1f}%**"
+    reason = f"محاور التشبع والانعكاس: {buy_votes} مقابل {sell_votes}. النتيجة الصافية: {total_score}."
     
     return final_signal, color, profit_ratio_text, reason
-
 
 # --- مسارات Flask ---
 
 @app.route('/', methods=['GET'])
 def index():
-    """ينشئ الواجهة الأمامية النظيفة التي طلبها المستخدم."""
+    """ينشئ الواجهة الأمامية النظيفة التي طلبها المستخدم مع جدولة الدقيقة الواحدة."""
     
     pair_options = "".join([f'<option value="{code}">{name} ({code})</option>' for code, name in PAIRS.items()])
 
@@ -533,7 +453,7 @@ def index():
             <h1>KhouryBot</h1>
             
             <div class="status-box">
-                <p>الوقت المتبقي للتحليل التالي:</p>
+                <p>الوقت المتبقي للتحليل التالي (الثانية 50):</p>
                 <div id="countdown-timer">--:--</div>
             </div>
             
@@ -551,24 +471,25 @@ def index():
             const profitRatioDiv = document.getElementById('profit-ratio');
             const countdownTimer = document.getElementById('countdown-timer');
             let countdownInterval = null; 
-            const SIGNAL_DURATION_MS = 30000; 
+            
+            // 🛑 مدة عرض الإشارة في الواجهة (15 ثانية)
+            const SIGNAL_DURATION_MS = 15000; 
             
             function calculateNextSignalTime() {{
                 const now = new Date();
-                const currentMinutes = now.getMinutes();
-                const nextFiveMinuteMark = Math.ceil((currentMinutes + 1) / 5) * 5;
+                
+                // 1. تحديد بداية الدقيقة التالية
                 let nextTargetTime = new Date(now);
-                nextTargetTime.setMinutes(nextFiveMinuteMark);
+                nextTargetTime.setMinutes(now.getMinutes() + 1);
                 nextTargetTime.setSeconds(0);
                 nextTargetTime.setMilliseconds(0);
                 
-                if (nextTargetTime.getTime() <= now.getTime()) {{
-                    nextTargetTime.setMinutes(nextTargetTime.getMinutes() + 5);
-                }}
-                
+                // 2. توقيت الإشارة: قبل 10 ثوانٍ من الدقيقة التالية (الثانية 50)
                 const signalTime = new Date(nextTargetTime.getTime() - 10000); 
+
+                // 3. حساب التأخير بالملي ثانية
                 const delayMs = signalTime.getTime() - now.getTime();
-                const safeDelay = Math.max(1000, delayMs); 
+                const safeDelay = Math.max(100, delayMs); // حد أدنى 100 ملي ثانية
 
                 return {{ delay: safeDelay }};
             }}
@@ -580,16 +501,17 @@ def index():
                     const targetInfo = calculateNextSignalTime();
                     let remainingSeconds = Math.ceil(targetInfo.delay / 1000);
 
-                    if (remainingSeconds < 1) {{
+                    if (remainingSeconds < 1 || targetInfo.delay <= 0) {{
                         countdownTimer.textContent = '...تحليل الآن...';
                         return;
                     }}
                     
-                    const displayMinutes = Math.floor(remainingSeconds / 60);
                     const displaySeconds = remainingSeconds % 60;
                     
-                    countdownTimer.textContent = displayMinutes.toString().padStart(2, '0') + ':' + displaySeconds.toString().padStart(2, '0');
-                }}, 1000);
+                    // عرض الثواني فقط
+                    countdownTimer.textContent = '00:' + displaySeconds.toString().padStart(2, '0');
+
+                }, 1000);
             }}
 
             function hideSignal() {{
@@ -632,7 +554,8 @@ def index():
                     resultDiv.style.color = '#ff9800'; 
                     profitRatioDiv.innerHTML = '';
                     
-                    setTimeout(scheduleNextSignal, SIGNAL_DURATION_MS);
+                    // في حالة الخطأ، حاول مرة أخرى بعد 5 ثوانٍ
+                    setTimeout(scheduleNextSignal, 5000);
                 }}
             }}
 
@@ -675,7 +598,7 @@ def get_signal_api():
             "signal": final_signal, 
             "color": color, 
             "ratio_text": profit_ratio_text,
-            "reason": reason # هذه تبقى في الخلفية للمطور فقط
+            "reason": reason 
         })
     except Exception as e:
         return jsonify({
@@ -686,5 +609,8 @@ def get_signal_api():
         }), 500
 
 if __name__ == '__main__':
+    # لتشغيل البوت محليًا، استخدم:
+    # app.run(host='0.0.0.0', port=5000, debug=True)
+    # ملاحظة: يجب إزالة debug=True عند النشر على خادم إنتاج
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
