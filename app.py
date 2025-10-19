@@ -647,7 +647,7 @@ if st.session_state.logged_in:
             
             if stats.get('contract_id'):
                 st.warning(f"⚠ Trade Active: {stats.get('contract_id')}. Stats update after completion.")
-            elif stats.get('is_running') == 1:
+            elif stats.get('is_running') != 1:
                  st.info("🕒 Waiting for next tick where Last Digit == 1 (Continuous Analysis Mode).")
 
     else:
