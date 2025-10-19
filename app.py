@@ -1,647 +1,661 @@
-import os
-import json
+import streamlit as st
 import time
+import websocket
+import json
+import os
+import decimal
+import sqlite3
 import pandas as pd
-import numpy as np
-import ssl
-from datetime import datetime, timedelta
-from websocket import create_connection, WebSocketTimeoutException
-from flask import Flask, request, jsonify, render_template_string
+from datetime import datetime, timezone 
+import multiprocessing
 
-# =======================================================
-# الإعدادات والثوابت (FOCUS: HIGH FREQUENCY & REVERSION)
-# =======================================================
+# --- SQLite Database Configuration ---
+DB_FILE = "trading_data0099.db"
 
-app = Flask(__name__)
+# --- Database & Utility Functions (Functions not changed) ---
+def create_connection():
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        return conn
+    except sqlite3.Error as e:
+        return None
 
-# 📌 معلومات Deriv/Binary WebSocket API
-DERIV_WSS = "wss://blue.derivws.com/websockets/v3?app_id=16929"
-MAX_RETRIES = 3 
-
-# 📊 أزواج الفوركس فقط
-PAIRS = {
-    "frxEURUSD": "EUR/USD", "frxGBPUSD": "GBP/USD", "frxUSDJPY": "USD/JPY",
-    "frxAUDUSD": "AUD/USD", "frxNZDUSD": "NZD/JPY", "frxUSDCAD": "USD/CAD",
-    "frxUSDCHF": "USD/CHF", "frxEURGBP": "EUR/GBP", "frxEURJPY": "EUR/JPY",
-    "frxGBPJPY": "GBR/JPY", "frxEURCAD": "EUR/CAD", "frxEURCHF": "EUR/CHF",
-    "frxAUDJPY": "AUD/JPY", "frxCHFJPY": "CHF/JPY", "frxCADJPY": "CAD/JPY"
-}
-
-# 🟢 إعدادات الشموع المعتمدة على النقرات (لحظية جداً)
-TICKS_PER_CANDLE = 10 
-TICK_COUNT = 3000     
-
-# متغيرات الاستراتيجية المدمجة (انعكاس قوي وزخم لحظي)
-EMA_SHORT = 5
-EMA_MED = 12
-EMA_LONG = 26
-RSI_PERIOD = 7
-SD_PERIOD = 14 
-BB_WINDOW = 14
-BB_DEV = 2.5    
-ADX_PERIOD = 7
-Z_SCORE_THRESHOLD_STRICT = 2.5 
-ATR_PERIOD = 5
-CANDLE_STRENGTH_RATIO = 0.9 
-STOCH_RSI_WINDOW = 5
-STOCH_OVERSOLD_STRICT = 5   
-STOCH_OVERBOUGHT_STRICT = 95 
-SNR_WINDOW = 30 
-REQUIRED_CANDLES = 100 
-CCI_PERIOD = 10
-VW_MACD_FAST = 5
-VW_MACD_SLOW = 10
-VW_MACD_SIGNAL = 3
-
-# =======================================================
-# دوال المؤشرات المساعدة (لن يتم تكرارها هنا لتجنب الإطالة، لكنها موجودة في ملف app.py)
-# =======================================================
-# *يجب التأكد من أن جميع دوال المؤشرات موجودة هنا في ملف app.py*
-
-def create_ssl_context():
-    context = ssl.create_default_context()
-    context.minimum_version = ssl.TLSVersion.TLSv1_2
-    return context
-
-def calculate_ema(series, window):
-    return series.ewm(span=window, adjust=False).mean()
-
-def calculate_rsi(series, window):
-    delta = series.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(com=window - 1, adjust=False).mean()
-    avg_loss = loss.ewm(com=window - 1, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.fillna(0)
-
-def calculate_atr(df, window):
-    df['H-L'] = df['high'] - df['low']
-    df['H-PC'] = np.abs(df['high'] - df['close'].shift(1))
-    df['L-PC'] = np.abs(df['low'] - df['close'].shift(1))
-    tr = df[['H-L', 'H-PC', 'L-PC']].max(axis=1)
-    return tr.ewm(span=window, adjust=False).mean()
-
-def calculate_cci(df, window):
-    df['TP'] = (df['high'] + df['low'] + df['close']) / 3
-    df['SMA_TP'] = df['TP'].rolling(window=window).mean()
-    df['MAD'] = df['TP'].rolling(window=window).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
-    denom = df['MAD'] + 1e-9
-    cci = (df['TP'] - df['SMA_TP']) / (0.015 * denom)
-    return cci.fillna(0)
-
-def calculate_adx_ndi_pdi(df, window):
-    df['UpMove'] = df['high'] - df['high'].shift(1)
-    df['DownMove'] = df['low'].shift(1) - df['low']
-    df['+DM'] = np.where((df['UpMove'] > df['DownMove']) & (df['UpMove'] > 0), df['UpMove'], 0)
-    df['-DM'] = np.where((df['DownMove'] > df['UpMove']) & (df['DownMove'] > 0), df['DownMove'], 0)
-    df['ATR_ADX'] = calculate_atr(df.copy(), window=window)
-    plus_dm_sum = df['+DM'].rolling(window=window).sum()
-    minus_dm_sum = df['-DM'].rolling(window=window).sum()
-    atr_sum = df['ATR_ADX'].rolling(window=window).sum()
-    denom = atr_sum.copy()
-    denom[denom == 0] = 1e-9 
-    df['PDI'] = (plus_dm_sum / denom) * 100
-    df['NDI'] = (minus_dm_sum / denom) * 100
-    sum_di = df['PDI'] + df['NDI']
-    sum_di_safe = sum_di.copy()
-    sum_di_safe[sum_di_safe == 0] = 1e-9 
-    df['DX'] = np.abs(df['PDI'] - df['NDI']) / sum_di_safe * 100
-    df['ADX'] = df['DX'].ewm(span=window, adjust=False).mean()
-    df['ADX'] = df['ADX'].fillna(0)
-    df['PDI'] = df['PDI'].fillna(0)
-    df['NDI'] = df['NDI'].fillna(0)
-    return df['ADX'], df['PDI'], df['NDI']
-
-def calculate_stochrsi(series, window, smooth_k=3, smooth_d=3):
-    rsi = calculate_rsi(series, window=window)
-    min_rsi = rsi.rolling(window=window).min()
-    max_rsi = rsi.rolling(window=window).max()
-    stochrsi_k = (rsi - min_rsi) / ((max_rsi - min_rsi) + 1e-9)
-    stochrsi_k = stochrsi_k.fillna(0).clip(0, 1) * 100
-    stochrsi_k_smooth = calculate_ema(stochrsi_k, smooth_k)
-    stochrsi_d = calculate_ema(stochrsi_k_smooth, smooth_d)
-    return stochrsi_k_smooth.fillna(0), stochrsi_d.fillna(0)
-
-def calculate_bollinger_bands(series, window, dev):
-    sma = series.rolling(window=window).mean()
-    std = series.rolling(window=window).std()
-    upper = sma + (std * dev)
-    lower = sma - (std * dev)
-    bbp = (series - lower) / ((upper - lower) + 1e-9)
-    return bbp.fillna(0)
-
-def calculate_uo(df, s=5, m=10, l=20):
-    df['TR'] = calculate_atr(df.copy(), window=1) 
-    df['BP'] = df['close'] - df[['low', 'close']].min(axis=1).shift(1)
-    df['BP'] = df['BP'].clip(lower=0)
-    denom7 = df['TR'].rolling(s).sum() + 1e-9
-    denom14 = df['TR'].rolling(m).sum() + 1e-9
-    denom28 = df['TR'].rolling(l).sum() + 1e-9
-    avg7 = (df['BP'].rolling(s).sum() / denom7).fillna(0)
-    avg14 = (df['BP'].rolling(m).sum() / denom14).fillna(0)
-    avg28 = (df['BP'].rolling(l).sum() / denom28).fillna(0)
-    uo = 100 * ((4 * avg7) + (2 * avg14) + avg28) / 7
-    return uo.fillna(0)
-
-def calculate_macd_diff(series, fast, slow, sign):
-    ema_fast = calculate_ema(series, fast)
-    ema_slow = calculate_ema(series, slow)
-    macd_line = ema_fast - ema_slow
-    signal_line = calculate_ema(macd_line, sign)
-    macd_diff = macd_line - signal_line
-    return macd_diff.fillna(0)
-
-def find_snr_levels(df: pd.DataFrame, window: int) -> tuple:
-    recent_data = df.iloc[-window:]
-    if recent_data.empty: return None, None
-    resistance = recent_data['high'].max()
-    support = recent_data['low'].min()
-    resistance_close = recent_data['close'].nlargest(3).mean()
-    support_close = recent_data['close'].nsmallest(3).mean()
-    final_resistance = max(resistance, resistance_close) 
-    final_support = min(support, support_close)
-    if final_resistance == final_support: return None, None
-    return final_support, final_resistance
-
-def check_snr_reaction(close_price: float, support: float, resistance: float, prev_close: float) -> str:
-    if support is None or resistance is None: return "NONE"
-    tolerance = 0.0001 
-    if close_price > resistance + tolerance and prev_close < resistance - tolerance: return "BREAKOUT_UP"
-    if close_price < support - tolerance and prev_close > support + tolerance: return "BREAKOUT_DOWN"
-    if close_price < resistance and resistance - close_price < tolerance * 5 and close_price < prev_close: return "REJECTION_DOWN"
-    if close_price > support and close_price - support < tolerance * 5 and close_price > prev_close: return "REJECTION_UP"
-    return "NONE"
-
-def get_market_data(symbol) -> pd.DataFrame:
-    ssl_context = create_ssl_context()
-    for attempt in range(MAX_RETRIES):
-        ws = None
+def create_table_if_not_exists():
+    conn = create_connection()
+    if conn:
         try:
-            ws = create_connection(DERIV_WSS, ssl_context=ssl_context)
-            ws.settimeout(20) 
-            request_data = json.dumps({"ticks_history": symbol, "end": "latest", "start": 1, "style": "ticks", "count": TICK_COUNT})
-            ws.send(request_data)
-            response = ws.recv()
-            data = json.loads(response)
-            if 'error' in data: continue 
-            if 'history' in data and 'prices' in data['history']:
-                df_ticks = pd.DataFrame({'epoch': data['history']['times'], 'quote': data['history']['prices']})
-                df_ticks['quote'] = pd.to_numeric(df_ticks['quote'], errors='coerce')
-                df_ticks.dropna(inplace=True)
-                return df_ticks
-        except WebSocketTimeoutException: pass
-        except Exception as e: pass
+            sql_create_sessions_table = """
+            CREATE TABLE IF NOT EXISTS sessions (
+                email TEXT PRIMARY KEY, user_token TEXT NOT NULL, base_amount REAL NOT NULL, tp_target REAL NOT NULL, 
+                max_consecutive_losses INTEGER NOT NULL, total_wins INTEGER DEFAULT 0, total_losses INTEGER DEFAULT 0, 
+                current_amount REAL NOT NULL, consecutive_losses INTEGER DEFAULT 0, initial_balance REAL DEFAULT 0.0,
+                contract_id TEXT, trade_start_time REAL DEFAULT 0.0, is_running INTEGER DEFAULT 0 
+            );
+            """
+            sql_create_bot_status_table = """
+            CREATE TABLE IF NOT EXISTS bot_status (
+                flag_id INTEGER PRIMARY KEY, is_running_flag INTEGER DEFAULT 0, 
+                last_heartbeat REAL DEFAULT 0.0, process_pid INTEGER DEFAULT 0
+            );
+            """
+            conn.execute(sql_create_sessions_table)
+            conn.execute(sql_create_bot_status_table)
+            cursor = conn.execute("SELECT COUNT(*) FROM bot_status WHERE flag_id = 1")
+            if cursor.fetchone()[0] == 0:
+                conn.execute("INSERT INTO bot_status (flag_id, is_running_flag, last_heartbeat, process_pid) VALUES (1, 0, 0.0, 0)")
+            conn.commit()
+        except sqlite3.Error as e:
+            print(f"Database error during table creation: {e}")
         finally:
-            if ws:
-                try: ws.close() 
-                except: pass 
-        if attempt < MAX_RETRIES - 1:
-            wait_time = 2 ** attempt
-            time.sleep(wait_time)
-    return pd.DataFrame()
+            conn.close()
 
-def aggregate_ticks_to_candles(df_ticks: pd.DataFrame) -> pd.DataFrame:
-    if df_ticks.empty: return pd.DataFrame()
-    df_ticks['candle_group'] = np.arange(len(df_ticks)) // TICKS_PER_CANDLE
-    df_candles = df_ticks.groupby('candle_group').agg(
-        open=('quote', 'first'), high=('quote', 'max'), low=('quote', 'min'),
-        close=('quote', 'last'), volume=('quote', 'count'), timestamp=('epoch', 'last') 
-    )
-    df_candles['timestamp'] = pd.to_datetime(df_candles['timestamp'], unit='s')
-    df_candles.set_index('timestamp', inplace=True)
-    if len(df_candles) > 0 and df_candles['volume'].iloc[-1] < TICKS_PER_CANDLE:
-        df_candles = df_candles.iloc[:-1]
-    df_candles.dropna(inplace=True)
-    if len(df_candles) < REQUIRED_CANDLES: return pd.DataFrame() 
-    return df_candles
+def get_bot_running_status():
+    conn = create_connection()
+    if conn:
+        try:
+            with conn:
+                cursor = conn.execute("SELECT is_running_flag, last_heartbeat, process_pid FROM bot_status WHERE flag_id = 1")
+                row = cursor.fetchone()
+                if row:
+                    status, heartbeat, pid = row
+                    is_process_alive = False
+                    if pid and pid != 0:
+                        try:
+                            os.kill(pid, 0) 
+                            is_process_alive = True
+                        except OSError:
+                            is_process_alive = False
+                    if status == 1:
+                        if is_process_alive:
+                            if (time.time() - heartbeat > 30):
+                                update_bot_running_status(0, 0)
+                                return 0
+                            else:
+                                return status
+                        else:
+                            update_bot_running_status(0, 0)
+                            return 0
+                    else:
+                        return 0
+                return 0
+        except sqlite3.Error as e:
+            print(f"Database error in get_bot_running_status: {e}")
+            return 0
+        finally:
+            if conn: conn.close()
+    return 0
 
-def is_strong_candle(candle: pd.Series, direction: str) -> bool:
-    range_hl = candle['high'] - candle['low']
-    if range_hl == 0: return False 
-    if direction == "BUY":
-        body = candle['close'] - candle['open']
-        if body < 0: return False 
-        return (body / range_hl) >= CANDLE_STRENGTH_RATIO
-    elif direction == "SELL":
-        body = candle['open'] - candle['close']
-        if body < 0: return False 
-        return (body / range_hl) >= CANDLE_STRENGTH_RATIO
-    return False
+def update_bot_running_status(status, pid):
+    conn = create_connection()
+    if conn:
+        try:
+            with conn:
+                conn.execute("UPDATE bot_status SET is_running_flag = ?, last_heartbeat = ?, process_pid = ? WHERE flag_id = 1", (status, time.time(), pid))
+        except sqlite3.Error as e:
+            print(f"Database error in update_bot_running_status: {e}")
+        finally:
+            conn.close()
 
-def calculate_advanced_indicators(df: pd.DataFrame):
-    df['EMA_SHORT'] = calculate_ema(df['close'], window=EMA_SHORT)
-    df['EMA_MED'] = calculate_ema(df['close'], window=EMA_MED)
-    df['EMA_LONG'] = calculate_ema(df['close'], window=EMA_LONG)
-    df['BBP'] = calculate_bollinger_bands(df['close'], window=BB_WINDOW, dev=BB_DEV)
-    df['ADX'], df['PDI'], df['NDI'] = calculate_adx_ndi_pdi(df.copy(), window=ADX_PERIOD)
-    df['OBV'] = (np.sign(df['close'].diff()) * df['volume']).fillna(0).cumsum()
-    df['PV'] = (df['high'] + df['low'] + df['close']) / 3 * df['volume']
-    df['Cum_PV'] = df['PV'].cumsum()
-    df['Cum_Volume'] = df['volume'].cumsum()
-    df['VWAP'] = df['Cum_PV'] / (df['Cum_Volume'] + 1e-9)
-    df['SD'] = df['close'].rolling(window=SD_PERIOD).std().fillna(0)
-    df['StochRSI_K'], df['StochRSI_D'] = calculate_stochrsi(df['close'], window=STOCH_RSI_WINDOW)
-    df['Z_SCORE'] = (df['close'] - df['EMA_LONG']) / (df['SD'] + 1e-9) 
-    df['ATR'] = calculate_atr(df.copy(), window=ATR_PERIOD)
-    df['ATR_AVG'] = df['ATR'].rolling(window=ATR_PERIOD * 2).mean()
-    df['UO'] = calculate_uo(df.copy())
-    df['RSI'] = calculate_rsi(df['close'], window=RSI_PERIOD) 
-    df['VW_MACD'] = calculate_macd_diff(
-        series=df['close'] * df['volume'], 
-        fast=VW_MACD_FAST, slow=VW_MACD_SLOW, sign=VW_MACD_SIGNAL
-    )
-    df['CCI'] = calculate_cci(df.copy(), window=CCI_PERIOD)
-    df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    df.fillna(0, inplace=True)
-    return df
+def is_user_active(email):
+    try:
+        with open("user_ids.txt", "r") as file:
+            active_users = [line.strip() for line in file.readlines()]
+        return email in active_users
+    except FileNotFoundError:
+        return False
+    except Exception as e:
+        return False
 
-def generate_and_confirm_signal(df: pd.DataFrame): 
-    if df.empty or len(df) < REQUIRED_CANDLES: 
-        return "ERROR", "darkred", "N/A", f"فشل في إنشاء عدد كافٍ من الشموع ({len(df)})."
+def start_new_session_in_db(email, settings):
+    conn = create_connection()
+    if conn:
+        try:
+            with conn:
+                conn.execute("""
+                    INSERT OR REPLACE INTO sessions 
+                    (email, user_token, base_amount, tp_target, max_consecutive_losses, current_amount, is_running)
+                    VALUES (?, ?, ?, ?, ?, ?, 1)
+                    """, (email, settings["user_token"], settings["base_amount"], settings["tp_target"], settings["max_consecutive_losses"], settings["base_amount"]))
+        except sqlite3.Error as e:
+            print(f"Database error in start_new_session_in_db: {e}")
+        finally:
+            conn.close()
 
-    df = calculate_advanced_indicators(df)
-    support_level, resistance_level = find_snr_levels(df, SNR_WINDOW)
-    snr_reaction = check_snr_reaction(df.iloc[-1]['close'], support_level, resistance_level, df.iloc[-2]['close'])
+def update_is_running_status(email, status):
+    conn = create_connection()
+    if conn:
+        try:
+            with conn:
+                conn.execute("UPDATE sessions SET is_running = ? WHERE email = ?", (status, email))
+        except sqlite3.Error as e:
+            print(f"Database error in update_is_running_status: {e}")
+        finally:
+            conn.close()
 
-    last_candle = df.iloc[-1]
-    prev_candle = df.iloc[-2]
-    last_close = last_candle['close']
-    
-    signal_score = []
-    
-    # **إجمالي المحاور = 20 محوراً موزوناً** (بعضها قيمته 2)
+def clear_session_data(email):
+    conn = create_connection()
+    if conn:
+        try:
+            with conn:
+                conn.execute("DELETE FROM sessions WHERE email=?", (email,))
+        except sqlite3.Error as e:
+            print(f"Database error in clear_session_data: {e}")
+        finally:
+            conn.close()
 
-    # 1. نقاط المتوسطات والترند اللحظي (3)
-    signal_score.append(1 if last_close > last_candle['EMA_SHORT'] else -1)
-    signal_score.append(1 if last_close > last_candle['EMA_MED'] else -1)
-    signal_score.append(1 if last_candle['EMA_SHORT'] > last_candle['EMA_LONG'] else -1) 
-    
-    # 2. نقاط الانعكاس والتشبع القصوى (4) - أصوات مزدوجة
-    # 4. StochRSI (تشبع قصوى)
-    stoch_buy = (last_candle['StochRSI_K'] < STOCH_OVERSOLD_STRICT) and (last_candle['StochRSI_K'] > last_candle['StochRSI_D'])
-    stoch_sell = (last_candle['StochRSI_K'] > STOCH_OVERBOUGHT_STRICT) and (last_candle['StochRSI_K'] < last_candle['StochRSI_D'])
-    if stoch_buy: signal_score.append(2)
-    elif stoch_sell: signal_score.append(-2)
-    else: signal_score.append(0)
-    
-    # 5. Z-Score (انحراف قصوى)
-    z_buy = last_candle['Z_SCORE'] < -Z_SCORE_THRESHOLD_STRICT
-    z_sell = last_candle['Z_SCORE'] > Z_SCORE_THRESHOLD_STRICT
-    if z_buy: signal_score.append(2)
-    elif z_sell: signal_score.append(-2)
-    else: signal_score.append(0)
-    
-    # 6. Bollinger Band (%B) - اختراق النطاق
-    bb_buy = last_candle['BBP'] < 0.05 
-    bb_sell = last_candle['BBP'] > 0.95
-    if bb_buy: signal_score.append(1)
-    elif bb_sell: signal_score.append(-1)
-    else: signal_score.append(0)
+def get_session_status_from_db(email):
+    conn = create_connection()
+    if conn:
+        try:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("SELECT * FROM sessions WHERE email=?", (email,))
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+            return None
+        except sqlite3.Error as e:
+            print(f"Database error in get_session_status_from_db: {e}")
+            return None
+        finally:
+            conn.close()
+    return None
 
-    # 7. RSI (تشبع سريع)
-    rsi_buy = last_candle['RSI'] < 25 
-    rsi_sell = last_candle['RSI'] > 75
-    if rsi_buy: signal_score.append(1)
-    elif rsi_sell: signal_score.append(-1)
-    else: signal_score.append(0)
+def get_all_active_sessions():
+    conn = create_connection()
+    if conn:
+        try:
+            with conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute("SELECT * FROM sessions WHERE is_running = 1")
+                rows = cursor.fetchall()
+                sessions = []
+                for row in rows:
+                    sessions.append(dict(row))
+                return sessions
+        except sqlite3.Error as e:
+            print(f"Database error in get_all_active_sessions: {e}")
+            return []
+        finally:
+            conn.close()
+    return []
 
-    # 3. نقاط الزخم والسيولة (7)
-    # 8. VWAP (سيولة قوية)
-    signal_score.append(1 if last_close > last_candle['VWAP'] else -1)
-    # 9. VW-MACD (زخم السيولة)
-    signal_score.append(1 if last_candle['VW_MACD'] > 0 and last_candle['VW_MACD'] > prev_candle['VW_MACD'] else -1)
-    # 10. OBV (زخم الحجم)
-    signal_score.append(1 if last_candle['OBV'] > prev_candle['OBV'] else -1)
-    # 11. CCI (زخم) 
-    cci_buy = last_candle['CCI'] < -100
-    cci_sell = last_candle['CCI'] > 100
-    if cci_buy: signal_score.append(1)
-    elif cci_sell: signal_score.append(-1)
-    else: signal_score.append(0)
-    # 12. UO (زخم قصير)
-    signal_score.append(1 if last_candle['UO'] > 50 else -1)
-    # 13. Strong Candle
-    if is_strong_candle(last_candle, "BUY"): signal_score.append(1)
-    elif is_strong_candle(last_candle, "SELL"): signal_score.append(-1)
-    else: signal_score.append(0)
-    # 14. ATR (تقلب مناسب)
-    signal_score.append(1 if last_candle['ATR'] < last_candle['ATR_AVG'] else -1) 
+def update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=None, contract_id=None, trade_start_time=None):
+    conn = create_connection()
+    if conn:
+        try:
+            with conn:
+                update_query = """
+                UPDATE sessions SET 
+                    total_wins = ?, total_losses = ?, current_amount = ?, consecutive_losses = ?, 
+                    initial_balance = COALESCE(?, initial_balance), contract_id = ?, trade_start_time = COALESCE(?, trade_start_time)
+                WHERE email = ?
+                """
+                conn.execute(update_query, (total_wins, total_losses, current_amount, consecutive_losses, initial_balance, contract_id, trade_start_time, email))
+        except sqlite3.Error as e:
+            print(f"Database error in update_stats_and_trade_info_in_db: {e}")
+        finally:
+            conn.close()
 
-    # 4. نقاط الدعم والمقاومة والترند (6)
-    # 15. Reaction to SNR (ارتداد فقط)
-    if snr_reaction in ["REJECTION_UP"]: signal_score.append(2)
-    elif snr_reaction in ["REJECTION_DOWN"]: signal_score.append(-2)
-    else: signal_score.append(0)
-    
-    # 16. Price Location relative to Support/Resistance (القرب من الدعم/المقاومة)
-    if resistance_level and last_close < resistance_level and last_close > support_level:
-        distance_to_support = abs(last_close - support_level)
-        distance_to_resistance = abs(last_close - resistance_level)
-        signal_score.append(1 if distance_to_support < distance_to_resistance else -1)
-    else: signal_score.append(0)
-    
-    # 17. PDI (لحظي)
-    signal_score.append(1 if last_candle['PDI'] > last_candle['NDI'] else -1)
-    # 18. NDI (لحظي)
-    signal_score.append(1 if last_candle['NDI'] < last_candle['PDI'] else -1)
-    
-    # 19. ADX (قوة الترند)
-    signal_score.append(1 if last_candle['ADX'] > 20 and last_candle['PDI'] > last_candle['NDI'] else -1 if last_candle['ADX'] > 20 and last_candle['PDI'] < last_candle['NDI'] else 0)
-    
-    # 20. MACD Histogram (إيجابي/سلبي)
-    signal_score.append(1 if last_candle['VW_MACD'] > 0 else -1)
+def connect_websocket(user_token):
+    ws = websocket.WebSocket()
+    try:
+        ws.connect("wss://blue.derivws.com/websockets/v3?app_id=16929")
+        auth_req = {"authorize": user_token}
+        ws.send(json.dumps(auth_req))
+        auth_response = json.loads(ws.recv())
+        if auth_response.get('error'):
+            print(f"WebSocket authentication error: {auth_response['error']['message']}")
+            ws.close()
+            return None
+        return ws
+    except Exception as e:
+        print(f"Error connecting to WebSocket: {e}")
+        return None
 
-    # 5. القرار النهائي وحساب نسبة الربح (Profit Ratio)
+def get_balance_and_currency(user_token):
+    ws = None
+    try:
+        ws = connect_websocket(user_token)
+        if not ws:
+            return None, None
+        balance_req = {"balance": 1}
+        ws.send(json.dumps(balance_req))
+        balance_response = json.loads(ws.recv())
+        if balance_response.get('msg_type') == 'balance':
+            balance_info = balance_response.get('balance', {})
+            return balance_info.get('balance'), balance_info.get('currency')
+        return None, None
+    except Exception as e:
+        return None, None
+    finally:
+        if ws and ws.connected:
+            ws.close()
 
-    total_score = sum(signal_score)
-    buy_votes = sum(s for s in signal_score if s > 0)
-    sell_votes = sum(s for s in signal_score if s < 0) * -1
-    
-    max_possible_score = sum(abs(s) for s in signal_score) 
-    
-    if total_score > 0:
-        strength_ratio = (buy_votes / max_possible_score) * 100
-        final_signal = "BUY (CALL)"
-        color = "lime"
-    elif total_score < 0:
-        strength_ratio = (sell_votes / max_possible_score) * 100
-        final_signal = "SELL (PUT)"
-        color = "red"
-    else:
-        strength_ratio = 0
-        final_signal = "WAIT (Neutral)"
-        color = "yellow"
-    
-    # **الفلتر الإضافي لضمان قوة الإشارة (70% حد أدنى)**
-    if strength_ratio < 70 and final_signal != "WAIT (Neutral)":
-         final_signal = "WAIT (Weak Signal)"
-         color = "orange"
-         strength_ratio = 0
-         
-    profit_ratio_text = f"الربح المتوقع: **{strength_ratio:.1f}%**"
-    reason = f"محاور التشبع والانعكاس: {buy_votes} مقابل {sell_votes}. النتيجة الصافية: {total_score}."
-    
-    return final_signal, color, profit_ratio_text, reason
+def check_contract_status(ws, contract_id):
+    if not ws or not ws.connected:
+        return None
+    req = {"proposal_open_contract": 1, "contract_id": contract_id}
+    try:
+        ws.send(json.dumps(req))
+        response = json.loads(ws.recv())
+        return response.get('proposal_open_contract')
+    except Exception as e:
+        print(f"Error checking contract status: {e}")
+        return None
 
-# --- مسارات Flask ---
+def place_order(ws, proposal_id, amount):
+    if not ws or not ws.connected:
+        return {"error": {"message": "WebSocket not connected."}}
+    amount_decimal = decimal.Decimal(str(amount)).quantize(decimal.Decimal('0.01'), rounding=decimal.ROUND_HALF_UP)
+    req = {"buy": proposal_id, "price": float(amount_decimal)}
+    try:
+        ws.send(json.dumps(req))
+        response = json.loads(ws.recv())
+        return response
+    except Exception as e:
+        print(f"Error placing order: {e}")
+        return {"error": {"message": "Order placement failed."}}
 
-@app.route('/', methods=['GET'])
-def index():
-    """ينشئ الواجهة الأمامية النظيفة التي طلبها المستخدم مع جدولة الدقيقة الواحدة. (تم تصحيح الـ f-string)"""
-    
-    pair_options = "".join([f'<option value="{code}">{name} ({code})</option>' for code, name in PAIRS.items()])
 
-    # 🛑 تم مضاعفة جميع الأقواس المتعرجة في كود HTML/JavaScript (مثل {{ و }}) لحل مشكلة f-string
-    html_content = f"""
-    <!DOCTYPE html>
-    <html lang="ar" dir="rtl">
-    <head>
-        <meta charset="UTF-8">
-        <title>KhouryBot</title>
-        <style>
-            body {{
-                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                text-align: center;
-                margin: 0;
-                background-color: #0d1117;
-                color: #c9d1d9;
-                padding-top: 40px;
-            }}
-            .container {{
-                max-width: 550px;
-                margin: 0 auto;
-                padding: 35px;
-                border-radius: 10px;
-                background-color: #161b22;
-                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
-            }}
-            h1 {{
-                color: #FFD700;
-                margin-bottom: 25px;
-                font-size: 1.8em;
-            }}
-            .status-box {{
-                background-color: #21262d;
-                padding: 15px;
-                border-radius: 6px;
-                margin-bottom: 25px;
-                border-right: 3px solid #FFD700;
-                box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
-            }}
-            #countdown-timer {{
-                font-size: 2.2em;
-                color: #ff00ff;
-                font-weight: bold;
-                display: block;
-                margin: 5px 0 10px 0;
-                text-shadow: 0 0 8px rgba(255, 0, 255, 0.5);
-            }}
-            label {{
-                display: block;
-                text-align: right;
-                margin-bottom: 5px;
-                color: #8b949e;
-            }}
-            select {{
-                padding: 12px;
-                margin: 10px 0;
-                width: 100%;
-                box-sizing: border-box;
-                border: 1px solid #30363d;
-                border-radius: 6px;
-                font-size: 16px;
-                background-color: #21262d;
-                color: #c9d1d9;
-                -webkit-appearance: none;
-                -moz-appearance: none;
-                appearance: none;
-                background-image: url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%3E%3Cpath%20fill%3D%22%23c9d1d9%22%20d%3D%22M287%20197.3L159.9%2069.1c-3-3-7.7-3-10.7%200l-127%20128.2c-3%203-3%207.7%200%2010.7l10.7%2010.7c3%203%207.7%203%2010.7%200l113.6-114.6c3-3%207.7-3%2010.7%200l113.6%20114.6c3%203%207.7%203%2010.7%200l10.7-10.7c3.1-3%203.1-7.7%200-10.7z%22%2F%3E%3C%2Fsvg%3E');
-                background-repeat: no-repeat;
-                background-position: left 0.7em top 50%, 0 0;
-                background-size: 0.65em auto, 100%;
-            }}
-            #result {{
-                font-size: 3.5em;
-                margin-top: 30px;
-                font-weight: 900;
-                min-height: 70px;
-                text-shadow: 0 0 15px rgba(255, 255, 255, 0.7);
-            }}
-            #profit-ratio {{
-                font-size: 1.5em;
-                margin-top: 10px;
-                font-weight: bold;
-                color: #58a6ff;
-            }}
-            .loading {{
-                color: #58a6ff;
-                font-size: 1.2em;
-                animation: pulse 1.5s infinite alternate;
-            }}
-            @keyframes pulse {{
-                from {{ opacity: 1; }}
-                to {{ opacity: 0.6; }}
-            }}
-        </style>
-    </head>
-    <body onload="startAutomation()">
-        <div class="container">
-            <h1>KhouryBot</h1>
-            
-            <div class="status-box">
-                <p>الوقت المتبقي للتحليل التالي (الثانية 50):</p>
-                <div id="countdown-timer">--:--</div>
-            </div>
-            
-            <label for="currency_pair">زوج العملات:</label>
-            <select id="currency_pair">
-                {pair_options}
-            </select>
-            
-            <div id="result">---</div>
-            <div id="profit-ratio"></div>
-        </div>
-
-        <script>
-            const resultDiv = document.getElementById('result');
-            const profitRatioDiv = document.getElementById('profit-ratio');
-            const countdownTimer = document.getElementById('countdown-timer');
-            let countdownInterval = null; 
-            
-            const SIGNAL_DURATION_MS = 15000; 
-            
-            function calculateNextSignalTime() {{
-                const now = new Date();
-                
-                let nextTargetTime = new Date(now);
-                nextTargetTime.setMinutes(now.getMinutes() + 1);
-                nextTargetTime.setSeconds(0);
-                nextTargetTime.setMilliseconds(0);
-                
-                // توقيت الإشارة: قبل 10 ثوانٍ من بداية الدقيقة التالية (الثانية 50)
-                const signalTime = new Date(nextTargetTime.getTime() - 10000); 
-
-                const delayMs = signalTime.getTime() - now.getTime();
-                const safeDelay = Math.max(100, delayMs); 
-
-                return {{ delay: safeDelay }};
-            }}
-            
-            function startCountdown() {{
-                if (countdownInterval) clearInterval(countdownInterval);
-
-                countdownInterval = setInterval(() => {{
-                    const targetInfo = calculateNextSignalTime();
-                    let remainingSeconds = Math.ceil(targetInfo.delay / 1000);
-
-                    if (remainingSeconds < 1 || targetInfo.delay <= 0) {{
-                        countdownTimer.textContent = '...تحليل الآن...';
-                        return;
-                    }}
-                    
-                    const displaySeconds = remainingSeconds % 60;
-                    
-                    countdownTimer.textContent = '00:' + displaySeconds.toString().padStart(2, '0');
-
-                }}, 1000);
-            }}
-
-            function hideSignal() {{
-                resultDiv.innerHTML = '---';
-                resultDiv.style.color = '#c9d1d9'; 
-                profitRatioDiv.innerHTML = '';
-            }}
-
-            async function autoFetchSignal() {{
-                if (countdownInterval) clearInterval(countdownInterval);
-                countdownTimer.textContent = '...تحليل القوة...'; 
-
-                const pair = document.getElementById('currency_pair').value;
-                
-                resultDiv.innerHTML = '<span class="loading">يتم تحليل السيولة والزخم...</span>';
-                profitRatioDiv.innerHTML = '';
-
-                try {{
-                    const response = await fetch('/get-inverted-signal', {{ 
-                        method: 'POST',
-                        headers: {{ 'Content-Type': 'application/json' }},
-                        body: JSON.stringify({{ pair: pair }})
-                    }});
-                    const data = await response.json();
-                    
-                    resultDiv.innerHTML = data.signal; 
-                    resultDiv.style.color = data.color; 
-                    
-                    if (data.ratio_text) {{
-                        profitRatioDiv.innerHTML = data.ratio_text;
-                    }}
-
-                    setTimeout(() => {{
-                        hideSignal();
-                        scheduleNextSignal(); 
-                    }}, SIGNAL_DURATION_MS);
-
-                }} catch (error) {{
-                    resultDiv.innerHTML = 'خطأ في الخادم.';
-                    resultDiv.style.color = '#ff9800'; 
-                    profitRatioDiv.innerHTML = '';
-                    
-                    setTimeout(scheduleNextSignal, 5000);
-                }}
-            }}
-
-            function scheduleNextSignal() {{
-                const target = calculateNextSignalTime();
-                startCountdown(); 
-                setTimeout(autoFetchSignal, target.delay);
-            }}
-
-            function startAutomation() {{
-                scheduleNextSignal();
-            }}
-            
-            window.startAutomation = startAutomation;
-
-        </script>
-    </body>
-    </html>
+# --- NEW FUNCTION: Get the last digit for analysis ---
+def get_latest_tick_digit(ws, symbol="R_100"):
     """
-    return html_content
-
-@app.route('/get-inverted-signal', methods=['POST'])
-def get_signal_api():
-    """نقطة النهاية لطلب الإشارة."""
+    Fetches the last digit of the latest price for the given symbol (Volatility 100 Index by default).
+    The last digit is the final decimal place in the price quote.
+    """
+    if not ws or not ws.connected:
+        return None
+    
+    # Request latest price for analysis (using ticks_history for a single-shot request)
+    # count=1 and subscribe=0 ensure we get one price and don't start a stream
+    req = {"ticks_history": symbol, "end": "latest", "count": 1, "subscribe": 0}
     
     try:
-        data = request.json
-        symbol = data.get('pair')
+        ws.send(json.dumps(req))
+        # Receive the response synchronously
+        response = json.loads(ws.recv())
         
-        df_ticks = get_market_data(symbol) 
-        df_local = aggregate_ticks_to_candles(df_ticks) 
+        if response.get('msg_type') == 'history' and response.get('history', {}).get('prices'):
+            latest_price = response['history']['prices'][0]
+            # Convert to string and ensure enough precision (e.g., 6 decimal places)
+            # The last digit is the last character of the price string
+            price_str = f"{latest_price:.6f}" 
+            
+            # Find the last digit (the 6th decimal place)
+            last_digit = int(price_str[-1])
+            return last_digit
         
-        if df_local.empty:
-            return jsonify({"signal": "ERROR", "color": "darkred", "ratio_text": "N/A", "reason": f"فشل جلب البيانات."}), 200
-
-        final_signal, color, profit_ratio_text, reason = generate_and_confirm_signal(df_local)
-        
-        return jsonify({
-            "signal": final_signal, 
-            "color": color, 
-            "ratio_text": profit_ratio_text,
-            "reason": reason 
-        })
+        return None
     except Exception as e:
-        return jsonify({
-            "signal": "ERROR", 
-            "color": "darkred", 
-            "ratio_text": "N/A",
-            "reason": f"خطأ غير متوقع في الخادم: {str(e)}"
-        }), 500
+        print(f"Error getting latest tick price for digit analysis: {e}")
+        return None
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    # عند النشر، تأكد من استخدام الأمر: gunicorn app:app -b 0.0.0.0:$PORT
-    # إذا كنت تقوم بالتشغيل محليًا:
-    app.run(host='0.0.0.0', port=port)
+
+# --- Trading Bot Logic (NOW DIGIT-BASED) ---
+def run_trading_job_for_user(session_data, check_only=False):
+    email = session_data['email']
+    user_token = session_data['user_token']
+    base_amount = session_data['base_amount']
+    tp_target = session_data['tp_target']
+    max_consecutive_losses = session_data['max_consecutive_losses']
+    total_wins = session_data['total_wins']
+    total_losses = session_data['total_losses']
+    current_amount = session_data['current_amount']
+    consecutive_losses = session_data['consecutive_losses']
+    initial_balance = session_data['initial_balance']
+    contract_id = session_data['contract_id']
+    
+    ws = None
+    try:
+        ws = connect_websocket(user_token)
+        if not ws:
+            print(f"Could not connect WebSocket for {email}")
+            return
+
+        # --- Check for completed trades (if contract_id exists) ---
+        if contract_id:
+            contract_info = check_contract_status(ws, contract_id)
+            if contract_info and contract_info.get('is_sold'):
+                profit = float(contract_info.get('profit', 0))
+                
+                # Update Stats
+                if profit > 0:
+                    consecutive_losses = 0
+                    total_wins += 1
+                    current_amount = base_amount 
+                elif profit < 0:
+                    consecutive_losses += 1
+                    total_losses += 1
+                    # Martingale logic (6x multiplier)
+                    next_bet = float(current_amount) * 6.0 
+                    current_amount = max(base_amount, next_bet)
+                else: 
+                    consecutive_losses = 0 
+                
+                new_contract_id = None
+                trade_start_time = 0.0
+                update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time)
+
+                # Check for Take Profit or Max Losses after trade completion
+                new_balance, _ = get_balance_and_currency(user_token)
+                if new_balance is not None:
+                    current_balance_float = float(new_balance)
+                    
+                    if initial_balance == 0.0:
+                        initial_balance = current_balance_float
+                        update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time)
+                    
+                    if (current_balance_float - initial_balance) >= float(tp_target):
+                        print(f"User {email} reached Take Profit target. Stopping session.")
+                        update_is_running_status(email, 0)
+                        clear_session_data(email)
+                        return
+                    
+                    if consecutive_losses >= max_consecutive_losses:
+                        print(f"User {email} reached Max Consecutive Losses. Stopping session.")
+                        update_is_running_status(email, 0)
+                        clear_session_data(email)
+                        return
+
+            if contract_id and not (contract_info and contract_info.get('is_sold')):
+                return
+
+
+        # --- Place a new trade (Conditional Digit Strategy) ---
+        if not check_only and not contract_id: 
+            balance, currency = get_balance_and_currency(user_token)
+            if balance is None:
+                print(f"Failed to get balance for {email}. Skipping trade.")
+                return
+            if initial_balance == 0:
+                initial_balance = float(balance)
+                update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=None, trade_start_time=None)
+            
+            
+            amount_to_bet = max(0.35, round(float(current_amount), 2))
+            
+            # --- 1. Analyze Last Digit ---
+            analysis_symbol = "R_100" # Volatility 100 Index
+            last_digit = get_latest_tick_digit(ws, analysis_symbol)
+            
+            if last_digit is None:
+                print(f"User {email}: Failed to get last digit for analysis. Skipping trade.")
+                return
+
+            # --- 2. Determine Trade Configuration based on Last Digit ---
+            contract_type = None
+            trade_symbol = None
+            barrier_value = None
+            duration_value = 1
+            duration_unit = "t"
+            
+            # 🚨 USER'S REQUESTED LOGIC: If last digit is 1, enter Over 1 🚨
+            if last_digit == 1:
+                contract_type = "DIGITOVER" # Contract type for Digit Over/Under
+                trade_symbol = analysis_symbol # Trade on R_100
+                barrier_value = 1 # Digit Over 1 (predicting last digit is > 1: 2, 3, 4, 5, 6, 7, 8, 9, 0)
+                print(f"User {email}: ✅ Last Digit is {last_digit}. Preparing to place {contract_type} trade (Barrier {barrier_value}) on {trade_symbol}.")
+            else:
+                # إذا لم يتحقق الشرط، نوقف تنفيذ الصفقة ونعود
+                print(f"User {email}: ❌ Last Digit is {last_digit}. Condition (Last Digit == 1) not met. Skipping trade.")
+                return 
+                
+            # --- 3. Get proposal for the trade ---
+            proposal_req = {
+                "proposal": 1, "amount": amount_to_bet, "basis": "stake",
+                "contract_type": contract_type, "currency": currency,
+                "duration": duration_value, "duration_unit": duration_unit, 
+                "symbol": trade_symbol, 
+                "barrier": barrier_value,  # Use 'barrier' for Digit Over/Under contracts
+            }
+            
+            ws.send(json.dumps(proposal_req))
+            
+            time.sleep(0.05) # تأخير بسيط
+            
+            proposal_response = None
+            start_wait = time.time()
+            while proposal_response is None and (time.time() - start_wait < 15): # مهلة 15 ثانية
+                try:
+                    response_str = ws.recv()
+                    if response_str:
+                        response = json.loads(response_str)
+                        
+                        # DEBUG: طباعة أي رسالة خطأ تتلقاها من Deriv
+                        if response.get('error'):
+                            print(f"\n🚨🚨 PROPOSAL ERROR for {email}: 🚨🚨")
+                            print(f"    Request Sent: {proposal_req}")
+                            print(f"    Error Response: {response['error']}")
+                            print("--------------------------------------------------\n")
+                            return
+                            
+                        if response.get('msg_type') == 'proposal':
+                             proposal_response = response
+                             break
+                        
+                except websocket._exceptions.WebSocketConnectionClosedException:
+                    print(f"WebSocket closed while waiting for proposal for {email}")
+                    return
+                except Exception as e:
+                    pass
+
+            if proposal_response and 'proposal' in proposal_response:
+                print(f"User {email}: ✅ Proposal Received! ID: {proposal_response['proposal']['id']}")
+                
+                proposal_id = proposal_response['proposal']['id']
+                
+                # 4. Place the order
+                order_response = place_order(ws, proposal_id, amount_to_bet)
+                
+                # DEBUG: طباعة أي رسالة خطأ في الـ Order
+                if order_response.get('error'):
+                    print(f"\n🚨🚨 ORDER (BUY) ERROR for {email}: 🚨🚨")
+                    print(f"    Error Response: {order_response['error']}")
+                    print("--------------------------------------------------\n")
+                    return
+                
+                if 'buy' in order_response and 'contract_id' in order_response['buy']:
+                    new_contract_id = order_response['buy']['contract_id']
+                    trade_start_time = time.time()
+                    print(f"User {email}: Placed trade {new_contract_id} (Stake {amount_to_bet}, Type: {contract_type}).")
+                    
+                    update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time)
+                else:
+                    print(f"User {email}: Failed to place order (Unknown issue). Full response: {order_response}")
+            else:
+                print(f"User {email}: No proposal received or error in proposal response.")
+    
+    except websocket._exceptions.WebSocketConnectionClosedException:
+        print(f"WebSocket connection lost for user {email}. Will try to reconnect next iteration.")
+        if contract_id:
+             update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=contract_id, trade_start_time=session_data.get('trade_start_time'))
+
+    except Exception as e:
+        print(f"An error occurred in run_trading_job_for_user for {email}: {e}")
+    finally:
+        if ws and ws.connected:
+            ws.close()
+
+# --- Main Bot Loop Function (Using UTC & Second 0-4 Window) ---
+def bot_loop():
+    """Main loop that orchestrates trading jobs for all active sessions."""
+    print("Bot process started. PID:", os.getpid())
+    update_bot_running_status(1, os.getpid())
+    
+    while True:
+        try:
+            # 🚨 استخدام التوقيت العالمي UTC
+            now = datetime.now(timezone.utc)
+            update_bot_running_status(1, os.getpid())
+            active_sessions = get_all_active_sessions()
+            
+            if active_sessions:
+                for session in active_sessions:
+                    email = session['email']
+                    latest_session_data = get_session_status_from_db(email)
+                    if not latest_session_data or latest_session_data.get('is_running') == 0:
+                        continue
+                        
+                    contract_id = latest_session_data.get('contract_id')
+                    trade_start_time = latest_session_data.get('trade_start_time', 0.0)
+                    
+                    # 1. Check/close active trades 
+                    if contract_id and (time.time() - trade_start_time) >= 10: 
+                        run_trading_job_for_user(latest_session_data, check_only=True)
+
+                    # 2. Logic to place new trades - 🚨 يدخل في الثواني 0, 1, 2, 3, 4 (UTC)
+                    if now.second >= 0 and now.second <= 4 and not contract_id: 
+                        re_checked_session_data = get_session_status_from_db(email)
+                        if re_checked_session_data and re_checked_session_data.get('is_running') == 1 and not re_checked_session_data.get('contract_id'):
+                            run_trading_job_for_user(re_checked_session_data, check_only=False) 
+            
+            time.sleep(1)
+        except Exception as e:
+            print(f"Error in bot_loop main loop: {e}. Sleeping for 5 seconds before retrying.")
+            time.sleep(5)
+
+# --- Streamlit App Configuration (No change) ---
+st.set_page_config(page_title="Khoury Bot", layout="wide")
+st.title("Khoury Bot 🤖")
+
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+if "user_email" not in st.session_state:
+    st.session_state.user_email = ""
+if "stats" not in st.session_state:
+    st.session_state.stats = None
+    
+create_table_if_not_exists()
+
+bot_status_from_db = get_bot_running_status()
+
+if bot_status_from_db == 0:
+    try:
+        print("Attempting to start bot process...")
+        bot_process = multiprocessing.Process(target=bot_loop, daemon=True)
+        bot_process.start()
+        print(f"Bot process started with PID: {bot_process.pid}")
+        time.sleep(1) 
+    except Exception as e:
+        st.error(f"❌ Error starting bot process: {e}")
+else:
+    print("Bot process is already running (status from DB).")
+
+if not st.session_state.logged_in:
+    st.markdown("---")
+    st.subheader("Login")
+    login_form = st.form("login_form")
+    email_input = login_form.text_input("Email")
+    submit_button = login_form.form_submit_button("Login")
+    
+    if submit_button:
+        if is_user_active(email_input):
+            st.session_state.logged_in = True
+            st.session_state.user_email = email_input
+            st.rerun()
+        else:
+            st.error("❌ This email is not active. Please contact the administrator.")
+
+if st.session_state.logged_in:
+    st.markdown("---")
+    st.subheader(f"Welcome, {st.session_state.user_email}")
+    
+    stats_data = get_session_status_from_db(st.session_state.user_email)
+    st.session_state.stats = stats_data
+    
+    is_user_bot_running_in_db = False
+    if st.session_state.stats:
+        is_user_bot_running_in_db = st.session_state.stats.get('is_running', 0) == 1
+    
+    global_bot_status = get_bot_running_status() 
+
+    with st.form("settings_and_control"):
+        st.subheader("Bot Settings and Control")
+        user_token_val = ""
+        base_amount_val = 0.35
+        tp_target_val = 10.0
+        max_consecutive_losses_val = 3
+        
+        if st.session_state.stats:
+            user_token_val = st.session_state.stats.get('user_token', '')
+            base_amount_val = st.session_state.stats.get('base_amount', 0.35)
+            tp_target_val = st.session_state.stats.get('tp_target', 10.0)
+            max_consecutive_losses_val = st.session_state.stats.get('max_consecutive_losses', 3)
+        
+        user_token = st.text_input("Deriv API Token", type="password", value=user_token_val, disabled=is_user_bot_running_in_db)
+        base_amount = st.number_input("Base Bet Amount", min_value=0.35, value=base_amount_val, step=0.1, disabled=is_user_bot_running_in_db)
+        tp_target = st.number_input("Take Profit Target", min_value=10.0, value=tp_target_val, step=3.0, disabled=is_user_bot_running_in_db)
+        max_consecutive_losses = st.number_input("Max Consecutive Losses", min_value=1, value=max_consecutive_losses_val, step=1, disabled=is_user_bot_running_in_db)
+        
+        col_start, col_stop = st.columns(2)
+        with col_start:
+            start_button = st.form_submit_button("Start Bot", disabled=is_user_bot_running_in_db)
+        with col_stop:
+            stop_button = st.form_submit_button("Stop Bot", disabled=not is_user_bot_running_in_db)
+    
+    if start_button:
+        if not user_token:
+            st.error("Please enter a Deriv API Token to start the bot.")
+        else:
+            settings = {
+                "user_token": user_token,
+                "base_amount": base_amount,
+                "tp_target": tp_target,
+                "max_consecutive_losses": max_consecutive_losses
+            }
+            start_new_session_in_db(st.session_state.user_email, settings)
+            st.success("✅ Bot session started successfully! Waiting for the next trade cycle.")
+            st.rerun()
+
+    if stop_button:
+        update_is_running_status(st.session_state.user_email, 0)
+        st.info("⏸ Your bot session has been stopped. To fully reset stats, click start again.")
+        st.rerun()
+
+    st.markdown("---")
+    st.subheader("Statistics")
+
+    stats_placeholder = st.empty()
+    
+    if global_bot_status == 1:
+        st.success(f"🟢 *Global Bot Service is RUNNING*.")
+    else:
+        st.error("🔴 *Global Bot Service is STOPPED or Crashed*.")
+
+    if st.session_state.user_email:
+        session_data = get_session_status_from_db(st.session_state.user_email)
+        if session_data:
+            user_token_for_balance = session_data.get('user_token')
+            balance, currency = get_balance_and_currency(user_token_for_balance)
+            if balance is not None:
+                st.metric(label=f"Current Balance ({currency or 'USD'})", value=f"${float(balance):.2f}")
+
+    if st.session_state.stats:
+        with stats_placeholder.container():
+            stats = st.session_state.stats
+            col1, col2, col3, col4, col5 = st.columns(5)
+            with col1:
+                st.metric(label="Current Bet Amount", value=f"${stats.get('current_amount', 0.0):.2f}")
+            with col2:
+                initial_balance = stats.get('initial_balance', 0.0)
+                current_profit = float(balance or 0.0) - initial_balance if initial_balance > 0 else 0.0
+                st.metric(label="Net Profit/Loss", value=f"${current_profit:.2f}", delta=f"{current_profit:.2f}")
+
+            with col3:
+                st.metric(label="Total Wins", value=stats.get('total_wins', 0))
+            with col4:
+                st.metric(label="Total Losses", value=stats.get('total_losses', 0))
+            with col5:
+                st.metric(label="Consecutive Losses", value=stats.get('consecutive_losses', 0), delta=f"-{stats.get('max_consecutive_losses', 0) - stats.get('consecutive_losses', 0)} to Stop")
+            
+            if stats.get('contract_id'):
+                st.warning(f"⚠ Trade Active: {stats.get('contract_id')}. Stats update after completion.")
+            elif stats.get('is_running') == 1:
+                 st.info("🕒 Waiting for next trade cycle (Seconds 0-4 UTC) and Last Digit == 1.")
+
+    else:
+        with stats_placeholder.container():
+            st.info("Your bot session is currently stopped or not yet configured.")
+            
+    time.sleep(1)
+    st.rerun()
