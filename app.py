@@ -102,6 +102,7 @@ def is_user_active(email):
             active_users = [line.strip() for line in file.readlines()]
         return email in active_users
     except FileNotFoundError:
+        # إذا لم يكن ملف user_ids.txt موجودًا، افترض عدم وجود مستخدم نشط
         return False
     except Exception as e:
         return False
@@ -199,7 +200,8 @@ def update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_a
 def connect_websocket(user_token):
     ws = websocket.WebSocket()
     try:
-        ws.connect("wss://blue.derivws.com/websockets/v3?app_id=16929")
+        # استخدام app_id مخصص لك إذا أمكن، أو استخدام 16929 كإعداد افتراضي
+        ws.connect("wss://blue.derivws.com/websockets/v3?app_id=16929") 
         auth_req = {"authorize": user_token}
         ws.send(json.dumps(auth_req))
         auth_response = json.loads(ws.recv())
@@ -257,28 +259,24 @@ def place_order(ws, proposal_id, amount):
         return {"error": {"message": "Order placement failed."}}
 
 
-# --- NEW FUNCTION: Get the last digit for analysis ---
+# --- FUNCTION: Get the last digit for analysis ---
 def get_latest_tick_digit(ws, symbol="R_100"):
     """
     Fetches the last digit of the latest price for the given symbol (Volatility 100 Index by default).
-    The last digit is the final decimal place in the price quote.
     """
     if not ws or not ws.connected:
         return None
     
     # Request latest price for analysis (using ticks_history for a single-shot request)
-    # count=1 and subscribe=0 ensure we get one price and don't start a stream
     req = {"ticks_history": symbol, "end": "latest", "count": 1, "subscribe": 0}
     
     try:
         ws.send(json.dumps(req))
-        # Receive the response synchronously
         response = json.loads(ws.recv())
         
         if response.get('msg_type') == 'history' and response.get('history', {}).get('prices'):
             latest_price = response['history']['prices'][0]
             # Convert to string and ensure enough precision (e.g., 6 decimal places)
-            # The last digit is the last character of the price string
             price_str = f"{latest_price:.6f}" 
             
             # Find the last digit (the 6th decimal place)
@@ -287,7 +285,8 @@ def get_latest_tick_digit(ws, symbol="R_100"):
         
         return None
     except Exception as e:
-        print(f"Error getting latest tick price for digit analysis: {e}")
+        # قد يحدث خطأ إذا كانت الاستجابة غير متوقعة
+        # print(f"Error getting latest tick price for digit analysis: {e}")
         return None
 
 
@@ -330,7 +329,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                     next_bet = float(current_amount) * 6.0 
                     current_amount = max(base_amount, next_bet)
                 else: 
-                    consecutive_losses = 0 
+                    consecutive_losses = 0 # تعامل مع حالات التعادل 0
                 
                 new_contract_id = None
                 trade_start_time = 0.0
@@ -358,8 +357,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                         return
 
             if contract_id and not (contract_info and contract_info.get('is_sold')):
-                return
-
+                return # العقد لا يزال مفتوحاً، لا تفعل شيئاً
 
         # --- Place a new trade (Conditional Digit Strategy) ---
         if not check_only and not contract_id: 
@@ -379,7 +377,7 @@ def run_trading_job_for_user(session_data, check_only=False):
             last_digit = get_latest_tick_digit(ws, analysis_symbol)
             
             if last_digit is None:
-                print(f"User {email}: Failed to get last digit for analysis. Skipping trade.")
+                # print(f"User {email}: Failed to get last digit for analysis. Skipping trade.")
                 return
 
             # --- 2. Determine Trade Configuration based on Last Digit ---
@@ -389,15 +387,15 @@ def run_trading_job_for_user(session_data, check_only=False):
             duration_value = 1
             duration_unit = "t"
             
-            # 🚨 USER'S REQUESTED LOGIC: If last digit is 1, enter Over 1 🚨
+            # 🚨 الشرط: إذا كان الرقم الأخير هو 1، ادخل صفقة Over 1 🚨
             if last_digit == 1:
-                contract_type = "DIGITOVER" # Contract type for Digit Over/Under
-                trade_symbol = analysis_symbol # Trade on R_100
-                barrier_value = 1 # Digit Over 1 (predicting last digit is > 1: 2, 3, 4, 5, 6, 7, 8, 9, 0)
-                print(f"User {email}: ✅ Last Digit is {last_digit}. Preparing to place {contract_type} trade (Barrier {barrier_value}) on {trade_symbol}.")
+                contract_type = "DIGITOVER" 
+                trade_symbol = analysis_symbol 
+                barrier_value = 1 
+                # print(f"User {email}: ✅ Last Digit is {last_digit}. Preparing to place {contract_type} trade (Barrier {barrier_value}) on {trade_symbol}.")
             else:
-                # إذا لم يتحقق الشرط، نوقف تنفيذ الصفقة ونعود
-                print(f"User {email}: ❌ Last Digit is {last_digit}. Condition (Last Digit == 1) not met. Skipping trade.")
+                # إذا لم يكن 1، لا تدخل صفقة
+                # print(f"User {email}: ❌ Last Digit is {last_digit}. Condition (Last Digit == 1) not met. Skipping trade.")
                 return 
                 
             # --- 3. Get proposal for the trade ---
@@ -406,27 +404,24 @@ def run_trading_job_for_user(session_data, check_only=False):
                 "contract_type": contract_type, "currency": currency,
                 "duration": duration_value, "duration_unit": duration_unit, 
                 "symbol": trade_symbol, 
-                "barrier": barrier_value,  # Use 'barrier' for Digit Over/Under contracts
+                "barrier": barrier_value,
             }
             
             ws.send(json.dumps(proposal_req))
             
-            time.sleep(0.05) # تأخير بسيط
+            time.sleep(0.05) 
             
             proposal_response = None
             start_wait = time.time()
-            while proposal_response is None and (time.time() - start_wait < 15): # مهلة 15 ثانية
+            # انتظر استجابة الـ Proposal لمدة أقصاها 1.5 ثانية (تم تخفيضها)
+            while proposal_response is None and (time.time() - start_wait < 1.5): 
                 try:
                     response_str = ws.recv()
                     if response_str:
                         response = json.loads(response_str)
                         
-                        # DEBUG: طباعة أي رسالة خطأ تتلقاها من Deriv
                         if response.get('error'):
-                            print(f"\n🚨🚨 PROPOSAL ERROR for {email}: 🚨🚨")
-                            print(f"    Request Sent: {proposal_req}")
-                            print(f"    Error Response: {response['error']}")
-                            print("--------------------------------------------------\n")
+                            print(f"🚨 PROPOSAL ERROR for {email}: {response['error']['message']}")
                             return
                             
                         if response.get('msg_type') == 'proposal':
@@ -440,18 +435,15 @@ def run_trading_job_for_user(session_data, check_only=False):
                     pass
 
             if proposal_response and 'proposal' in proposal_response:
-                print(f"User {email}: ✅ Proposal Received! ID: {proposal_response['proposal']['id']}")
+                # print(f"User {email}: ✅ Proposal Received! ID: {proposal_response['proposal']['id']}")
                 
                 proposal_id = proposal_response['proposal']['id']
                 
                 # 4. Place the order
                 order_response = place_order(ws, proposal_id, amount_to_bet)
                 
-                # DEBUG: طباعة أي رسالة خطأ في الـ Order
                 if order_response.get('error'):
-                    print(f"\n🚨🚨 ORDER (BUY) ERROR for {email}: 🚨🚨")
-                    print(f"    Error Response: {order_response['error']}")
-                    print("--------------------------------------------------\n")
+                    print(f"🚨 ORDER (BUY) ERROR for {email}: {order_response['error']['message']}")
                     return
                 
                 if 'buy' in order_response and 'contract_id' in order_response['buy']:
@@ -461,9 +453,10 @@ def run_trading_job_for_user(session_data, check_only=False):
                     
                     update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time)
                 else:
-                    print(f"User {email}: Failed to place order (Unknown issue). Full response: {order_response}")
+                    print(f"User {email}: Failed to place order (Unknown issue).")
             else:
-                print(f"User {email}: No proposal received or error in proposal response.")
+                pass
+                # print(f"User {email}: No proposal received or error in proposal response.")
     
     except websocket._exceptions.WebSocketConnectionClosedException:
         print(f"WebSocket connection lost for user {email}. Will try to reconnect next iteration.")
@@ -476,7 +469,7 @@ def run_trading_job_for_user(session_data, check_only=False):
         if ws and ws.connected:
             ws.close()
 
-# --- Main Bot Loop Function (Using UTC & Second 0-4 Window) ---
+# --- Main Bot Loop Function (CONTINUOUS ANALYSIS) ---
 def bot_loop():
     """Main loop that orchestrates trading jobs for all active sessions."""
     print("Bot process started. PID:", os.getpid())
@@ -484,8 +477,6 @@ def bot_loop():
     
     while True:
         try:
-            # 🚨 استخدام التوقيت العالمي UTC
-            now = datetime.now(timezone.utc)
             update_bot_running_status(1, os.getpid())
             active_sessions = get_all_active_sessions()
             
@@ -499,22 +490,24 @@ def bot_loop():
                     contract_id = latest_session_data.get('contract_id')
                     trade_start_time = latest_session_data.get('trade_start_time', 0.0)
                     
-                    # 1. Check/close active trades 
+                    # 1. Check/close active trades after 10 seconds 
                     if contract_id and (time.time() - trade_start_time) >= 10: 
                         run_trading_job_for_user(latest_session_data, check_only=True)
 
-                    # 2. Logic to place new trades - 🚨 يدخل في الثواني 0, 1, 2, 3, 4 (UTC)
-                    if now.second >= 0 and now.second <= 4 and not contract_id: 
+                    # 2. Logic to place new trades - 🚨 CONTINUOUS ANALYSIS
+                    if not contract_id: 
                         re_checked_session_data = get_session_status_from_db(email)
                         if re_checked_session_data and re_checked_session_data.get('is_running') == 1 and not re_checked_session_data.get('contract_id'):
+                            # هذه الدالة ستنفذ التحليل وتضع الصفقة إذا كان آخر رقم هو 1
                             run_trading_job_for_user(re_checked_session_data, check_only=False) 
             
-            time.sleep(1)
+            # تقليل الانتظار لزيادة سرعة الاستجابة لتحليل التكات
+            time.sleep(0.05) 
         except Exception as e:
             print(f"Error in bot_loop main loop: {e}. Sleeping for 5 seconds before retrying.")
             time.sleep(5)
 
-# --- Streamlit App Configuration (No change) ---
+# --- Streamlit App Configuration ---
 st.set_page_config(page_title="Khoury Bot", layout="wide")
 st.title("Khoury Bot 🤖")
 
@@ -527,6 +520,7 @@ if "stats" not in st.session_state:
     
 create_table_if_not_exists()
 
+# --- Global Bot Process Management ---
 bot_status_from_db = get_bot_running_status()
 
 if bot_status_from_db == 0:
@@ -540,6 +534,7 @@ if bot_status_from_db == 0:
         st.error(f"❌ Error starting bot process: {e}")
 else:
     print("Bot process is already running (status from DB).")
+# --- End Global Bot Process Management ---
 
 if not st.session_state.logged_in:
     st.markdown("---")
@@ -604,7 +599,7 @@ if st.session_state.logged_in:
                 "max_consecutive_losses": max_consecutive_losses
             }
             start_new_session_in_db(st.session_state.user_email, settings)
-            st.success("✅ Bot session started successfully! Waiting for the next trade cycle.")
+            st.success("✅ Bot session started successfully! Waiting for the next tick (Last Digit == 1).")
             st.rerun()
 
     if stop_button:
@@ -622,6 +617,8 @@ if st.session_state.logged_in:
     else:
         st.error("🔴 *Global Bot Service is STOPPED or Crashed*.")
 
+    balance = None
+    currency = None
     if st.session_state.user_email:
         session_data = get_session_status_from_db(st.session_state.user_email)
         if session_data:
@@ -638,7 +635,7 @@ if st.session_state.logged_in:
                 st.metric(label="Current Bet Amount", value=f"${stats.get('current_amount', 0.0):.2f}")
             with col2:
                 initial_balance = stats.get('initial_balance', 0.0)
-                current_profit = float(balance or 0.0) - initial_balance if initial_balance > 0 else 0.0
+                current_profit = float(balance or 0.0) - initial_balance if initial_balance > 0 and balance is not None else 0.0
                 st.metric(label="Net Profit/Loss", value=f"${current_profit:.2f}", delta=f"{current_profit:.2f}")
 
             with col3:
@@ -651,7 +648,7 @@ if st.session_state.logged_in:
             if stats.get('contract_id'):
                 st.warning(f"⚠ Trade Active: {stats.get('contract_id')}. Stats update after completion.")
             elif stats.get('is_running') == 1:
-                 st.info("🕒 Waiting for next trade cycle (Seconds 0-4 UTC) and Last Digit == 1.")
+                 st.info("🕒 Waiting for next tick where Last Digit == 1 (Continuous Analysis Mode).")
 
     else:
         with stats_placeholder.container():
