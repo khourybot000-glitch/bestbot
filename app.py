@@ -196,6 +196,8 @@ def update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_a
         finally:
             conn.close()
 
+# --- MODIFIED: Connect WebSocket (Only for authorization and balance checks) ---
+# هذه الدالة تستخدم لاتصالات قصيرة الأمد (مثل جلب الرصيد)
 def connect_websocket(user_token):
     ws = websocket.WebSocket()
     try:
@@ -230,41 +232,18 @@ def get_balance_and_currency(user_token):
         if ws and ws.connected:
             ws.close()
 
-def check_contract_status(ws, contract_id):
-    if not ws or not ws.connected:
-        return None
-    req = {"proposal_open_contract": 1, "contract_id": contract_id}
-    try:
-        ws.send(json.dumps(req))
-        response = json.loads(ws.recv())
-        return response.get('proposal_open_contract')
-    except Exception as e:
-        return None
-
-def place_order(ws, proposal_id, amount):
-    if not ws or not ws.connected:
-        return {"error": {"message": "WebSocket not connected."}}
-    amount_decimal = decimal.Decimal(str(amount)).quantize(decimal.Decimal('0.01'), rounding=decimal.ROUND_HALF_UP)
-    req = {"buy": proposal_id, "price": float(amount_decimal)}
-    try:
-        ws.send(json.dumps(req))
-        response = json.loads(ws.recv())
-        return response
-    except Exception as e:
-        return {"error": {"message": "Order placement failed."}}
-
-
-# --- FUNCTION: Get the last digit for analysis (Unchanged) ---
-def get_latest_tick_digit(ws, symbol="R_100"):
-    if not ws or not ws.connected:
+# --- FUNCTION: Get the last digit for analysis (Uses external WS) ---
+# هذه الدالة الآن تتوقع ws مفتوحاً كمدخل
+def get_latest_tick_digit(ws_tick, symbol="R_100"):
+    if not ws_tick or not ws_tick.connected:
         return None
     
     req = {"ticks_history": symbol, "end": "latest", "count": 1, "subscribe": 0}
     
     try:
-        ws.send(json.dumps(req))
-        # استخدام مهلة أطول قليلاً لجلب التيك
-        response = json.loads(ws.recv(timeout=1.0)) 
+        ws_tick.send(json.dumps(req))
+        # زيادة مهلة الاستقبال
+        response = json.loads(ws_tick.recv(timeout=5.0)) 
         
         if response.get('msg_type') == 'history' and response.get('history', {}).get('prices'):
             latest_price = response['history']['prices'][0]
@@ -276,9 +255,8 @@ def get_latest_tick_digit(ws, symbol="R_100"):
     except Exception as e:
         return None
 
-
-# --- Trading Bot Logic (NOW WITH DIAGNOSTICS) ---
-def run_trading_job_for_user(session_data, check_only=False):
+# --- Trading Bot Logic (Uses separate WS connections for Ticks and Trades) ---
+def run_trading_job_for_user(session_data, ws_tick, check_only=False):
     email = session_data['email']
     user_token = session_data['user_token']
     base_amount = session_data['base_amount']
@@ -291,20 +269,21 @@ def run_trading_job_for_user(session_data, check_only=False):
     initial_balance = session_data['initial_balance']
     contract_id = session_data['contract_id']
     
-    ws = None
-    try:
-        ws = connect_websocket(user_token)
-        if not ws:
-            print(f"[{email}] 🚨 ERROR: Could not connect WebSocket. Skipping.")
-            return
+    ws_trade = None # اتصال جديد خاص بالتداول والصفقات
 
+    try:
         # --- Check for completed trades (if contract_id exists) ---
         if contract_id:
-            contract_info = check_contract_status(ws, contract_id)
+            # نفتح اتصال خاص فقط لإنهاء/مراجعة العقد
+            ws_trade = connect_websocket(user_token)
+            if not ws_trade:
+                print(f"[{email}] 🚨 ERROR: Could not connect trade WS for closing check. Skipping.")
+                return
+            
+            contract_info = check_contract_status(ws_trade, contract_id)
             if contract_info and contract_info.get('is_sold'):
                 profit = float(contract_info.get('profit', 0))
                 
-                # Update Stats
                 if profit > 0:
                     consecutive_losses = 0
                     total_wins += 1
@@ -312,7 +291,6 @@ def run_trading_job_for_user(session_data, check_only=False):
                 elif profit < 0:
                     consecutive_losses += 1
                     total_losses += 1
-                    # Martingale logic (6x multiplier)
                     next_bet = float(current_amount) * 6.0 
                     current_amount = max(base_amount, next_bet)
                 else: 
@@ -322,7 +300,6 @@ def run_trading_job_for_user(session_data, check_only=False):
                 trade_start_time = 0.0
                 update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time)
 
-                # Check for Take Profit or Max Losses after trade completion
                 new_balance, _ = get_balance_and_currency(user_token)
                 if new_balance is not None:
                     current_balance_float = float(new_balance)
@@ -345,7 +322,11 @@ def run_trading_job_for_user(session_data, check_only=False):
 
             if contract_id and not (contract_info and contract_info.get('is_sold')):
                 return
-
+        
+        # نغلق الاتصال الخاص بالفحص
+        if ws_trade and ws_trade.connected:
+            ws_trade.close()
+            ws_trade = None
 
         # --- Place a new trade (Conditional Digit Strategy) ---
         if not check_only and not contract_id: 
@@ -357,14 +338,14 @@ def run_trading_job_for_user(session_data, check_only=False):
                 initial_balance = float(balance)
                 update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=None, trade_start_time=None)
             
-            
             amount_to_bet = max(0.35, round(float(current_amount), 2))
             
             # --- 1. Analyze Last Digit ---
             analysis_symbol = "R_100" 
             print(f"[{email}] DEBUG 1: Attempting to fetch tick...") 
             
-            last_digit = get_latest_tick_digit(ws, analysis_symbol)
+            # 🚨 استخدام اتصال ws_tick الثابت
+            last_digit = get_latest_tick_digit(ws_tick, analysis_symbol) 
             
             if last_digit is None:
                 print(f"[{email}] DEBUG 2: Tick fetch FAILED (Returned None). Skipping.") 
@@ -380,18 +361,24 @@ def run_trading_job_for_user(session_data, check_only=False):
             duration_value = 1
             duration_unit = "t"
             
-            # 🚨 شرط الدخول: يدخل إذا كان الرقم ليس 1 🚨
+            # شرط الدخول: يدخل إذا كان الرقم ليس 1 
             if last_digit != 1:
                 contract_type = "DIGITOVER" 
                 trade_symbol = analysis_symbol 
                 barrier_value = 1 
                 print(f"[{email}] DEBUG 4: ✅ Condition (Digit != 1) MET. Digit: {last_digit}. Preparing Proposal.") 
             else:
-                # إذا كان 1، لا تدخل صفقة
                 print(f"[{email}] DEBUG 5: ❌ Condition (Digit != 1) NOT MET. Digit: {last_digit}. Skipping trade.") 
                 return 
                 
             # --- 3. Get proposal for the trade ---
+            
+            # نفتح اتصال تداول خاص لإرسال الـ Proposal والـ Buy
+            ws_trade = connect_websocket(user_token)
+            if not ws_trade:
+                print(f"[{email}] 🚨 ERROR: Could not connect trade WS for Proposal. Skipping.")
+                return
+
             proposal_req = {
                 "proposal": 1, "amount": amount_to_bet, "basis": "stake",
                 "contract_type": contract_type, "currency": currency,
@@ -400,25 +387,20 @@ def run_trading_job_for_user(session_data, check_only=False):
                 "barrier": barrier_value,
             }
             
-            ws.send(json.dumps(proposal_req))
-            
-            time.sleep(0.05) 
+            ws_trade.send(json.dumps(proposal_req))
             
             proposal_response = None
             start_wait = time.time()
             
-            # 🚨 زيادة المهلة إلى 5 ثوانٍ
+            # زيادة المهلة إلى 5 ثوانٍ
             while proposal_response is None and (time.time() - start_wait < 5.0): 
                 try:
-                    # زيادة مهلة استقبال الرسائل أيضاً
-                    response_str = ws.recv(timeout=1.0) 
+                    response_str = ws_trade.recv(timeout=1.0) 
                     if response_str:
                         response = json.loads(response_str)
                         
-                        # 🚨 DIAGNOSTIC 6: Catching Proposal Error
                         if response.get('error'):
                             print(f"[{email}] 🚨 PROPOSAL ERROR: {response['error']['message']}")
-                            print(f"[{email}] Request details: {proposal_req}") 
                             return
                             
                         if response.get('msg_type') == 'proposal':
@@ -428,14 +410,13 @@ def run_trading_job_for_user(session_data, check_only=False):
                 except Exception as e:
                     pass
             
-            # 🚨 DIAGNOSTIC 7: Check if Proposal was received
             if proposal_response and 'proposal' in proposal_response:
                 print(f"[{email}] DEBUG 7: Proposal received. Placing order...") 
                 
                 proposal_id = proposal_response['proposal']['id']
                 
                 # 4. Place the order
-                order_response = place_order(ws, proposal_id, amount_to_bet)
+                order_response = place_order(ws_trade, proposal_id, amount_to_bet)
                 
                 if order_response.get('error'):
                     print(f"[{email}] 🚨 ORDER (BUY) ERROR: {order_response['error']['message']}")
@@ -455,21 +436,42 @@ def run_trading_job_for_user(session_data, check_only=False):
     except Exception as e:
         print(f"[{email}] 🚨 FATAL ERROR in run_trading_job_for_user: {e}")
     finally:
-        if ws and ws.connected:
-            ws.close()
+        # تأكد من إغلاق اتصال التداول (إذا تم فتحه)
+        if ws_trade and ws_trade.connected:
+            ws_trade.close()
 
-# --- Main Bot Loop Function (ADJUSTED SLEEP TIME) ---
+
+# --- Main Bot Loop Function (CORE CHANGE) ---
 def bot_loop():
     """Main loop that orchestrates trading jobs for all active sessions."""
     print("Bot process started. PID:", os.getpid())
     update_bot_running_status(1, os.getpid())
+    
+    # 🚨 محاولة فتح اتصال ثابت واحد لجلب التيك
+    ws_tick = None
     
     while True:
         try:
             update_bot_running_status(1, os.getpid())
             active_sessions = get_all_active_sessions()
             
-            if active_sessions:
+            # إذا لم يكن اتصال التيك مفتوحاً، حاول فتحه باستخدام التوكن الأول
+            if not ws_tick or not ws_tick.connected:
+                if active_sessions:
+                    first_token = active_sessions[0]['user_token']
+                    ws_tick = connect_websocket(first_token)
+                    if ws_tick:
+                        print("✅ Permanent Tick WS connected successfully.")
+                    else:
+                        print("❌ Failed to connect Permanent Tick WS. Retrying next loop.")
+                        time.sleep(5)
+                        continue
+                else:
+                    time.sleep(5)
+                    continue
+            
+            # --- تمرير اتصال التيك الثابت إلى دالة التداول ---
+            if active_sessions and ws_tick and ws_tick.connected:
                 for session in active_sessions:
                     email = session['email']
                     latest_session_data = get_session_status_from_db(email)
@@ -481,18 +483,20 @@ def bot_loop():
                     
                     # 1. Check/close active trades after 10 seconds 
                     if contract_id and (time.time() - trade_start_time) >= 10: 
-                        run_trading_job_for_user(latest_session_data, check_only=True)
+                        run_trading_job_for_user(latest_session_data, ws_tick, check_only=True)
 
-                    # 2. Logic to place new trades - CONTINUOUS ANALYSIS
+                    # 2. Logic to place new trades 
                     if not contract_id: 
                         re_checked_session_data = get_session_status_from_db(email)
                         if re_checked_session_data and re_checked_session_data.get('is_running') == 1 and not re_checked_session_data.get('contract_id'):
-                            run_trading_job_for_user(re_checked_session_data, check_only=False) 
+                            run_trading_job_for_user(re_checked_session_data, ws_tick, check_only=False) 
             
-            # 🚨 الزيادة هنا: إعطاء وقت أكبر لنجاح عملية الاتصال والجلب
             time.sleep(0.5) 
         except Exception as e:
-            print(f"Error in bot_loop main loop: {e}. Sleeping for 5 seconds before retrying.")
+            print(f"Error in bot_loop main loop: {e}. Attempting to close Tick WS and retrying.")
+            if ws_tick and ws_tick.connected:
+                ws_tick.close()
+                ws_tick = None
             time.sleep(5)
 
 # --- Streamlit App Configuration (Unchanged) ---
