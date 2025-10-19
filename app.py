@@ -209,8 +209,6 @@ def connect_websocket(user_token):
             return None
         return ws
     except Exception as e:
-        # هذه المشكلة قد تكون بسبب عدم وجود اتصال إنترنت أو جدار ناري
-        # print(f"Error connecting to WebSocket: {e}") 
         return None
 
 def get_balance_and_currency(user_token):
@@ -241,7 +239,6 @@ def check_contract_status(ws, contract_id):
         response = json.loads(ws.recv())
         return response.get('proposal_open_contract')
     except Exception as e:
-        # print(f"Error checking contract status: {e}")
         return None
 
 def place_order(ws, proposal_id, amount):
@@ -254,7 +251,6 @@ def place_order(ws, proposal_id, amount):
         response = json.loads(ws.recv())
         return response
     except Exception as e:
-        # print(f"Error placing order: {e}")
         return {"error": {"message": "Order placement failed."}}
 
 
@@ -267,7 +263,8 @@ def get_latest_tick_digit(ws, symbol="R_100"):
     
     try:
         ws.send(json.dumps(req))
-        response = json.loads(ws.recv())
+        # استخدام مهلة أطول قليلاً لجلب التيك
+        response = json.loads(ws.recv(timeout=1.0)) 
         
         if response.get('msg_type') == 'history' and response.get('history', {}).get('prices'):
             latest_price = response['history']['prices'][0]
@@ -383,7 +380,7 @@ def run_trading_job_for_user(session_data, check_only=False):
             duration_value = 1
             duration_unit = "t"
             
-            # 🚨 شرط الدخول: يدخل إذا كان الرقم ليس 1 (كما طلبت في سؤالك الأخير)
+            # 🚨 شرط الدخول: يدخل إذا كان الرقم ليس 1 🚨
             if last_digit != 1:
                 contract_type = "DIGITOVER" 
                 trade_symbol = analysis_symbol 
@@ -410,10 +407,11 @@ def run_trading_job_for_user(session_data, check_only=False):
             proposal_response = None
             start_wait = time.time()
             
-            # انتظر استجابة الـ Proposal
-            while proposal_response is None and (time.time() - start_wait < 1.5): 
+            # 🚨 زيادة المهلة إلى 5 ثوانٍ
+            while proposal_response is None and (time.time() - start_wait < 5.0): 
                 try:
-                    response_str = ws.recv()
+                    # زيادة مهلة استقبال الرسائل أيضاً
+                    response_str = ws.recv(timeout=1.0) 
                     if response_str:
                         response = json.loads(response_str)
                         
@@ -452,7 +450,7 @@ def run_trading_job_for_user(session_data, check_only=False):
                 else:
                     print(f"[{email}] 🚨 ERROR: Failed to place order (Unknown issue).")
             else:
-                print(f"[{email}] DEBUG 8: Proposal not received within timeout (1.5s). Skipping.")
+                print(f"[{email}] DEBUG 8: Proposal not received within timeout (5.0s). Skipping.")
     
     except Exception as e:
         print(f"[{email}] 🚨 FATAL ERROR in run_trading_job_for_user: {e}")
@@ -460,7 +458,7 @@ def run_trading_job_for_user(session_data, check_only=False):
         if ws and ws.connected:
             ws.close()
 
-# --- Main Bot Loop Function (CONTINUOUS ANALYSIS - Unchanged) ---
+# --- Main Bot Loop Function (ADJUSTED SLEEP TIME) ---
 def bot_loop():
     """Main loop that orchestrates trading jobs for all active sessions."""
     print("Bot process started. PID:", os.getpid())
@@ -491,7 +489,8 @@ def bot_loop():
                         if re_checked_session_data and re_checked_session_data.get('is_running') == 1 and not re_checked_session_data.get('contract_id'):
                             run_trading_job_for_user(re_checked_session_data, check_only=False) 
             
-            time.sleep(0.05) # تقليل الانتظار لزيادة سرعة الاستجابة لتحليل التكات
+            # 🚨 الزيادة هنا: إعطاء وقت أكبر لنجاح عملية الاتصال والجلب
+            time.sleep(0.5) 
         except Exception as e:
             print(f"Error in bot_loop main loop: {e}. Sleeping for 5 seconds before retrying.")
             time.sleep(5)
