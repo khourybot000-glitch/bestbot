@@ -1,6 +1,6 @@
-Flask
+streamlit
+psycopg2-binary
 websocket-client
 pandas
-ta
-numpy
-gunicorn  
+Flask
+sqlalchemy
