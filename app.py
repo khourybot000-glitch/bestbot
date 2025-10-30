@@ -11,14 +11,14 @@ from flask import Flask, request, render_template_string, redirect, url_for, ses
 # الإعدادات الثابتة للبوت
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
-SYMBOL = "R_10"
-TRADE_TYPE = "DIGITOVER" # 👈 تم التغيير: الفوز إذا كان الرقم الأخير أكبر من الحاجز
-BARRIER = 1             # 👈 تم التغيير: الفوز إذا كان الرقم الأخير > 1
+SYMBOL = "R_100"
+TRADE_TYPE = "DIGITUNDER" # 👈 تم التغيير: الفوز إذا كان الرقم الأخير أكبر من الحاجز
+BARRIER = 8             # 👈 تم التغيير: الفوز إذا كان الرقم الأخير > 1
 DURATION = 1 
 DURATION_UNIT = "t" 
 MARTINGALE_STEPS = 4 
 MAX_CONSECUTIVE_LOSSES = 3
-RECONNECT_DELAY = 5 # فترة انتظار قبل محاولة إعادة الاتصال (بالثواني)
+RECONNECT_DELAY = 1 # فترة انتظار قبل محاولة إعادة الاتصال (بالثواني)
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json" 
 
