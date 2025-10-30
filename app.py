@@ -12,13 +12,13 @@ from flask import Flask, request, render_template_string, redirect, url_for, ses
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_10"
-TRADE_TYPE = "DIGITUNDER"
-BARRIER = 8
+TRADE_TYPE = "DIGITOVER" # 👈 تم التغيير: الفوز إذا كان الرقم الأخير أكبر من الحاجز
+BARRIER = 1             # 👈 تم التغيير: الفوز إذا كان الرقم الأخير > 1 (أي 2، 3، 4، 5، 6، 7، 8، 9)
 DURATION = 1 
 DURATION_UNIT = "t" 
 MARTINGALE_STEPS = 4 
 MAX_CONSECUTIVE_LOSSES = 3
-RECONNECT_DELAY = 1 # 👈 فترة انتظار قبل محاولة إعادة الاتصال (بالثواني)
+RECONNECT_DELAY = 1 
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json" 
 
@@ -27,6 +27,8 @@ ACTIVE_SESSIONS_FILE = "active_sessions.json"
 # ==========================================================
 active_threads = {} 
 active_ws = {} 
+# 🛑🛑🛑 حالة جديدة لمنع دخول الصفقات أثناء الانتظار 🛑🛑🛑
+is_contract_open = {} 
 
 # القالب الافتراضي لجلسة مستخدم جديد
 DEFAULT_SESSION_STATE = {
@@ -45,7 +47,7 @@ DEFAULT_SESSION_STATE = {
 # ==========================================================
 # دوال إدارة الحالة (الملف الثابت)
 # ==========================================================
-# (دوال get_file_lock, release_file_lock, load_persistent_sessions تبقى كما هي)
+# (دوال get_file_lock, release_file_lock, load_persistent_sessions, save_session_data, delete_session_data, get_session_data, load_allowed_users تبقى كما هي)
 def get_file_lock(f):
     try:
         fcntl.flock(f.fileno(), fcntl.LOCK_EX)
@@ -104,10 +106,6 @@ def delete_session_data(email):
         finally:
             release_file_lock(f)
 
-# ==========================================================
-# دوال إدارة الحالة والمنطق
-# ==========================================================
-
 def get_session_data(email):
     all_sessions = load_persistent_sessions()
     if email in all_sessions:
@@ -126,9 +124,10 @@ def load_allowed_users():
     except Exception as e:
         print(f"❌ ERROR reading {USER_IDS_FILE}: {e}")
         return set()
-
-def stop_bot(email, clear_data=True): # 👈 تعديل: إضافة معامل لتحديد ما إذا كان يجب مسح البيانات
+        
+def stop_bot(email, clear_data=True): 
     """ إيقاف البوت. إذا كانت clear_data=True، يتم مسح البيانات بالكامل (من الواجهة). """
+    global is_contract_open # 👈 الوصول إلى المتغير العالمي
     
     # 1. إيقاف الاتصال والخيوط
     if email in active_ws and active_ws[email]:
@@ -144,13 +143,17 @@ def stop_bot(email, clear_data=True): # 👈 تعديل: إضافة معامل �
     # 2. إزالة تسجيل الخيط من الذاكرة 
     if email in active_threads:
         del active_threads[email]
+        
+    # 3. تحديث حالة العقد المفتوح في الذاكرة
+    if email in is_contract_open:
+        is_contract_open[email] = False
 
     if clear_data:
-        # 3. حذف الحالة بالكامل (إيقاف صريح من المستخدم)
+        # 4. حذف الحالة بالكامل (إيقاف صريح من المستخدم)
         delete_session_data(email)
         print(f"🛑 [INFO] Bot for {email} stopped and session data cleared from file.")
     else:
-        # 3. تحديث حالة التشغيل فقط (للحفاظ على البيانات ومحاولة إعادة الاتصال)
+        # 4. تحديث حالة التشغيل فقط (للحفاظ على البيانات ومحاولة إعادة الاتصال)
         current_data = get_session_data(email)
         if current_data.get("is_running") is True:
              current_data["is_running"] = False
@@ -168,6 +171,7 @@ def get_latest_price_digit(price):
         return -1
 
 def send_trade_order(email, stake):
+    global is_contract_open # 👈 الوصول إلى المتغير العالمي
     if email not in active_ws: return
     ws_app = active_ws[email]
     
@@ -182,10 +186,18 @@ def send_trade_order(email, stake):
     }
     try:
         ws_app.send(json.dumps(trade_request))
-    except:
+        # 🛑🛑🛑 تحديث الحالة: الآن هناك صفقة مفتوحة 🛑🛑🛑
+        is_contract_open[email] = True 
+    except Exception as e:
+        print(f"❌ [TRADE ERROR] Could not send trade order: {e}")
         pass
         
 def check_pnl_limits(email, profit_loss):
+    global is_contract_open # 👈 الوصول إلى المتغير العالمي
+    
+    # 🛑🛑🛑 تحديث الحالة: تم بيع العقد، لا توجد صفقة مفتوحة الآن 🛑🛑🛑
+    is_contract_open[email] = False 
+
     current_data = get_session_data(email)
     if not current_data.get('is_running'): return
 
@@ -226,12 +238,16 @@ def check_pnl_limits(email, profit_loss):
 
 def bot_core_logic(email, token, stake, tp):
     """ المنطق الأساسي لتشغيل البوت مع حلقة إعادة الاتصال """
-    
+    global is_contract_open # 👈 الوصول إلى المتغير العالمي
+
+    # تهيئة حالة العقد المفتوح
+    is_contract_open[email] = False
+
     # عند البدء، نقوم بتهيئة الحالة في الملف الثابت
     session_data = DEFAULT_SESSION_STATE.copy()
     session_data.update({
         "api_token": token, "base_stake": stake, "tp_target": tp,
-        "is_running": True, "current_stake": stake # تم تعيين is_running إلى True
+        "is_running": True, "current_stake": stake 
     })
     save_session_data(email, session_data)
 
@@ -244,33 +260,40 @@ def bot_core_logic(email, token, stake, tp):
         print(f"🔗 [THREAD] Attempting to connect for {email}...")
 
         def on_open_wrapper(ws_app):
-            ws_app.send(json.dumps({"authorize": current_data['api_token']})) # استخدام الـ Token المحفوظ
+            ws_app.send(json.dumps({"authorize": current_data['api_token']})) 
             ws_app.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
-            # تحديث حالة التشغيل إلى True في الملف بعد نجاح الاتصال
+            
             running_data = get_session_data(email)
             running_data['is_running'] = True
             save_session_data(email, running_data)
             print(f"✅ [THREAD] Connection established for {email}.")
+            
+            # 🛑 إعادة تعيين حالة العقد عند إعادة الاتصال (في حال فشل الإغلاق النظيف)
+            is_contract_open[email] = False 
 
         def on_message_wrapper(ws_app, message):
             data = json.loads(message)
             msg_type = data.get('msg_type')
             
-            # جلب البيانات هنا لضمان الحصول على آخر حالة (خاصة is_running)
             current_data = get_session_data(email) 
             if not current_data.get('is_running'):
                 ws_app.close()
                 return
                 
             if msg_type == 'tick':
+                # 🛑🛑🛑 فحص حالة العقد المفتوح قبل الدخول 🛑🛑🛑
+                if is_contract_open.get(email) is True: 
+                    return # تجاهل التيكات إذا كان هناك عقد مفتوح بالفعل
+
                 last_digit = get_latest_price_digit(data['tick']['quote'])
                 
-                # شرط الدخول: الرقم الأخير هو 1
-                if current_data['consecutive_losses'] == 0 and last_digit == 1: 
+                # 🛑🛑🛑 شرط الدخول الجديد: الدخول إذا كان الرقم الأخير هو 2 🛑🛑🛑
+                if current_data['consecutive_losses'] == 0 and last_digit == 2: 
                     send_trade_order(email, current_data['current_stake'])
 
             elif msg_type == 'buy':
                 contract_id = data['buy']['contract_id']
+                # يتم تحديث is_contract_open=True في دالة send_trade_order
                 ws_app.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
             elif msg_type == 'proposal_open_contract':
                 contract = data['proposal_open_contract']
@@ -278,7 +301,6 @@ def bot_core_logic(email, token, stake, tp):
                     check_pnl_limits(email, contract['profit']) 
                     if 'subscription_id' in data: ws_app.send(json.dumps({"forget": data['subscription_id']}))
 
-        # دالة الإغلاق لا تمسح البيانات
         def on_close_wrapper(ws_app, code, msg):
              stop_bot(email, clear_data=False) 
 
@@ -286,24 +308,20 @@ def bot_core_logic(email, token, stake, tp):
             ws = websocket.WebSocketApp(
                 WSS_URL, on_open=on_open_wrapper, on_message=on_message_wrapper, 
                 on_error=lambda ws, err: print(f"[WS Error {email}] {err}"),
-                on_close=on_close_wrapper # 👈 استخدام دالة الإغلاق الجديدة
+                on_close=on_close_wrapper 
             )
             active_ws[email] = ws
-            # run_forever() سيتوقف عند الإغلاق (Disconnection) أو عند استدعاء ws.close()
             ws.run_forever(ping_interval=20, ping_timeout=10) 
             
         except Exception as e:
             print(f"❌ [ERROR] WebSocket failed for {email}: {e}")
         
-        # الانتظار قبل محاولة إعادة الاتصال مرة أخرى
         if get_session_data(email).get('is_running') is False:
-             # إذا تم إيقافه يدوياً أو وصل للحد الأقصى للخسارة، نخرج من الحلقة
              break
         
         print(f"💤 [THREAD] Waiting {RECONNECT_DELAY} seconds before retrying connection for {email}...")
         time.sleep(RECONNECT_DELAY)
 
-    # تنظيف نهائي عند الخروج من حلقة إعادة الاتصال (في حال كان هناك خيط لا يزال مسجلاً)
     if email in active_threads:
         del active_threads[email] 
     print(f"🛑 [THREAD] Bot process ended for {email}.")
@@ -356,7 +374,7 @@ CONTROL_FORM = """
     <p style="color: red; font-size: 1.2em;">🛑 البوت متوقف. يرجى إدخال الإعدادات لبدء جلسة جديدة.</p>
     <form method="POST" action="{{ url_for('start_bot') }}">
         <label for="token">Deriv API Token:</label><br>
-        <input type="text" id="token" name="token" size="50" required value="{{ session_data.api_token if session_data else '' }}"><br><br> 👈 **الـ Token محفوظ إذا توقف البوت تلقائياً**
+        <input type="text" id="token" name="token" size="50" required value="{{ session_data.api_token if session_data else '' }}"><br><br> 
         
         <label for="stake">Base Stake (USD):</label><br>
         <input type="number" id="stake" name="stake" value="{{ session_data.base_stake|round(2) if session_data else 0.35 }}" step="0.01" min="0.35" required><br><br>
@@ -427,7 +445,6 @@ def start_bot():
         flash("قيمة غير صحيحة للرهان أو TP.", 'error')
         return redirect(url_for('index'))
         
-    # هنا يتم بدء الخيط الذي يحتوي على حلقة إعادة الاتصال
     thread = threading.Thread(target=bot_core_logic, args=(email, token, stake, tp))
     thread.daemon = True
     thread.start()
