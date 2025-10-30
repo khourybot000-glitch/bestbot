@@ -13,12 +13,12 @@ from flask import Flask, request, render_template_string, redirect, url_for, ses
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_10"
 TRADE_TYPE = "DIGITOVER" # 👈 تم التغيير: الفوز إذا كان الرقم الأخير أكبر من الحاجز
-BARRIER = 1             # 👈 تم التغيير: الفوز إذا كان الرقم الأخير > 1 (أي 2، 3، 4، 5، 6، 7، 8، 9)
+BARRIER = 1             # 👈 تم التغيير: الفوز إذا كان الرقم الأخير > 1
 DURATION = 1 
 DURATION_UNIT = "t" 
 MARTINGALE_STEPS = 4 
 MAX_CONSECUTIVE_LOSSES = 3
-RECONNECT_DELAY = 1 
+RECONNECT_DELAY = 5 # فترة انتظار قبل محاولة إعادة الاتصال (بالثواني)
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json" 
 
@@ -27,7 +27,7 @@ ACTIVE_SESSIONS_FILE = "active_sessions.json"
 # ==========================================================
 active_threads = {} 
 active_ws = {} 
-# 🛑🛑🛑 حالة جديدة لمنع دخول الصفقات أثناء الانتظار 🛑🛑🛑
+# حالة جديدة لمنع دخول الصفقات أثناء الانتظار 
 is_contract_open = {} 
 
 # القالب الافتراضي لجلسة مستخدم جديد
@@ -45,9 +45,8 @@ DEFAULT_SESSION_STATE = {
 }
 
 # ==========================================================
-# دوال إدارة الحالة (الملف الثابت)
+# دوال إدارة الحالة (الملف الثابت) - لم تتغير
 # ==========================================================
-# (دوال get_file_lock, release_file_lock, load_persistent_sessions, save_session_data, delete_session_data, get_session_data, load_allowed_users تبقى كما هي)
 def get_file_lock(f):
     try:
         fcntl.flock(f.fileno(), fcntl.LOCK_EX)
@@ -126,8 +125,8 @@ def load_allowed_users():
         return set()
         
 def stop_bot(email, clear_data=True): 
-    """ إيقاف البوت. إذا كانت clear_data=True، يتم مسح البيانات بالكامل (من الواجهة). """
-    global is_contract_open # 👈 الوصول إلى المتغير العالمي
+    """ إيقاف البوت. إذا كانت clear_data=True، يتم مسح البيانات بالكامل (إيقاف صريح). """
+    global is_contract_open 
     
     # 1. إيقاف الاتصال والخيوط
     if email in active_ws and active_ws[email]:
@@ -149,16 +148,17 @@ def stop_bot(email, clear_data=True):
         is_contract_open[email] = False
 
     if clear_data:
-        # 4. حذف الحالة بالكامل (إيقاف صريح من المستخدم)
+        # 4. حذف الحالة بالكامل (إيقاف صريح من المستخدم أو تجاوز حد الخسارة)
         delete_session_data(email)
         print(f"🛑 [INFO] Bot for {email} stopped and session data cleared from file.")
     else:
-        # 4. تحديث حالة التشغيل فقط (للحفاظ على البيانات ومحاولة إعادة الاتصال)
+        # 4. تحديث حالة التشغيل فقط (إيقاف تلقائي بسبب الانقطاع)
         current_data = get_session_data(email)
+        # فقط قم بتحديث is_running إذا كانت لا تزال True
         if current_data.get("is_running") is True:
              current_data["is_running"] = False
              save_session_data(email, current_data)
-        print(f"⚠️ [INFO] Bot for {email} stopped by disconnection. Waiting to restart...")
+        print(f"⚠️ [INFO] Bot for {email} stopped by disconnection. Will retry soon.")
 
 # ==========================================================
 # دوال البوت التداولي
@@ -171,7 +171,7 @@ def get_latest_price_digit(price):
         return -1
 
 def send_trade_order(email, stake):
-    global is_contract_open # 👈 الوصول إلى المتغير العالمي
+    global is_contract_open 
     if email not in active_ws: return
     ws_app = active_ws[email]
     
@@ -186,16 +186,16 @@ def send_trade_order(email, stake):
     }
     try:
         ws_app.send(json.dumps(trade_request))
-        # 🛑🛑🛑 تحديث الحالة: الآن هناك صفقة مفتوحة 🛑🛑🛑
+        # تحديث الحالة: الآن هناك صفقة مفتوحة 
         is_contract_open[email] = True 
     except Exception as e:
         print(f"❌ [TRADE ERROR] Could not send trade order: {e}")
         pass
         
 def check_pnl_limits(email, profit_loss):
-    global is_contract_open # 👈 الوصول إلى المتغير العالمي
+    global is_contract_open 
     
-    # 🛑🛑🛑 تحديث الحالة: تم بيع العقد، لا توجد صفقة مفتوحة الآن 🛑🛑🛑
+    # تحديث الحالة: تم بيع العقد، لا توجد صفقة مفتوحة الآن 
     is_contract_open[email] = False 
 
     current_data = get_session_data(email)
@@ -220,7 +220,8 @@ def check_pnl_limits(email, profit_loss):
         current_data['current_step'] += 1
         
         if current_data['current_step'] < MARTINGALE_STEPS:
-            current_data['current_stake'] *= 7
+            # يمكن تعديل هذا الجزء بناءً على استراتيجيتك (Martingale Factor)
+            current_data['current_stake'] *= 7 
             send_trade_order(email, current_data['current_stake']) 
         else:
             current_data['current_step'] = 0
@@ -237,22 +238,24 @@ def check_pnl_limits(email, profit_loss):
     print(f"[LOG {email}] PNL: {current_data['current_profit']:.2f}, Stake: {current_data['current_stake']:.2f}")
 
 def bot_core_logic(email, token, stake, tp):
-    """ المنطق الأساسي لتشغيل البوت مع حلقة إعادة الاتصال """
-    global is_contract_open # 👈 الوصول إلى المتغير العالمي
+    """ المنطق الأساسي لتشغيل البوت مع حلقة إعادة الاتصال (Auto-Reconnect) """
+    global is_contract_open 
 
     # تهيئة حالة العقد المفتوح
     is_contract_open[email] = False
 
     # عند البدء، نقوم بتهيئة الحالة في الملف الثابت
-    session_data = DEFAULT_SESSION_STATE.copy()
+    session_data = get_session_data(email)
     session_data.update({
         "api_token": token, "base_stake": stake, "tp_target": tp,
         "is_running": True, "current_stake": stake 
     })
     save_session_data(email, session_data)
 
-    while True: # 👈 حلقة إعادة الاتصال الرئيسية
+    while True: # 👈 حلقة إعادة الاتصال الرئيسية (تعمل باستمرار)
         current_data = get_session_data(email)
+        
+        # إذا تم إيقافه يدوياً أو وصل للحد الأقصى للخسارة (clear_data=True)، نخرج من الحلقة
         if not current_data.get('is_running'):
             print(f"🛑 [THREAD] Stop command received for {email}. Exiting.")
             break
@@ -268,7 +271,7 @@ def bot_core_logic(email, token, stake, tp):
             save_session_data(email, running_data)
             print(f"✅ [THREAD] Connection established for {email}.")
             
-            # 🛑 إعادة تعيين حالة العقد عند إعادة الاتصال (في حال فشل الإغلاق النظيف)
+            # إعادة تعيين حالة العقد عند إعادة الاتصال
             is_contract_open[email] = False 
 
         def on_message_wrapper(ws_app, message):
@@ -276,24 +279,24 @@ def bot_core_logic(email, token, stake, tp):
             msg_type = data.get('msg_type')
             
             current_data = get_session_data(email) 
+            # إذا توقف البوت خارجياً أثناء معالجة الرسالة، أغلق الاتصال
             if not current_data.get('is_running'):
                 ws_app.close()
                 return
                 
             if msg_type == 'tick':
-                # 🛑🛑🛑 فحص حالة العقد المفتوح قبل الدخول 🛑🛑🛑
+                # فحص حالة العقد المفتوح قبل الدخول 
                 if is_contract_open.get(email) is True: 
-                    return # تجاهل التيكات إذا كان هناك عقد مفتوح بالفعل
+                    return 
 
                 last_digit = get_latest_price_digit(data['tick']['quote'])
                 
-                # 🛑🛑🛑 شرط الدخول الجديد: الدخول إذا كان الرقم الأخير هو 2 🛑🛑🛑
+                # شرط الدخول الجديد: الدخول إذا كان الرقم الأخير هو 2 
                 if current_data['consecutive_losses'] == 0 and last_digit == 2: 
                     send_trade_order(email, current_data['current_stake'])
 
             elif msg_type == 'buy':
                 contract_id = data['buy']['contract_id']
-                # يتم تحديث is_contract_open=True في دالة send_trade_order
                 ws_app.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
             elif msg_type == 'proposal_open_contract':
                 contract = data['proposal_open_contract']
@@ -302,6 +305,7 @@ def bot_core_logic(email, token, stake, tp):
                     if 'subscription_id' in data: ws_app.send(json.dumps({"forget": data['subscription_id']}))
 
         def on_close_wrapper(ws_app, code, msg):
+             # عند الإغلاق التلقائي، لا يتم مسح البيانات (clear_data=False)
              stop_bot(email, clear_data=False) 
 
         try:
@@ -311,17 +315,21 @@ def bot_core_logic(email, token, stake, tp):
                 on_close=on_close_wrapper 
             )
             active_ws[email] = ws
+            # ws.run_forever() سيتوقف عند الإغلاق (Disconnection) أو عند استدعاء ws.close()
             ws.run_forever(ping_interval=20, ping_timeout=10) 
             
         except Exception as e:
+            # يمكن أن يحدث هذا الخطأ إذا فشل الاتصال الأولي أو حدث خطأ في الشبكة
             print(f"❌ [ERROR] WebSocket failed for {email}: {e}")
         
+        # التحقق مرة أخرى من الحالة بعد توقف run_forever()
         if get_session_data(email).get('is_running') is False:
              break
         
         print(f"💤 [THREAD] Waiting {RECONNECT_DELAY} seconds before retrying connection for {email}...")
         time.sleep(RECONNECT_DELAY)
 
+    # تنظيف نهائي عند الخروج من حلقة إعادة الاتصال 
     if email in active_threads:
         del active_threads[email] 
     print(f"🛑 [THREAD] Bot process ended for {email}.")
@@ -333,7 +341,7 @@ def bot_core_logic(email, token, stake, tp):
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
 
-# قوالب HTML (AUTH_FORM)
+# قوالب HTML (AUTH_FORM) - لم تتغير
 AUTH_FORM = """
 <!doctype html>
 <title>Login - Deriv Bot</title>
@@ -353,7 +361,7 @@ AUTH_FORM = """
 </form>
 """
 
-# قوالب HTML (CONTROL_FORM) 
+# قوالب HTML (CONTROL_FORM) - تم التعديل
 CONTROL_FORM = """
 <!doctype html>
 <title>Control Panel</title>
@@ -374,7 +382,7 @@ CONTROL_FORM = """
     <p style="color: red; font-size: 1.2em;">🛑 البوت متوقف. يرجى إدخال الإعدادات لبدء جلسة جديدة.</p>
     <form method="POST" action="{{ url_for('start_bot') }}">
         <label for="token">Deriv API Token:</label><br>
-        <input type="text" id="token" name="token" size="50" required value="{{ session_data.api_token if session_data else '' }}"><br><br> 
+        <input type="text" id="token" name="token" size="50" required value="{{ session_data.api_token if session_data else '' }}" {% if session_data and session_data.api_token and session_data.is_running is not none %}readonly{% endif %}><br><br>
         
         <label for="stake">Base Stake (USD):</label><br>
         <input type="number" id="stake" name="stake" value="{{ session_data.base_stake|round(2) if session_data else 0.35 }}" step="0.01" min="0.35" required><br><br>
@@ -389,6 +397,9 @@ CONTROL_FORM = """
 <a href="{{ url_for('logout') }}">تسجيل الخروج</a>
 """
 
+# ==========================================================
+# مسارات FLASK (Routes)
+# ==========================================================
 
 @app.route('/')
 def index():
@@ -397,6 +408,9 @@ def index():
     
     email = session['email']
     session_data = get_session_data(email)
+
+    # إذا كان البوت في حالة "متوقف" لكن بيانات الجلسة موجودة (نتيجة انقطاع)، 
+    # سنسمح للمستخدم بإعادة تشغيل الخيط من الواجهة، ولكن البوت سيعيد التشغيل تلقائياً على Render.
 
     return render_template_string(CONTROL_FORM, 
         email=email,
@@ -433,12 +447,19 @@ def start_bot():
     
     email = session['email']
     
+    # حماية من تشغيل أكثر من خيط
     if email in active_threads and active_threads[email].is_alive():
-        flash('البوت يعمل بالفعل. يرجى إيقافه أولاً.', 'info')
+        flash('البوت يعمل بالفعل.', 'info')
         return redirect(url_for('index'))
         
     try:
-        token = request.form['token']
+        # إذا كان الـ token موجوداً ومقفولاً (read-only)، فسنأخذه من البيانات المحفوظة
+        current_data = get_session_data(email)
+        if current_data.get('api_token') and request.form.get('token') == current_data['api_token']:
+            token = current_data['api_token']
+        else:
+            token = request.form['token']
+
         stake = float(request.form['stake'])
         tp = float(request.form['tp'])
     except ValueError:
@@ -450,7 +471,7 @@ def start_bot():
     thread.start()
     active_threads[email] = thread
     
-    flash('بدأ تشغيل البوت بنجاح.', 'success')
+    flash('بدأ تشغيل البوت بنجاح. سيحاول الاتصال وإعادة الاتصال تلقائياً.', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
@@ -472,4 +493,7 @@ def logout():
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
+    # عند التشغيل، قد نحتاج إلى تشغيل الخيوط التي كانت تعمل مسبقاً في الجلسات المحفوظة
+    # لكن هذا يتطلب منطقاً أكثر تعقيداً في مرحلة الإنتاج (Production).
+    # في الوقت الحالي، سنعتمد على أن زر "بدأ التشغيل" هو ما يُطلق الخيط الأولي.
     app.run(host='0.0.0.0', port=port, debug=False)
