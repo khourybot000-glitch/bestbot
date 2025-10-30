@@ -249,7 +249,7 @@ def bot_core_logic(email, token, stake, tp):
             if current_data.get('is_running') and current_data['consecutive_losses'] == 0 and last_digit == 9: 
                  send_trade_order(email, current_data['current_stake'])
 
-        elif data.get('msg_type') == 'buy'):
+        elif data.get('msg_type') == 'buy':
             contract_id = data['buy']['contract_id']
             ws_app.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
         elif data.get('msg_type') == 'proposal_open_contract':
