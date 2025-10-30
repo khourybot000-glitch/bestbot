@@ -1,650 +1,421 @@
-import streamlit as st
 import time
-import websocket
 import json
-import os
-import decimal
-import sqlite3
-import pandas as pd
-from datetime import datetime, timezone 
-import multiprocessing
+import websocket 
+import threading
+import os 
+import sys 
+import fcntl # مطلوب لقفل الملفات
+from flask import Flask, request, render_template_string, redirect, url_for, session, flash, g
 
-# --- SQLite Database Configuration ---
-DB_FILE = "trading_data0099.db"
+# ==========================================================
+# الإعدادات الثابتة للبوت
+# ==========================================================
+WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
+SYMBOL = "R_10"
+TRADE_TYPE = "DIGITUNDER"
+BARRIER = 8
+DURATION = 1 
+DURATION_UNIT = "t" 
+MARTINGALE_STEPS = 4 
+MAX_CONSECUTIVE_LOSSES = 3
+USER_IDS_FILE = "user_ids.txt"
+ACTIVE_SESSIONS_FILE = "active_sessions.json" # قاعدة البيانات الدائمة
 
-# --- Database & Utility Functions (Unchanged) ---
-def create_connection():
+# ==========================================================
+# حالة البوت في الذاكرة (لإدارة الخيوط النشطة في هذه العملية)
+# ==========================================================
+active_threads = {} 
+active_ws = {} 
+
+# القالب الافتراضي لجلسة مستخدم جديد
+DEFAULT_SESSION_STATE = {
+    "api_token": "",
+    "base_stake": 1.0,
+    "tp_target": 10.0,
+    "is_running": False,
+    "current_profit": 0.0,
+    "current_stake": 1.0,
+    "consecutive_losses": 0,
+    "current_step": 0,
+    "total_wins": 0,
+    "total_losses": 0
+}
+
+# ==========================================================
+# دوال إدارة الحالة (الملف الثابت)
+# ==========================================================
+
+def get_file_lock(f):
+    """ تطبيق قفل حصري للكتابة على الملف """
     try:
-        conn = sqlite3.connect(DB_FILE)
-        return conn
-    except sqlite3.Error as e:
-        return None
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+    except Exception:
+        pass
 
-def create_table_if_not_exists():
-    conn = create_connection()
-    if conn:
-        try:
-            sql_create_sessions_table = """
-            CREATE TABLE IF NOT EXISTS sessions (
-                email TEXT PRIMARY KEY, user_token TEXT NOT NULL, base_amount REAL NOT NULL, tp_target REAL NOT NULL, 
-                max_consecutive_losses INTEGER NOT NULL, total_wins INTEGER DEFAULT 0, total_losses INTEGER DEFAULT 0, 
-                current_amount REAL NOT NULL, consecutive_losses INTEGER DEFAULT 0, initial_balance REAL DEFAULT 0.0,
-                contract_id TEXT, trade_start_time REAL DEFAULT 0.0, is_running INTEGER DEFAULT 0 
-            );
-            """
-            sql_create_bot_status_table = """
-            CREATE TABLE IF NOT EXISTS bot_status (
-                flag_id INTEGER PRIMARY KEY, is_running_flag INTEGER DEFAULT 0, 
-                last_heartbeat REAL DEFAULT 0.0, process_pid INTEGER DEFAULT 0
-            );
-            """
-            conn.execute(sql_create_sessions_table)
-            conn.execute(sql_create_bot_status_table)
-            cursor = conn.execute("SELECT COUNT(*) FROM bot_status WHERE flag_id = 1")
-            if cursor.fetchone()[0] == 0:
-                conn.execute("INSERT INTO bot_status (flag_id, is_running_flag, last_heartbeat, process_pid) VALUES (1, 0, 0.0, 0)")
-            conn.commit()
-        except sqlite3.Error as e:
-            print(f"Database error during table creation: {e}")
-        finally:
-            conn.close()
-
-def get_bot_running_status():
-    conn = create_connection()
-    if conn:
-        try:
-            with conn:
-                cursor = conn.execute("SELECT is_running_flag, last_heartbeat, process_pid FROM bot_status WHERE flag_id = 1")
-                row = cursor.fetchone()
-                if row:
-                    status, heartbeat, pid = row
-                    is_process_alive = False
-                    if pid and pid != 0:
-                        try:
-                            os.kill(pid, 0) 
-                            is_process_alive = True
-                        except OSError:
-                            is_process_alive = False
-                    if status == 1:
-                        if is_process_alive:
-                            if (time.time() - heartbeat > 30):
-                                update_bot_running_status(0, 0)
-                                return 0
-                            else:
-                                return status
-                        else:
-                            update_bot_running_status(0, 0)
-                            return 0
-                    else:
-                        return 0
-                return 0
-        except sqlite3.Error as e:
-            print(f"Database error in get_bot_running_status: {e}")
-            return 0
-        finally:
-            if conn: conn.close()
-    return 0
-
-def update_bot_running_status(status, pid):
-    conn = create_connection()
-    if conn:
-        try:
-            with conn:
-                conn.execute("UPDATE bot_status SET is_running_flag = ?, last_heartbeat = ?, process_pid = ? WHERE flag_id = 1", (status, time.time(), pid))
-        except sqlite3.Error as e:
-            print(f"Database error in update_bot_running_status: {e}")
-        finally:
-            conn.close()
-
-def is_user_active(email):
+def release_file_lock(f):
+    """ تحرير قفل الملف """
     try:
-        with open("user_ids.txt", "r") as file:
-            active_users = [line.strip() for line in file.readlines()]
-        return email in active_users
-    except FileNotFoundError:
-        return False
-    except Exception as e:
-        return False
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
 
-def start_new_session_in_db(email, settings):
-    conn = create_connection()
-    if conn:
-        try:
-            with conn:
-                conn.execute("""
-                    INSERT OR REPLACE INTO sessions 
-                    (email, user_token, base_amount, tp_target, max_consecutive_losses, current_amount, is_running)
-                    VALUES (?, ?, ?, ?, ?, ?, 1)
-                    """, (email, settings["user_token"], settings["base_amount"], settings["tp_target"], settings["max_consecutive_losses"], settings["base_amount"]))
-        except sqlite3.Error as e:
-            print(f"Database error in start_new_session_in_db: {e}")
-        finally:
-            conn.close()
-
-def update_is_running_status(email, status):
-    conn = create_connection()
-    if conn:
-        try:
-            with conn:
-                conn.execute("UPDATE sessions SET is_running = ? WHERE email = ?", (status, email))
-        except sqlite3.Error as e:
-            print(f"Database error in update_is_running_status: {e}")
-        finally:
-            conn.close()
-
-def clear_session_data(email):
-    conn = create_connection()
-    if conn:
-        try:
-            with conn:
-                conn.execute("DELETE FROM sessions WHERE email=?", (email,))
-        except sqlite3.Error as e:
-            print(f"Database error in clear_session_data: {e}")
-        finally:
-            conn.close()
-
-def get_session_status_from_db(email):
-    conn = create_connection()
-    if conn:
-        try:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute("SELECT * FROM sessions WHERE email=?", (email,))
-            row = cursor.fetchone()
-            if row:
-                return dict(row)
-            return None
-        except sqlite3.Error as e:
-            print(f"Database error in get_session_status_from_db: {e}")
-            return None
-        finally:
-            conn.close()
-    return None
-
-def get_all_active_sessions():
-    conn = create_connection()
-    if conn:
-        try:
-            with conn:
-                conn.row_factory = sqlite3.Row
-                cursor = conn.execute("SELECT * FROM sessions WHERE is_running = 1")
-                rows = cursor.fetchall()
-                sessions = []
-                for row in rows:
-                    sessions.append(dict(row))
-                return sessions
-        except sqlite3.Error as e:
-            print(f"Database error in get_all_active_sessions: {e}")
-            return []
-        finally:
-            conn.close()
-    return []
-
-def update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=None, contract_id=None, trade_start_time=None):
-    conn = create_connection()
-    if conn:
-        try:
-            with conn:
-                update_query = """
-                UPDATE sessions SET 
-                    total_wins = ?, total_losses = ?, current_amount = ?, consecutive_losses = ?, 
-                    initial_balance = COALESCE(?, initial_balance), contract_id = ?, trade_start_time = COALESCE(?, trade_start_time)
-                WHERE email = ?
-                """
-                conn.execute(update_query, (total_wins, total_losses, current_amount, consecutive_losses, initial_balance, contract_id, trade_start_time, email))
-        except sqlite3.Error as e:
-            print(f"Database error in update_stats_and_trade_info_in_db: {e}")
-        finally:
-            conn.close()
-
-# --- MODIFIED: Connect WebSocket (Only for authorization and balance checks) ---
-# هذه الدالة تستخدم لاتصالات قصيرة الأمد (مثل جلب الرصيد)
-def connect_websocket(user_token):
-    ws = websocket.WebSocket()
-    try:
-        ws.connect("wss://blue.derivws.com/websockets/v3?app_id=16929") 
-        auth_req = {"authorize": user_token}
-        ws.send(json.dumps(auth_req))
-        auth_response = json.loads(ws.recv())
-        if auth_response.get('error'):
-            print(f"WebSocket authentication error: {auth_response['error']['message']}")
-            ws.close()
-            return None
-        return ws
-    except Exception as e:
-        return None
-
-def get_balance_and_currency(user_token):
-    ws = None
-    try:
-        ws = connect_websocket(user_token)
-        if not ws:
-            return None, None
-        balance_req = {"balance": 1}
-        ws.send(json.dumps(balance_req))
-        balance_response = json.loads(ws.recv())
-        if balance_response.get('msg_type') == 'balance':
-            balance_info = balance_response.get('balance', {})
-            return balance_info.get('balance'), balance_info.get('currency')
-        return None, None
-    except Exception as e:
-        return None, None
-    finally:
-        if ws and ws.connected:
-            ws.close()
-
-# --- FUNCTION: Get the last digit for analysis (Uses external WS) ---
-# هذه الدالة الآن تتوقع ws مفتوحاً كمدخل
-def get_latest_tick_digit(ws_tick, symbol="R_100"):
-    if not ws_tick or not ws_tick.connected:
-        return None
+def load_persistent_sessions():
+    """ تحميل جميع الجلسات المحفوظة من الملف """
+    if not os.path.exists(ACTIVE_SESSIONS_FILE):
+        return {}
     
-    req = {"ticks_history": symbol, "end": "latest", "count": 1, "subscribe": 0}
-    
-    try:
-        ws_tick.send(json.dumps(req))
-        # زيادة مهلة الاستقبال
-        response = json.loads(ws_tick.recv(timeout=5.0)) 
-        
-        if response.get('msg_type') == 'history' and response.get('history', {}).get('prices'):
-            latest_price = response['history']['prices'][0]
-            price_str = f"{latest_price:.6f}" 
-            last_digit = int(price_str[-1])
-            return last_digit
-        
-        return None
-    except Exception as e:
-        return None
-
-# --- Trading Bot Logic (Uses separate WS connections for Ticks and Trades) ---
-def run_trading_job_for_user(session_data, ws_tick, check_only=False):
-    email = session_data['email']
-    user_token = session_data['user_token']
-    base_amount = session_data['base_amount']
-    tp_target = session_data['tp_target']
-    max_consecutive_losses = session_data['max_consecutive_losses']
-    total_wins = session_data['total_wins']
-    total_losses = session_data['total_losses']
-    current_amount = session_data['current_amount']
-    consecutive_losses = session_data['consecutive_losses']
-    initial_balance = session_data['initial_balance']
-    contract_id = session_data['contract_id']
-    
-    ws_trade = None # اتصال جديد خاص بالتداول والصفقات
-
-    try:
-        # --- Check for completed trades (if contract_id exists) ---
-        if contract_id:
-            # نفتح اتصال خاص فقط لإنهاء/مراجعة العقد
-            ws_trade = connect_websocket(user_token)
-            if not ws_trade:
-                print(f"[{email}] 🚨 ERROR: Could not connect trade WS for closing check. Skipping.")
-                return
-            
-            contract_info = check_contract_status(ws_trade, contract_id)
-            if contract_info and contract_info.get('is_sold'):
-                profit = float(contract_info.get('profit', 0))
-                
-                if profit > 0:
-                    consecutive_losses = 0
-                    total_wins += 1
-                    current_amount = base_amount 
-                elif profit < 0:
-                    consecutive_losses += 1
-                    total_losses += 1
-                    next_bet = float(current_amount) * 6.0 
-                    current_amount = max(base_amount, next_bet)
-                else: 
-                    consecutive_losses = 0 
-                
-                new_contract_id = None
-                trade_start_time = 0.0
-                update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time)
-
-                new_balance, _ = get_balance_and_currency(user_token)
-                if new_balance is not None:
-                    current_balance_float = float(new_balance)
-                    
-                    if initial_balance == 0.0:
-                        initial_balance = current_balance_float
-                        update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time)
-                    
-                    if (current_balance_float - initial_balance) >= float(tp_target):
-                        print(f"[{email}] 🛑 STOP: Reached Take Profit target.")
-                        update_is_running_status(email, 0)
-                        clear_session_data(email)
-                        return
-                    
-                    if consecutive_losses >= max_consecutive_losses:
-                        print(f"[{email}] 🛑 STOP: Reached Max Consecutive Losses.")
-                        update_is_running_status(email, 0)
-                        clear_session_data(email)
-                        return
-
-            if contract_id and not (contract_info and contract_info.get('is_sold')):
-                return
-        
-        # نغلق الاتصال الخاص بالفحص
-        if ws_trade and ws_trade.connected:
-            ws_trade.close()
-            ws_trade = None
-
-        # --- Place a new trade (Conditional Digit Strategy) ---
-        if not check_only and not contract_id: 
-            balance, currency = get_balance_and_currency(user_token)
-            if balance is None:
-                print(f"[{email}] 🚨 ERROR: Failed to get balance. Skipping trade.")
-                return
-            if initial_balance == 0:
-                initial_balance = float(balance)
-                update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=None, trade_start_time=None)
-            
-            amount_to_bet = max(0.35, round(float(current_amount), 2))
-            
-            # --- 1. Analyze Last Digit ---
-            analysis_symbol = "R_100" 
-            print(f"[{email}] DEBUG 1: Attempting to fetch tick...") 
-            
-            # 🚨 استخدام اتصال ws_tick الثابت
-            last_digit = get_latest_tick_digit(ws_tick, analysis_symbol) 
-            
-            if last_digit is None:
-                print(f"[{email}] DEBUG 2: Tick fetch FAILED (Returned None). Skipping.") 
-                return
-            
-            print(f"[{email}] DEBUG 3: Last Digit fetched: {last_digit}")
-
-
-            # --- 2. Determine Trade Configuration based on Last Digit ---
-            contract_type = None
-            trade_symbol = None
-            barrier_value = None
-            duration_value = 1
-            duration_unit = "t"
-            
-            # شرط الدخول: يدخل إذا كان الرقم ليس 1 
-            if last_digit != 1:
-                contract_type = "DIGITOVER" 
-                trade_symbol = analysis_symbol 
-                barrier_value = 1 
-                print(f"[{email}] DEBUG 4: ✅ Condition (Digit != 1) MET. Digit: {last_digit}. Preparing Proposal.") 
-            else:
-                print(f"[{email}] DEBUG 5: ❌ Condition (Digit != 1) NOT MET. Digit: {last_digit}. Skipping trade.") 
-                return 
-                
-            # --- 3. Get proposal for the trade ---
-            
-            # نفتح اتصال تداول خاص لإرسال الـ Proposal والـ Buy
-            ws_trade = connect_websocket(user_token)
-            if not ws_trade:
-                print(f"[{email}] 🚨 ERROR: Could not connect trade WS for Proposal. Skipping.")
-                return
-
-            proposal_req = {
-                "proposal": 1, "amount": amount_to_bet, "basis": "stake",
-                "contract_type": contract_type, "currency": currency,
-                "duration": duration_value, "duration_unit": duration_unit, 
-                "symbol": trade_symbol, 
-                "barrier": barrier_value,
-            }
-            
-            ws_trade.send(json.dumps(proposal_req))
-            
-            proposal_response = None
-            start_wait = time.time()
-            
-            # زيادة المهلة إلى 5 ثوانٍ
-            while proposal_response is None and (time.time() - start_wait < 5.0): 
-                try:
-                    response_str = ws_trade.recv(timeout=1.0) 
-                    if response_str:
-                        response = json.loads(response_str)
-                        
-                        if response.get('error'):
-                            print(f"[{email}] 🚨 PROPOSAL ERROR: {response['error']['message']}")
-                            return
-                            
-                        if response.get('msg_type') == 'proposal':
-                             proposal_response = response
-                             break
-                        
-                except Exception as e:
-                    pass
-            
-            if proposal_response and 'proposal' in proposal_response:
-                print(f"[{email}] DEBUG 7: Proposal received. Placing order...") 
-                
-                proposal_id = proposal_response['proposal']['id']
-                
-                # 4. Place the order
-                order_response = place_order(ws_trade, proposal_id, amount_to_bet)
-                
-                if order_response.get('error'):
-                    print(f"[{email}] 🚨 ORDER (BUY) ERROR: {order_response['error']['message']}")
-                    return
-                
-                if 'buy' in order_response and 'contract_id' in order_response['buy']:
-                    new_contract_id = order_response['buy']['contract_id']
-                    trade_start_time = time.time()
-                    print(f"[{email}] ✅ TRADE SUCCESS: Placed trade {new_contract_id} (Stake {amount_to_bet}).")
-                    
-                    update_stats_and_trade_info_in_db(email, total_wins, total_losses, current_amount, consecutive_losses, initial_balance=initial_balance, contract_id=new_contract_id, trade_start_time=trade_start_time)
-                else:
-                    print(f"[{email}] 🚨 ERROR: Failed to place order (Unknown issue).")
-            else:
-                print(f"[{email}] DEBUG 8: Proposal not received within timeout (5.0s). Skipping.")
-    
-    except Exception as e:
-        print(f"[{email}] 🚨 FATAL ERROR in run_trading_job_for_user: {e}")
-    finally:
-        # تأكد من إغلاق اتصال التداول (إذا تم فتحه)
-        if ws_trade and ws_trade.connected:
-            ws_trade.close()
-
-
-# --- Main Bot Loop Function (CORE CHANGE) ---
-def bot_loop():
-    """Main loop that orchestrates trading jobs for all active sessions."""
-    print("Bot process started. PID:", os.getpid())
-    update_bot_running_status(1, os.getpid())
-    
-    # 🚨 محاولة فتح اتصال ثابت واحد لجلب التيك
-    ws_tick = None
-    
-    while True:
+    with open(ACTIVE_SESSIONS_FILE, 'r') as f:
+        get_file_lock(f)
         try:
-            update_bot_running_status(1, os.getpid())
-            active_sessions = get_all_active_sessions()
-            
-            # إذا لم يكن اتصال التيك مفتوحاً، حاول فتحه باستخدام التوكن الأول
-            if not ws_tick or not ws_tick.connected:
-                if active_sessions:
-                    first_token = active_sessions[0]['user_token']
-                    ws_tick = connect_websocket(first_token)
-                    if ws_tick:
-                        print("✅ Permanent Tick WS connected successfully.")
-                    else:
-                        print("❌ Failed to connect Permanent Tick WS. Retrying next loop.")
-                        time.sleep(5)
-                        continue
-                else:
-                    time.sleep(5)
-                    continue
-            
-            # --- تمرير اتصال التيك الثابت إلى دالة التداول ---
-            if active_sessions and ws_tick and ws_tick.connected:
-                for session in active_sessions:
-                    email = session['email']
-                    latest_session_data = get_session_status_from_db(email)
-                    if not latest_session_data or latest_session_data.get('is_running') == 0:
-                        continue
-                        
-                    contract_id = latest_session_data.get('contract_id')
-                    trade_start_time = latest_session_data.get('trade_start_time', 0.0)
-                    
-                    # 1. Check/close active trades after 10 seconds 
-                    if contract_id and (time.time() - trade_start_time) >= 10: 
-                        run_trading_job_for_user(latest_session_data, ws_tick, check_only=True)
+            data = json.load(f)
+        except json.JSONDecodeError:
+            data = {}
+        finally:
+            release_file_lock(f)
+            return data
 
-                    # 2. Logic to place new trades 
-                    if not contract_id: 
-                        re_checked_session_data = get_session_status_from_db(email)
-                        if re_checked_session_data and re_checked_session_data.get('is_running') == 1 and not re_checked_session_data.get('contract_id'):
-                            run_trading_job_for_user(re_checked_session_data, ws_tick, check_only=False) 
-            
-            time.sleep(0.5) 
+def save_session_data(email, session_data):
+    """ حفظ حالة جلسة مستخدم واحد إلى الملف """
+    all_sessions = load_persistent_sessions()
+    all_sessions[email] = session_data
+    
+    with open(ACTIVE_SESSIONS_FILE, 'w') as f:
+        get_file_lock(f)
+        try:
+            json.dump(all_sessions, f, indent=4)
         except Exception as e:
-            print(f"Error in bot_loop main loop: {e}. Attempting to close Tick WS and retrying.")
-            if ws_tick and ws_tick.connected:
-                ws_tick.close()
-                ws_tick = None
-            time.sleep(5)
+            print(f"❌ ERROR saving session data: {e}")
+        finally:
+            release_file_lock(f)
 
-# --- Streamlit App Configuration (Unchanged) ---
-st.set_page_config(page_title="Khoury Bot", layout="wide")
-st.title("Khoury Bot 🤖")
-
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-if "user_email" not in st.session_state:
-    st.session_state.user_email = ""
-if "stats" not in st.session_state:
-    st.session_state.stats = None
+def delete_session_data(email):
+    """ حذف جلسة مستخدم بالكامل من الملف """
+    all_sessions = load_persistent_sessions()
+    if email in all_sessions:
+        del all_sessions[email]
     
-create_table_if_not_exists()
+    with open(ACTIVE_SESSIONS_FILE, 'w') as f:
+        get_file_lock(f)
+        try:
+            json.dump(all_sessions, f, indent=4)
+        except Exception as e:
+            print(f"❌ ERROR deleting session data: {e}")
+        finally:
+            release_file_lock(f)
 
-# --- Global Bot Process Management ---
-bot_status_from_db = get_bot_running_status()
+# ==========================================================
+# دوال إدارة الحالة والمنطق
+# ==========================================================
 
-if bot_status_from_db == 0:
+def get_session_data(email):
+    """ جلب بيانات الجلسة من الملف الثابت """
+    all_sessions = load_persistent_sessions()
+    if email in all_sessions:
+        return all_sessions[email]
+    
+    return DEFAULT_SESSION_STATE.copy()
+
+def load_allowed_users():
+    """ تحميل الإيميلات المسموح بها من user_ids.txt """
+    if not os.path.exists(USER_IDS_FILE):
+        print(f"❌ ERROR: Missing {USER_IDS_FILE} file.")
+        return set()
     try:
-        print("Attempting to start bot process...")
-        bot_process = multiprocessing.Process(target=bot_loop, daemon=True)
-        bot_process.start()
-        print(f"Bot process started with PID: {bot_process.pid}")
-        time.sleep(1) 
+        with open(USER_IDS_FILE, 'r', encoding='utf-8') as f:
+            users = {line.strip().lower() for line in f if line.strip()}
+        return users
     except Exception as e:
-        st.error(f"❌ Error starting bot process: {e}")
-else:
-    print("Bot process is already running (status from DB).")
-# --- End Global Bot Process Management ---
+        print(f"❌ ERROR reading {USER_IDS_FILE}: {e}")
+        return set()
 
-if not st.session_state.logged_in:
-    st.markdown("---")
-    st.subheader("Login")
-    login_form = st.form("login_form")
-    email_input = login_form.text_input("Email")
-    submit_button = login_form.form_submit_button("Login")
+def stop_bot(email):
+    """ إيقاف البوت وحذف جميع بيانات الجلسة من الملف الثابت """
     
-    if submit_button:
-        if is_user_active(email_input):
-            st.session_state.logged_in = True
-            st.session_state.user_email = email_input
-            st.rerun()
-        else:
-            st.error("❌ This email is not active. Please contact the administrator.")
+    # 1. إيقاف الاتصال والخيوط
+    if email in active_ws and active_ws[email]:
+        try:
+            ws = active_ws[email]
+            ws.send(json.dumps({"forget": "ticks", "symbol": SYMBOL}))
+            ws.close()
+        except:
+            pass
+        if email in active_ws:
+             del active_ws[email]
 
-if st.session_state.logged_in:
-    st.markdown("---")
-    st.subheader(f"Welcome, {st.session_state.user_email}")
-    
-    stats_data = get_session_status_from_db(st.session_state.user_email)
-    st.session_state.stats = stats_data
-    
-    is_user_bot_running_in_db = False
-    if st.session_state.stats:
-        is_user_bot_running_in_db = st.session_state.stats.get('is_running', 0) == 1
-    
-    global_bot_status = get_bot_running_status() 
+    # 2. إزالة تسجيل الخيط من الذاكرة (للسماح ببدء خيط جديد)
+    if email in active_threads:
+        del active_threads[email]
 
-    with st.form("settings_and_control"):
-        st.subheader("Bot Settings and Control")
-        user_token_val = ""
-        base_amount_val = 0.35
-        tp_target_val = 10.0
-        max_consecutive_losses_val = 3
+    # 3. حذف حالة المستخدم بالكامل من الملف الثابت (Clean Slate)
+    delete_session_data(email)
+    
+    print(f"🛑 [INFO] Bot for {email} stopped and session data cleared from file.")
+
+# ==========================================================
+# دوال البوت التداولي
+# ==========================================================
+# ... (دوال get_latest_price_digit, send_trade_order, check_pnl_limits, bot_core_logic كما في النسخة المعدلة الأخيرة) ...
+def get_latest_price_digit(price):
+    try:
+        return int(str(price)[-1]) 
+    except Exception:
+        return -1
+
+def send_trade_order(email, stake):
+    if email not in active_ws: return
+    ws_app = active_ws[email]
+    
+    trade_request = {
+        "buy": 1, "price": stake,
+        "parameters": {
+            "amount": stake, "basis": "stake",
+            "contract_type": TRADE_TYPE, "barrier": BARRIER,
+            "currency": "USD", "duration": DURATION,
+            "duration_unit": DURATION_UNIT, "symbol": SYMBOL
+        }
+    }
+    try:
+        ws_app.send(json.dumps(trade_request))
+    except:
+        pass
         
-        if st.session_state.stats:
-            user_token_val = st.session_state.stats.get('user_token', '')
-            base_amount_val = st.session_state.stats.get('base_amount', 0.35)
-            tp_target_val = st.session_state.stats.get('tp_target', 10.0)
-            max_consecutive_losses_val = st.session_state.stats.get('max_consecutive_losses', 3)
-        
-        user_token = st.text_input("Deriv API Token", type="password", value=user_token_val, disabled=is_user_bot_running_in_db)
-        base_amount = st.number_input("Base Bet Amount", min_value=0.35, value=base_amount_val, step=0.1, disabled=is_user_bot_running_in_db)
-        tp_target = st.number_input("Take Profit Target", min_value=10.0, value=tp_target_val, step=3.0, disabled=is_user_bot_running_in_db)
-        max_consecutive_losses = st.number_input("Max Consecutive Losses", min_value=1, value=max_consecutive_losses_val, step=1, disabled=is_user_bot_running_in_db)
-        
-        col_start, col_stop = st.columns(2)
-        with col_start:
-            start_button = st.form_submit_button("Start Bot", disabled=is_user_bot_running_in_db)
-        with col_stop:
-            stop_button = st.form_submit_button("Stop Bot", disabled=not is_user_bot_running_in_db)
+def check_pnl_limits(email, profit_loss):
+    current_data = get_session_data(email)
+    if not current_data.get('is_running'): return
+
+    # تحديث البيانات محلياً
+    current_data['current_profit'] += profit_loss
     
-    if start_button:
-        if not user_token:
-            st.error("Please enter a Deriv API Token to start the bot.")
-        else:
-            settings = {
-                "user_token": user_token,
-                "base_amount": base_amount,
-                "tp_target": tp_target,
-                "max_consecutive_losses": max_consecutive_losses
-            }
-            start_new_session_in_db(st.session_state.user_email, settings)
-            st.success("✅ Bot session started successfully! Now analyzing ticks continuously.")
-            st.rerun()
-
-    if stop_button:
-        update_is_running_status(st.session_state.user_email, 0)
-        st.info("⏸ Your bot session has been stopped. To fully reset stats, click start again.")
-        st.rerun()
-
-    st.markdown("---")
-    st.subheader("Statistics")
-
-    stats_placeholder = st.empty()
-    
-    if global_bot_status == 1:
-        st.success(f"🟢 *Global Bot Service is RUNNING*.")
+    if profit_loss > 0:
+        current_data['total_wins'] += 1
+        current_data['current_step'] = 0
+        current_data['current_stake'] = current_data['base_stake']
+        current_data['consecutive_losses'] = 0
     else:
-        st.error("🔴 *Global Bot Service is STOPPED or Crashed*.")
+        current_data['total_losses'] += 1
+        current_data['consecutive_losses'] += 1
+        
+        # حالة Max Loss: يستدعي stop_bot
+        if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES:
+            stop_bot(email)
+            return 
+        
+        current_data['current_step'] += 1
+        
+        if current_data['current_step'] < MARTINGALE_STEPS:
+            current_data['current_stake'] *= 7
+            send_trade_order(email, current_data['current_stake']) 
+        else:
+            current_data['current_step'] = 0
+            current_data['current_stake'] = current_data['base_stake']
+            send_trade_order(email, current_data['current_stake'])
 
-    balance = None
-    currency = None
-    if st.session_state.user_email:
-        session_data = get_session_status_from_db(st.session_state.user_email)
-        if session_data:
-            user_token_for_balance = session_data.get('user_token')
-            balance, currency = get_balance_and_currency(user_token_for_balance)
-            if balance is not None:
-                st.metric(label=f"Current Balance ({currency or 'USD'})", value=f"${float(balance):.2f}")
+    # حالة TP Target: يستدعي stop_bot
+    if current_data['current_profit'] >= current_data['tp_target']:
+        stop_bot(email)
+        return
+    
+    # حفظ التحديث إلى الملف الثابت
+    save_session_data(email, current_data)
+        
+    print(f"[LOG {email}] PNL: {current_data['current_profit']:.2f}, Stake: {current_data['current_stake']:.2f}")
 
-    if st.session_state.stats:
-        with stats_placeholder.container():
-            stats = st.session_state.stats
-            col1, col2, col3, col4, col5 = st.columns(5)
-            with col1:
-                st.metric(label="Current Bet Amount", value=f"${stats.get('current_amount', 0.0):.2f}")
-            with col2:
-                initial_balance = stats.get('initial_balance', 0.0)
-                current_profit = float(balance or 0.0) - initial_balance if initial_balance > 0 and balance is not None else 0.0
-                st.metric(label="Net Profit/Loss", value=f"${current_profit:.2f}", delta=f"{current_profit:.2f}")
+def bot_core_logic(email, token, stake, tp):
+    # عند البدء، نقوم بتهيئة الحالة في الملف الثابت
+    session_data = DEFAULT_SESSION_STATE.copy()
+    session_data.update({
+        "api_token": token, "base_stake": stake, "tp_target": tp,
+        "is_running": True, "current_stake": stake
+    })
+    
+    # حفظ حالة البدء (Running) إلى الملف الثابت
+    save_session_data(email, session_data)
 
-            with col3:
-                st.metric(label="Total Wins", value=stats.get('total_wins', 0))
-            with col4:
-                st.metric(label="Total Losses", value=stats.get('total_losses', 0))
-            with col5:
-                st.metric(label="Consecutive Losses", value=stats.get('consecutive_losses', 0), delta=f"-{stats.get('max_consecutive_losses', 0) - stats.get('consecutive_losses', 0)} to Stop")
+    def on_open_wrapper(ws_app):
+        ws_app.send(json.dumps({"authorize": token}))
+        ws_app.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
+
+    def on_message_wrapper(ws_app, message):
+        data = json.loads(message)
+        current_data = get_session_data(email) 
+        
+        if not current_data.get('is_running'):
+            ws_app.close()
+            return
             
-            if stats.get('contract_id'):
-                st.warning(f"⚠ Trade Active: {stats.get('contract_id')}. Stats update after completion.")
-            elif stats.get('is_running') == 1:
-                 st.info("🕒 Waiting for next tick where Last Digit != 1 (Continuous Analysis Mode).")
-
-    else:
-        with stats_placeholder.container():
-            st.info("Your bot session is currently stopped or not yet configured.")
+        if data.get('msg_type') == 'tick':
+            last_digit = get_latest_price_digit(data['tick']['quote'])
             
-    time.sleep(1)
-    st.rerun()
+            if current_data.get('is_running') and current_data['consecutive_losses'] == 0 and last_digit == 9: 
+                 send_trade_order(email, current_data['current_stake'])
+
+        elif data.get('msg_type') == 'buy'):
+            contract_id = data['buy']['contract_id']
+            ws_app.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
+        elif data.get('msg_type') == 'proposal_open_contract':
+            contract = data['proposal_open_contract']
+            if contract.get('is_sold') == 1:
+                check_pnl_limits(email, contract['profit']) 
+                if 'subscription_id' in data: ws_app.send(json.dumps({"forget": data['subscription_id']}))
+
+    try:
+        ws = websocket.WebSocketApp(
+            WSS_URL, on_open=on_open_wrapper, on_message=on_message_wrapper, 
+            on_error=lambda ws, err: print(f"[WS Error {email}] {err}"),
+            on_close=lambda ws, code, msg: stop_bot(email)
+        )
+        active_ws[email] = ws
+        ws.run_forever(ping_interval=20, ping_timeout=10) 
+        
+    except Exception as e:
+        print(f"❌ [ERROR] Bot failed for {email}: {e}")
+        stop_bot(email)
+    
+    stop_bot(email) 
+
+# ==========================================================
+# إعداد تطبيق FLASK ومساراته
+# ==========================================================
+app = Flask(__name__)
+app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
+
+AUTH_FORM = """
+<!doctype html>
+<title>Login - Deriv Bot</title>
+<h1>تسجيل الدخول - بوت Deriv</h1>
+<p>يرجى إدخال بريدك الإلكتروني المفعّل:</p>
+{% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+        {% for category, message in messages %}
+            <p style="color:red;">{{ message }}</p>
+        {% endfor %}
+    {% endif %}
+{% endwith %}
+<form method="POST" action="{{ url_for('login') }}">
+    <label for="email">البريد الإلكتروني:</label><br>
+    <input type="email" id="email" name="email" size="50" required><br><br>
+    <button type="submit" style="background-color: blue; color: white; padding: 10px;">دخول</button>
+</form>
+"""
+
+CONTROL_FORM = """
+<!doctype html>
+<title>Control Panel</title>
+{# 🔄 التحديث التلقائي للواجهة كل 5 ثوانٍ #}
+<meta http-equiv="refresh" content="5">
+<h1>لوحة تحكم البوت | المستخدم: {{ email }}</h1>
+<hr>
+
+{% if session_data and session_data.is_running %}
+    <p style="color: green; font-size: 1.2em;">✅ البوت قيد التشغيل!</p>
+    <p>صافي الربح الكلي: ${{ session_data.current_profit|round(2) }}</p>
+    <p>الرهان الحالي: ${{ session_data.current_stake|round(2) }}</p>
+    <p>الخطوة: {{ session_data.current_step + 1 }} / {{ martingale_steps }}</p>
+    <p>الإحصائيات: {{ session_data.total_wins }} رابح | {{ session_data.total_losses }} خاسر</p>
+    
+    <form method="POST" action="{{ url_for('stop_route') }}">
+        <button type="submit" style="background-color: red; color: white; padding: 10px;">🛑 إيقاف البوت</button>
+    </form>
+{% else %}
+    <p style="color: red; font-size: 1.2em;">🛑 البوت متوقف. يرجى إدخال الإعدادات لبدء جلسة جديدة.</p>
+    <form method="POST" action="{{ url_for('start_bot') }}">
+        <label for="token">Deriv API Token:</label><br>
+        <input type="text" id="token" name="token" size="50" required value=""><br><br>
+        
+        <label for="stake">Base Stake (USD):</label><br>
+        <input type="number" id="stake" name="stake" value="{{ session_data.base_stake|round(2) if session_data else 1.0 }}" step="0.01" required><br><br>
+        
+        <label for="tp">TP Target (USD):</label><br>
+        <input type="number" id="tp" name="tp" value="{{ session_data.tp_target|round(2) if session_data else 10.0 }}" step="0.01" required><br><br>
+        
+        <button type="submit" style="background-color: green; color: white; padding: 10px;">🚀 بدء التشغيل</button>
+    </form>
+{% endif %}
+<hr>
+<a href="{{ url_for('logout') }}">تسجيل الخروج</a>
+"""
+
+
+@app.route('/')
+def index():
+    if 'email' not in session:
+        return redirect(url_for('auth_page'))
+    
+    email = session['email']
+    session_data = get_session_data(email)
+
+    return render_template_string(CONTROL_FORM, 
+        email=email,
+        session_data=session_data,
+        martingale_steps=MARTINGALE_STEPS
+    )
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        email = request.form['email'].lower()
+        allowed_users = load_allowed_users()
+        
+        if email in allowed_users:
+            session['email'] = email
+            flash('تم الدخول بنجاح.', 'success')
+            # لا نحتاج لـ get_session_data هنا، بل يتم ذلك في index
+            return redirect(url_for('index'))
+        else:
+            flash('البريد الإلكتروني غير مفعل.', 'error')
+            return redirect(url_for('auth_page'))
+    
+    return redirect(url_for('auth_page'))
+
+@app.route('/auth')
+def auth_page():
+    if 'email' in session:
+        return redirect(url_for('index'))
+    return render_template_string(AUTH_FORM)
+
+@app.route('/start', methods=['POST'])
+def start_bot():
+    if 'email' not in session:
+        return redirect(url_for('auth_page'))
+    
+    email = session['email']
+    
+    if email in active_threads:
+        flash('البوت يعمل بالفعل. يرجى إيقافه أولاً.', 'info')
+        return redirect(url_for('index'))
+        
+    try:
+        token = request.form['token']
+        stake = float(request.form['stake'])
+        tp = float(request.form['tp'])
+    except ValueError:
+        flash("قيمة غير صحيحة للرهان أو TP.", 'error')
+        return redirect(url_for('index'))
+        
+    thread = threading.Thread(target=bot_core_logic, args=(email, token, stake, tp))
+    thread.daemon = True
+    thread.start()
+    active_threads[email] = thread
+    
+    flash('بدأ تشغيل البوت بنجاح.', 'success')
+    return redirect(url_for('index'))
+
+@app.route('/stop', methods=['POST'])
+def stop_route():
+    if 'email' not in session:
+        return redirect(url_for('auth_page'))
+    
+    stop_bot(session['email'])
+    flash('تم إيقاف البوت ومسح بيانات الجلسة.', 'success')
+    return redirect(url_for('index'))
+
+@app.route('/logout')
+def logout():
+    session.pop('email', None)
+    flash('تم تسجيل الخروج.', 'success')
+    return redirect(url_for('auth_page'))
+
+
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
