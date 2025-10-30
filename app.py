@@ -11,13 +11,12 @@ from flask import Flask, request, render_template_string, redirect, url_for, ses
 # الإعدادات الثابتة للبوت
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
-SYMBOL = "R_100"          # زوج Volatility 100 Index
-# يتم تعريف TRADE_TYPE و BARRIER بشكل ديناميكي لتطبيق الاستراتيجية
+SYMBOL = "R_100"          
 DURATION = 1 
 DURATION_UNIT = "t" 
 MARTINGALE_STEPS = 4 
-MAX_CONSECUTIVE_LOSSES = 2
-RECONNECT_DELAY = 1       # فترة انتظار قبل محاولة إعادة الاتصال (1 ثانية)
+MAX_CONSECUTIVE_LOSSES = 2 # 👈 تم التعديل: حد الإيقاف بعد خسارتين متتاليتين
+RECONNECT_DELAY = 1       
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json" 
 # ==========================================================
@@ -43,7 +42,7 @@ DEFAULT_SESSION_STATE = {
     "current_step": 0,
     "total_wins": 0,
     "total_losses": 0,
-    "current_trade_state": TRADE_STATE_DEFAULT # لتتبع نوع العقد الحالي
+    "current_trade_state": TRADE_STATE_DEFAULT 
 }
 # ==========================================================
 
@@ -111,7 +110,6 @@ def delete_session_data(email):
 def get_session_data(email):
     all_sessions = load_persistent_sessions()
     if email in all_sessions:
-        # ضمان وجود current_trade_state
         data = all_sessions[email]
         if 'current_trade_state' not in data:
              data['current_trade_state'] = TRADE_STATE_DEFAULT
@@ -135,6 +133,7 @@ def stop_bot(email, clear_data=True):
     """ إيقاف البوت. إذا كانت clear_data=True، يتم مسح البيانات بالكامل (إيقاف صريح). """
     global is_contract_open 
     
+    # 1. إغلاق اتصال WebSocket إن وجد
     if email in active_ws and active_ws[email]:
         try:
             ws = active_ws[email]
@@ -145,21 +144,26 @@ def stop_bot(email, clear_data=True):
         if email in active_ws:
              del active_ws[email]
 
-    if email in active_threads:
+    # 2. تحديث حالة التشغيل (هام لحلقة while True)
+    current_data = get_session_data(email)
+    if current_data.get("is_running") is True:
+        current_data["is_running"] = False
+        save_session_data(email, current_data) # حفظ حالة التوقف
+
+    # 3. إزالة تسجيل الخيط
+    if clear_data and email in active_threads:
         del active_threads[email]
         
     if email in is_contract_open:
         is_contract_open[email] = False
 
     if clear_data:
+        # 4. حذف الحالة بالكامل (إيقاف صريح/TP/SL)
         delete_session_data(email)
         print(f"🛑 [INFO] Bot for {email} stopped and session data cleared from file.")
     else:
-        current_data = get_session_data(email)
-        if current_data.get("is_running") is True:
-             current_data["is_running"] = False
-             save_session_data(email, current_data)
-        print(f"⚠️ [INFO] Bot for {email} stopped by disconnection. Will retry soon.")
+        # 4. حالة الانقطاع (Soft Stop): فقط نغلق WS، ونعتمد على الحلقة لإعادة الاتصال
+        print(f"⚠️ [INFO] WS closed for {email}. Attempting immediate reconnect.")
 
 # ==========================================================
 # دوال البوت التداولي
@@ -172,16 +176,17 @@ def get_latest_price_digit(price):
         return -1
 
 def calculate_martingale_stake(base_stake, current_stake, current_step):
-    """ منطق المضاعفة: ضرب الرهان الخاسر في 7 """
+    """ منطق المضاعفة: ضرب الرهان الخاسر في 19 """
     if current_step == 0:
         return base_stake
         
     if current_step <= MARTINGALE_STEPS:
-        return current_stake * 19
+        return current_stake * 19 # 👈 تم التعديل: معامل المضاعفة
     else:
         return base_stake
 
 def send_trade_order(email, stake, trade_type, barrier):
+    """ إرسال طلب التداول الفعلي باستخدام نوع العقد والحاجز المُمررين. """
     global is_contract_open 
     if email not in active_ws: return
     ws_app = active_ws[email]
@@ -190,7 +195,7 @@ def send_trade_order(email, stake, trade_type, barrier):
         "buy": 1, "price": stake,
         "parameters": {
             "amount": stake, "basis": "stake",
-            "contract_type": trade_type, "barrier": barrier,
+            "contract_type": trade_type, "barrier": barrier, 
             "currency": "USD", "duration": DURATION,
             "duration_unit": DURATION_UNIT, "symbol": SYMBOL
         }
@@ -204,9 +209,7 @@ def send_trade_order(email, stake, trade_type, barrier):
         pass
 
 def re_enter_immediately(email, last_loss_stake):
-    """ 
-    الدخول الفوري بعد الخسارة بصفقة التعويض (DIGITDIFF 9).
-    """
+    """ الدخول الفوري بعد الخسارة بصفقة التعويض (DIGITDIFF 9). """
     current_data = get_session_data(email)
     
     # 1. حساب الرهان المضاعف للصفقة التعويضية
@@ -216,12 +219,12 @@ def re_enter_immediately(email, last_loss_stake):
         current_data['current_step'] 
     )
 
-    # 2. تحديث حالة الصفقة الجديدة
+    # 2. تحديث حالة الصفقة الجديدة إلى المضاعفة (Differs 9)
     current_data['current_stake'] = new_stake
     current_data['current_trade_state'] = TRADE_STATE_MARTINGALE
     save_session_data(email, current_data)
 
-    # 3. إرسال طلب التداول التعويضي
+    # 3. إرسال طلب التداول التعويضي (يتم إرسال diff9 مباشرة هنا)
     send_trade_order(email, new_stake, 
                      TRADE_STATE_MARTINGALE['type'], 
                      TRADE_STATE_MARTINGALE['barrier'])
@@ -254,17 +257,17 @@ def check_pnl_limits(email, profit_loss):
         current_data['consecutive_losses'] += 1
         current_data['current_step'] += 1
         
-        # 2.1. فحص حدود الخسارة
-        if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES:
+        # 2.1. فحص حدود الخسارة (SL)
+        if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES: # 👈 استخدام القيمة المحدثة (2)
             stop_bot(email, clear_data=True) 
             return 
         
-        # 2.2. الدخول الفوري بصفقة التعويض (المضاعفة الفورية)
-        save_session_data(email, current_data) # حفظ الحالة قبل الدخول
-        re_enter_immediately(email, last_stake) # الدخول الفوري
-        return # عدم المتابعة لتحديث الـ PNL في هذه النقطة لتجنب إرسال طلبين
+        # 2.2. الدخول الفوري بصفقة التعويض
+        save_session_data(email, current_data) 
+        re_enter_immediately(email, last_stake) 
+        return
 
-    # 3. فحص TP والـ SL (للربح فقط، الخسارة تمت معالجتها أعلاه)
+    # 3. فحص TP
     if current_data['current_profit'] >= current_data['tp_target']:
         stop_bot(email, clear_data=True) 
         return
@@ -281,14 +284,15 @@ def bot_core_logic(email, token, stake, tp):
     is_contract_open[email] = False
 
     session_data = get_session_data(email)
+    # التأكيد على أن البوت يبدأ دائماً بالوضع الافتراضي عند التشغيل الجديد
     session_data.update({
         "api_token": token, "base_stake": stake, "tp_target": tp,
         "is_running": True, "current_stake": stake,
-        "current_trade_state": TRADE_STATE_DEFAULT # بدءاً بـ Differs 0
+        "current_trade_state": TRADE_STATE_DEFAULT 
     })
     save_session_data(email, session_data)
 
-    while True: # 👈 حلقة إعادة الاتصال الرئيسية
+    while True: # 👈 حلقة إعادة الاتصال الرئيسية: لن تتوقف إلا إذا تم إيقافها يدوياً أو بـ TP/SL
         current_data = get_session_data(email)
         
         if not current_data.get('is_running'):
@@ -315,30 +319,37 @@ def bot_core_logic(email, token, stake, tp):
                 return
                 
             if msg_type == 'tick':
-                # منع الدخول إذا كانت هناك صفقة مفتوحة بالفعل
                 if is_contract_open.get(email) is True: 
                     return 
                 
-                # شرط الدخول ينطبق فقط في حالة TRADE_STATE_DEFAULT (Differs 0)
-                if current_data['current_trade_state'] == TRADE_STATE_DEFAULT:
-                    last_digit = get_latest_price_digit(data['tick']['quote'])
+                # نحصل على الرقم الأخير
+                last_digit = get_latest_price_digit(data['tick']['quote'])
+                
+                # المنطق المُصحح للدخول (يعتمد على الحالة المحفوظة في الملف)
+                current_trade_state = current_data['current_trade_state']
+                stake_to_use = current_data['current_stake']
+                
+                if current_trade_state['barrier'] == TRADE_STATE_MARTINGALE['barrier']:
+                    # إذا كانت الحالة هي المضاعفة (diff9)، ندخل فوراً
+                    send_trade_order(email, stake_to_use, 
+                                     current_trade_state['type'], 
+                                     current_trade_state['barrier'])
                     
-                    # شرط الدخول: الدخول إذا كان الرقم الأخير هو 9 
+                elif current_trade_state['barrier'] == TRADE_STATE_DEFAULT['barrier']:
+                    # إذا كانت الحالة هي الافتراضية (diff0)، ننتظر رقم 9
                     if last_digit == 9: 
-                        
-                        # حساب الرهان الأساسي
-                        current_stake = current_data['base_stake']
-                        
-                        # تحديث الـ stake المحسوب (هنا هو الأساسي)
-                        current_data['current_stake'] = current_stake
+                        # نستخدم الـ Base Stake لأنه وضع الدخول الافتراضي
+                        stake_to_use = current_data['base_stake']
+                        current_data['current_stake'] = stake_to_use 
                         save_session_data(email, current_data)
 
-                        send_trade_order(email, current_stake, 
-                                         TRADE_STATE_DEFAULT['type'], 
-                                         TRADE_STATE_DEFAULT['barrier'])
+                        send_trade_order(email, stake_to_use, 
+                                         current_trade_state['type'], 
+                                         current_trade_state['barrier'])
 
             elif msg_type == 'buy':
                 contract_id = data['buy']['contract_id']
+                # اشتراك لمتابعة الصفقة لضمان معرفة النتيجة حتى بعد الانقطاع
                 ws_app.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
             elif msg_type == 'proposal_open_contract':
                 contract = data['proposal_open_contract']
@@ -347,6 +358,7 @@ def bot_core_logic(email, token, stake, tp):
                     if 'subscription_id' in data: ws_app.send(json.dumps({"forget": data['subscription_id']}))
 
         def on_close_wrapper(ws_app, code, msg):
+             # 🛑 لا نغير حالة is_running لضمان إعادة التشغيل
              stop_bot(email, clear_data=False) 
 
         try:
@@ -361,6 +373,7 @@ def bot_core_logic(email, token, stake, tp):
         except Exception as e:
             print(f"❌ [ERROR] WebSocket failed for {email}: {e}")
         
+        # فحص إذا تم إيقاف البوت يدوياً (break).
         if get_session_data(email).get('is_running') is False:
              break
         
