@@ -15,7 +15,7 @@ SYMBOL = "R_100"
 DURATION = 1 
 DURATION_UNIT = "t" 
 MARTINGALE_STEPS = 4 
-MAX_CONSECUTIVE_LOSSES = 2 # 👈 تم التعديل: حد الإيقاف بعد خسارتين متتاليتين
+MAX_CONSECUTIVE_LOSSES = 2 # حد الإيقاف بعد خسارتين متتاليتين
 RECONNECT_DELAY = 1       
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json" 
@@ -181,7 +181,7 @@ def calculate_martingale_stake(base_stake, current_stake, current_step):
         return base_stake
         
     if current_step <= MARTINGALE_STEPS:
-        return current_stake * 19 # 👈 تم التعديل: معامل المضاعفة
+        return current_stake * 19 # معامل المضاعفة
     else:
         return base_stake
 
@@ -258,7 +258,7 @@ def check_pnl_limits(email, profit_loss):
         current_data['current_step'] += 1
         
         # 2.1. فحص حدود الخسارة (SL)
-        if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES: # 👈 استخدام القيمة المحدثة (2)
+        if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES: 
             stop_bot(email, clear_data=True) 
             return 
         
@@ -419,7 +419,7 @@ CONTROL_FORM = """
 <hr>
 
 {% if session_data and session_data.is_running %}
-    <p style="color: green; font-size: 1.2em;">✅ البوت قيد التشغيل! (يرجى التحديث يدوياً)</p>
+    <p style="color: green; font-size: 1.2em;">✅ البوت قيد التشغيل! (يتم التحديث تلقائياً)</p>
     <p>صافي الربح الكلي: ${{ session_data.current_profit|round(2) }}</p>
     <p>الرهان الحالي: ${{ session_data.current_stake|round(2) }}</p>
     <p>الخطوة: {{ session_data.current_step }} / {{ martingale_steps }}</p>
@@ -446,6 +446,24 @@ CONTROL_FORM = """
 {% endif %}
 <hr>
 <a href="{{ url_for('logout') }}">تسجيل الخروج</a>
+
+<script>
+    // ⚠️ كود JavaScript للتحديث التلقائي المشروط
+    function autoRefresh() {
+        // نتحقق من حالة تشغيل البوت الممررة من Flask
+        var isRunning = {{ 'true' if session_data and session_data.is_running else 'false' }};
+        
+        if (isRunning) {
+            // إذا كان البوت يعمل، نحدث الصفحة كل 1000 مللي ثانية (ثانية واحدة)
+            setTimeout(function() {
+                window.location.reload();
+            }, 1000);
+        }
+    }
+
+    // ابدأ عملية التحديث عند تحميل الصفحة
+    autoRefresh();
+</script>
 """
 
 # ==========================================================
@@ -525,6 +543,7 @@ def stop_route():
     if 'email' not in session:
         return redirect(url_for('auth_page'))
     
+    # عند الإيقاف، يتم حفظ حالة is_running=False في الملف
     stop_bot(session['email'], clear_data=True) 
     flash('تم إيقاف البوت ومسح بيانات الجلسة.', 'success')
     return redirect(url_for('index'))
