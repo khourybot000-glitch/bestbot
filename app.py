@@ -16,7 +16,7 @@ SYMBOL = "R_100"          # زوج Volatility 100 Index
 DURATION = 1 
 DURATION_UNIT = "t" 
 MARTINGALE_STEPS = 4 
-MAX_CONSECUTIVE_LOSSES = 3
+MAX_CONSECUTIVE_LOSSES = 2
 RECONNECT_DELAY = 1       # فترة انتظار قبل محاولة إعادة الاتصال (1 ثانية)
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json" 
@@ -177,7 +177,7 @@ def calculate_martingale_stake(base_stake, current_stake, current_step):
         return base_stake
         
     if current_step <= MARTINGALE_STEPS:
-        return current_stake * 7
+        return current_stake * 19
     else:
         return base_stake
 
