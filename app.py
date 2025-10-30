@@ -29,10 +29,9 @@ active_threads = {}
 active_ws = {} 
 is_contract_open = {} 
 # Trading State Definitions
-# ⚠️ Initial Entry: Wait for 9, then trade Differs 8
-TRADE_STATE_DEFAULT = {"type": "DIGITDIFF", "barrier": 8} 
-# Recovery after loss: Differs 9
-TRADE_STATE_MARTINGALE = {"type": "DIGITDIFF", "barrier": 9} 
+# ⚠️ Dynamic Barrier: Barrier is None, calculated dynamically (last_digit - 1) for ALL trades.
+TRADE_STATE_DEFAULT = {"type": "DIGITDIFF", "barrier": None} 
+TRADE_STATE_MARTINGALE = {"type": "DIGITDIFF", "barrier": None} # Same as Default, just indicates Martingale mode
 
 DEFAULT_SESSION_STATE = {
     "api_token": "",
@@ -54,7 +53,6 @@ DEFAULT_SESSION_STATE = {
 # ==========================================================
 def get_file_lock(f):
     try:
-        # Exclusive lock to ensure thread-safe file access
         fcntl.flock(f.fileno(), fcntl.LOCK_EX)
     except Exception:
         pass
@@ -213,7 +211,9 @@ def send_trade_order(email, stake, trade_type, barrier):
         pass
 
 def re_enter_immediately(email, last_loss_stake):
-    """ Immediate entry after a loss with the recovery trade (DIGITDIFF 9). """
+    """ Immediate entry after a loss using the calculated Martingale stake and dynamic barrier. 
+        Updates stake and state, relies on the next tick to trigger the trade.
+    """
     current_data = get_session_data(email)
     
     # 1. Calculate the compounded stake for the recovery trade
@@ -223,15 +223,12 @@ def re_enter_immediately(email, last_loss_stake):
         current_data['current_step'] 
     )
 
-    # 2. Update the new trade state to Martingale (Differs 9)
+    # 2. Update the new stake and state to Martingale (dynamic)
     current_data['current_stake'] = new_stake
     current_data['current_trade_state'] = TRADE_STATE_MARTINGALE
     save_session_data(email, current_data)
-
-    # 3. Send the recovery trade order (diff9 is sent immediately here)
-    send_trade_order(email, new_stake, 
-                     TRADE_STATE_MARTINGALE['type'], 
-                     TRADE_STATE_MARTINGALE['barrier'])
+    
+    # The actual trade will be sent on the next incoming tick.
 
 
 def check_pnl_limits(email, profit_loss):
@@ -248,7 +245,7 @@ def check_pnl_limits(email, profit_loss):
     current_data['current_profit'] += profit_loss
     
     if profit_loss > 0:
-        # 1. Win: Reset and prepare for the default entry (Differs 8)
+        # 1. Win: Reset and prepare for the base stake entry
         current_data['total_wins'] += 1
         current_data['current_step'] = 0 
         current_data['consecutive_losses'] = 0
@@ -256,7 +253,7 @@ def check_pnl_limits(email, profit_loss):
         current_data['current_trade_state'] = TRADE_STATE_DEFAULT
         
     else:
-        # 2. Loss: Increase step and attempt immediate recovery
+        # 2. Loss: Increase step and attempt immediate recovery (re_enter_immediately handles stake update)
         current_data['total_losses'] += 1
         current_data['consecutive_losses'] += 1
         current_data['current_step'] += 1
@@ -266,7 +263,7 @@ def check_pnl_limits(email, profit_loss):
             stop_bot(email, clear_data=True) 
             return 
         
-        # 2.2. Immediate re-entry with recovery trade
+        # 2.2. Immediate re-entry preparation
         save_session_data(email, current_data) 
         re_enter_immediately(email, last_stake) 
         return
@@ -278,7 +275,8 @@ def check_pnl_limits(email, profit_loss):
     
     save_session_data(email, current_data)
         
-    print(f"[LOG {email}] PNL: {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Last Stake: {last_stake:.2f}, State: {current_data['current_trade_state']['type']} {current_data['current_trade_state']['barrier']}")
+    # Logging uses 'Dynamic' as the barrier is calculated per tick
+    print(f"[LOG {email}] PNL: {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Last Stake: {last_stake:.2f}, State: {current_data['current_trade_state']['type']} Dynamic")
 
 
 def bot_core_logic(email, token, stake, tp):
@@ -329,28 +327,22 @@ def bot_core_logic(email, token, stake, tp):
                 # Get the last digit
                 last_digit = get_latest_price_digit(data['tick']['quote'])
                 
-                # Corrected entry logic (depends on the saved state)
-                current_trade_state = current_data['current_trade_state']
+                # 1. Determine the required barrier dynamically (last_digit - 1)
+                if last_digit == 0:
+                    # If last digit is 0, the target is Differs 9 (0 -> 9)
+                    required_barrier = 9 
+                else:
+                    # The dynamic pattern is: target barrier = last_digit - 1
+                    # (9 -> 8, 8 -> 7, ..., 1 -> 0)
+                    required_barrier = last_digit - 1
+                
+                # 2. Get the current stake (this will be the base or martingale stake already set)
                 stake_to_use = current_data['current_stake']
                 
-                if current_trade_state['barrier'] == TRADE_STATE_MARTINGALE['barrier']:
-                    # If state is Martingale (diff9), enter immediately
-                    send_trade_order(email, stake_to_use, 
-                                     current_trade_state['type'], 
-                                     current_trade_state['barrier'])
-                    
-                elif current_trade_state['barrier'] == TRADE_STATE_DEFAULT['barrier']:
-                    # If state is Default (diff8), wait for digit 9
-                    if last_digit == 9: 
-                        # Use the Base Stake as this is the default entry
-                        stake_to_use = current_data['base_stake']
-                        current_data['current_stake'] = stake_to_use 
-                        save_session_data(email, current_data)
-
-                        # Enter with Differs 8
-                        send_trade_order(email, stake_to_use, 
-                                         current_trade_state['type'], 
-                                         current_trade_state['barrier'])
+                # 3. Send the trade with the calculated barrier and current stake
+                send_trade_order(email, stake_to_use, 
+                                TRADE_STATE_DEFAULT['type'], # Always use DIGITDIFF
+                                required_barrier)
 
             elif msg_type == 'buy':
                 contract_id = data['buy']['contract_id']
@@ -495,7 +487,7 @@ CONTROL_FORM = """
     <p>Current Stake: **${{ session_data.current_stake|round(2) }}**</p>
     <p>Step: **{{ session_data.current_step }}** / {{ martingale_steps }}</p>
     <p>Stats: **{{ session_data.total_wins }}** Wins | **{{ session_data.total_losses }}** Losses</p>
-    <p style="font-weight: bold; color: #007bff;">Current State: **{{ session_data.current_trade_state.type }} {{ session_data.current_trade_state.barrier }}**</p>
+    <p style="font-weight: bold; color: #007bff;">Current Strategy: **{{ session_data.current_trade_state.type }} Dynamic Barrier**</p>
     
     <form method="POST" action="{{ url_for('stop_route') }}">
         <button type="submit" style="background-color: red; color: white;">🛑 Stop Bot</button>
