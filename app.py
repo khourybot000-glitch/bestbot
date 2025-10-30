@@ -64,16 +64,15 @@ def load_persistent_sessions():
     if not os.path.exists(ACTIVE_SESSIONS_FILE):
         return {}
     
-    # استخدام 'a+' بدلاً من 'r' لإنشاء الملف إذا لم يكن موجوداً
     with open(ACTIVE_SESSIONS_FILE, 'a+') as f:
-        f.seek(0) # العودة إلى بداية الملف للقراءة
+        f.seek(0)
         get_file_lock(f)
         try:
             content = f.read()
             if content:
                 data = json.loads(content)
             else:
-                data = {} # ملف فارغ
+                data = {}
         except json.JSONDecodeError:
             data = {}
         finally:
@@ -162,13 +161,14 @@ def stop_bot(email):
 # ==========================================================
 
 def get_latest_price_digit(price):
+    """ يحصل على الرقم الأخير من السعر """
     try:
-        # الرقم الأخير من السعر
         return int(str(price)[-1]) 
     except Exception:
         return -1
 
 def send_trade_order(email, stake):
+    """ يرسل أمر التداول إلى Deriv """
     if email not in active_ws: return
     ws_app = active_ws[email]
     
@@ -187,6 +187,7 @@ def send_trade_order(email, stake):
         pass
         
 def check_pnl_limits(email, profit_loss):
+    """ يتحقق من حدود الربح/الخسارة ويطبق المارتينجال """
     current_data = get_session_data(email)
     if not current_data.get('is_running'): return
 
@@ -230,6 +231,7 @@ def check_pnl_limits(email, profit_loss):
     print(f"[LOG {email}] PNL: {current_data['current_profit']:.2f}, Stake: {current_data['current_stake']:.2f}")
 
 def bot_core_logic(email, token, stake, tp):
+    """ المنطق الأساسي لتشغيل البوت في خيط منفصل """
     # عند البدء، نقوم بتهيئة الحالة في الملف الثابت
     session_data = DEFAULT_SESSION_STATE.copy()
     session_data.update({
@@ -255,11 +257,10 @@ def bot_core_logic(email, token, stake, tp):
         if data.get('msg_type') == 'tick':
             last_digit = get_latest_price_digit(data['tick']['quote'])
             
-            # شرط الدخول: الدخول بـ Base Stake فقط إذا كانت الخسائر المتتالية صفر والرقم الأخير هو 9
-            if current_data.get('is_running') and current_data['consecutive_losses'] == 0 and last_digit == 9: 
+            # 🛑🛑🛑 شرط الدخول الجديد: الدخول إذا كان الرقم الأخير هو 1 🛑🛑🛑
+            if current_data.get('is_running') and current_data['consecutive_losses'] == 0 and last_digit == 1: 
                  send_trade_order(email, current_data['current_stake'])
 
-        # 🛑🛑🛑 تم تصحيح الخطأ في هذا السطر (إزالة القوس الزائد) 🛑🛑🛑
         elif data.get('msg_type') == 'buy':
             contract_id = data['buy']['contract_id']
             ws_app.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
@@ -311,11 +312,10 @@ AUTH_FORM = """
 </form>
 """
 
-# قوالب HTML (CONTROL_FORM) - تم إزالة التحديث التلقائي
+# قوالب HTML (CONTROL_FORM) - تم إزالة التحديث التلقائي وإضافة min="0.35"
 CONTROL_FORM = """
 <!doctype html>
 <title>Control Panel</title>
-{# ⚠️ ملاحظة: تم إزالة التحديث التلقائي لتتمكن من إدخال الـ Token، يجب تحديث الصفحة يدوياً (F5) #}
 <h1>لوحة تحكم البوت | المستخدم: {{ email }}</h1>
 <hr>
 
@@ -336,7 +336,7 @@ CONTROL_FORM = """
         <input type="text" id="token" name="token" size="50" required value=""><br><br>
         
         <label for="stake">Base Stake (USD):</label><br>
-        <input type="number" id="stake" name="stake" value="{{ session_data.base_stake|round(2) if session_data else 1.0 }}" step="0.01" required><br><br>
+        <input type="number" id="stake" name="stake" value="{{ session_data.base_stake|round(2) if session_data else 0.35 }}" step="0.01" min="0.35" required><br><br>
         
         <label for="tp">TP Target (USD):</label><br>
         <input type="number" id="tp" name="tp" value="{{ session_data.tp_target|round(2) if session_data else 10.0 }}" step="0.01" required><br><br>
@@ -430,5 +430,4 @@ def logout():
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
-    # هذا الجزء سيتم تجاوزه إذا استخدمت Gunicorn (الموصى به)
     app.run(host='0.0.0.0', port=port, debug=False)
