@@ -4,7 +4,7 @@ import websocket
 import threading
 import os 
 import sys 
-import fcntl # مطلوب لقفل الملفات
+import fcntl # مطلوب لقفل الملفات (لبيئة الإنتاج)
 from flask import Flask, request, render_template_string, redirect, url_for, session, flash, g
 
 # ==========================================================
@@ -22,7 +22,7 @@ USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json" # قاعدة البيانات الدائمة
 
 # ==========================================================
-# حالة البوت في الذاكرة (لإدارة الخيوط النشطة في هذه العملية)
+# حالة البوت في الذاكرة (Runtime Cache)
 # ==========================================================
 active_threads = {} 
 active_ws = {} 
@@ -64,10 +64,16 @@ def load_persistent_sessions():
     if not os.path.exists(ACTIVE_SESSIONS_FILE):
         return {}
     
-    with open(ACTIVE_SESSIONS_FILE, 'r') as f:
+    # استخدام 'a+' بدلاً من 'r' لإنشاء الملف إذا لم يكن موجوداً
+    with open(ACTIVE_SESSIONS_FILE, 'a+') as f:
+        f.seek(0) # العودة إلى بداية الملف للقراءة
         get_file_lock(f)
         try:
-            data = json.load(f)
+            content = f.read()
+            if content:
+                data = json.loads(content)
+            else:
+                data = {} # ملف فارغ
         except json.JSONDecodeError:
             data = {}
         finally:
@@ -154,9 +160,10 @@ def stop_bot(email):
 # ==========================================================
 # دوال البوت التداولي
 # ==========================================================
-# ... (دوال get_latest_price_digit, send_trade_order, check_pnl_limits, bot_core_logic كما في النسخة المعدلة الأخيرة) ...
+
 def get_latest_price_digit(price):
     try:
+        # الرقم الأخير من السعر
         return int(str(price)[-1]) 
     except Exception:
         return -1
@@ -202,10 +209,12 @@ def check_pnl_limits(email, profit_loss):
         
         current_data['current_step'] += 1
         
+        # تطبيق المارتينجال
         if current_data['current_step'] < MARTINGALE_STEPS:
             current_data['current_stake'] *= 7
             send_trade_order(email, current_data['current_stake']) 
         else:
+            # إعادة التعيين بعد تجاوز خطوات المارتينجال
             current_data['current_step'] = 0
             current_data['current_stake'] = current_data['base_stake']
             send_trade_order(email, current_data['current_stake'])
@@ -246,9 +255,11 @@ def bot_core_logic(email, token, stake, tp):
         if data.get('msg_type') == 'tick':
             last_digit = get_latest_price_digit(data['tick']['quote'])
             
+            # شرط الدخول: الدخول بـ Base Stake فقط إذا كانت الخسائر المتتالية صفر والرقم الأخير هو 9
             if current_data.get('is_running') and current_data['consecutive_losses'] == 0 and last_digit == 9: 
                  send_trade_order(email, current_data['current_stake'])
 
+        # 🛑🛑🛑 تم تصحيح الخطأ في هذا السطر (إزالة القوس الزائد) 🛑🛑🛑
         elif data.get('msg_type') == 'buy':
             contract_id = data['buy']['contract_id']
             ws_app.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
@@ -273,12 +284,14 @@ def bot_core_logic(email, token, stake, tp):
     
     stop_bot(email) 
 
+
 # ==========================================================
 # إعداد تطبيق FLASK ومساراته
 # ==========================================================
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
 
+# قوالب HTML (AUTH_FORM)
 AUTH_FORM = """
 <!doctype html>
 <title>Login - Deriv Bot</title>
@@ -298,16 +311,16 @@ AUTH_FORM = """
 </form>
 """
 
+# قوالب HTML (CONTROL_FORM) - تم إزالة التحديث التلقائي
 CONTROL_FORM = """
 <!doctype html>
 <title>Control Panel</title>
-{# 🔄 التحديث التلقائي للواجهة كل 5 ثوانٍ #}
-<meta http-equiv="refresh" content="5">
+{# ⚠️ ملاحظة: تم إزالة التحديث التلقائي لتتمكن من إدخال الـ Token، يجب تحديث الصفحة يدوياً (F5) #}
 <h1>لوحة تحكم البوت | المستخدم: {{ email }}</h1>
 <hr>
 
 {% if session_data and session_data.is_running %}
-    <p style="color: green; font-size: 1.2em;">✅ البوت قيد التشغيل!</p>
+    <p style="color: green; font-size: 1.2em;">✅ البوت قيد التشغيل! (يرجى التحديث يدوياً)</p>
     <p>صافي الربح الكلي: ${{ session_data.current_profit|round(2) }}</p>
     <p>الرهان الحالي: ${{ session_data.current_stake|round(2) }}</p>
     <p>الخطوة: {{ session_data.current_step + 1 }} / {{ martingale_steps }}</p>
@@ -359,7 +372,6 @@ def login():
         if email in allowed_users:
             session['email'] = email
             flash('تم الدخول بنجاح.', 'success')
-            # لا نحتاج لـ get_session_data هنا، بل يتم ذلك في index
             return redirect(url_for('index'))
         else:
             flash('البريد الإلكتروني غير مفعل.', 'error')
@@ -418,4 +430,5 @@ def logout():
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
+    # هذا الجزء سيتم تجاوزه إذا استخدمت Gunicorn (الموصى به)
     app.run(host='0.0.0.0', port=port, debug=False)
