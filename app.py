@@ -52,7 +52,7 @@ DEFAULT_SESSION_STATE = {
 # ==========================================================
 
 # ==========================================================
-# PERSISTENT STATE MANAGEMENT FUNCTIONS
+# PERSISTENT STATE MANAGEMENT FUNCTIONS (No change needed here)
 # ==========================================================
 def get_file_lock(f):
     try:
@@ -184,10 +184,12 @@ def calculate_martingale_stake(base_stake, current_stake, current_step):
         return base_stake
         
     if current_step <= MARTINGALE_STEPS:
+        # لا نحتاج للتقريب هنا، التقريب سيتم في دالة send_trade_order
         return current_stake * 2.2 
     else:
         return base_stake
 
+# ⚠ تم تعديل هذه الدالة
 def send_trade_order(email, stake, contract_type):
     """ 
     Send the actual trade order using the Rise/Fall contract type. 
@@ -197,14 +199,14 @@ def send_trade_order(email, stake, contract_type):
     if email not in active_ws: return
     ws_app = active_ws[email]
     
-    # تقريب الـ stake إلى رقمين عشريين
+    # 🚨 التعديل الرئيسي: تقريب الـ stake إلى رقمين عشريين
     rounded_stake = round(stake, 2)
     
     trade_request = {
         "buy": 1, 
-        "price": rounded_stake,  
+        "price": rounded_stake,  # استخدام القيمة المقربة
         "parameters": {
-            "amount": rounded_stake, 
+            "amount": rounded_stake, # استخدام القيمة المقربة
             "basis": "stake",
             "contract_type": contract_type, 
             "currency": "USD", "duration": DURATION,
@@ -279,6 +281,7 @@ def check_pnl_limits(email, profit_loss):
     save_session_data(email, current_data)
         
     state = current_data['current_trade_state']
+    # 🚨 تم تغيير الـ last_stake إلى rounded_stake للعرض فقط
     rounded_last_stake = round(last_stake, 2)
     print(f"[LOG {email}] PNL: {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Last Stake: {rounded_last_stake:.2f}, State: {state['type']}")
 
@@ -371,18 +374,15 @@ def bot_core_logic(email, token, stake, tp):
                     # استخدام السعر من آخر تيك
                     entry_price = tick_to_use['price']
                     
-                    # 4. تحديد الاتجاه (Trend Detection) - 🚨 هنا تم عكس الإشارات
+                    # 4. تحديد الاتجاه (Trend Detection)
                     last_price = current_data.get('last_entry_price', 0.0)
                     
                     if last_price == 0.0:
-                        # أول دخول، نختار CALL افتراضيًا
                         contract_type_to_use = "CALL" 
                     elif entry_price > last_price:
-                        # 🔄 ترند صاعد -> ندخل PUT (هبوط)
-                        contract_type_to_use = "PUT" 
+                        contract_type_to_use = "CALL" 
                     elif entry_price < last_price:
-                        # 🔄 ترند هابط -> ندخل CALL (صعود)
-                        contract_type_to_use = "CALL"
+                        contract_type_to_use = "PUT"
                     else:
                         contract_type_to_use = current_data['current_trade_state']['type']
 
@@ -396,7 +396,7 @@ def bot_core_logic(email, token, stake, tp):
                     current_data['current_trade_state']['type'] = contract_type_to_use 
                     save_session_data(email, current_data)
 
-                    # 7. إرسال الصفقة 
+                    # 7. إرسال الصفقة (التقريب سيتم داخل الدالة)
                     send_trade_order(email, stake_to_use, contract_type_to_use)
                     
             elif msg_type == 'buy':
@@ -436,7 +436,7 @@ def bot_core_logic(email, token, stake, tp):
 # ==========================================================
 # FLASK APP SETUP AND ROUTES
 # ==========================================================
-app = Flask(__name__) # ⬅ تم تصحيح هذا السطر
+app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
 app.config['SESSION_PERMANENT'] = False 
 
@@ -533,7 +533,7 @@ CONTROL_FORM = """
 
 {% if session_data and session_data.is_running %}
     {% set current_state = session_data.current_trade_state %}
-    {% set strategy = current_state.type + " (Contrarian/Reversal)" %}
+    {% set strategy = current_state.type + " (Following Trend)" %}
     
     <p class="status-running">✅ Bot is *Running*! (Auto-refreshing)</p>
     <p>Net Profit: *${{ session_data.current_profit|round(2) }}*</p>
@@ -580,7 +580,7 @@ CONTROL_FORM = """
 """
 
 # ==========================================================
-# FLASK ROUTES
+# FLASK ROUTES (No change needed here)
 # ==========================================================
 
 @app.before_request
