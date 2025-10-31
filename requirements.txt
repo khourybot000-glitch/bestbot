@@ -1,5 +1,5 @@
-flask==2.3.3
-requests>=2.28.1
+flask
+requests
 websocket-client
 numpy
 pandas
