@@ -13,10 +13,10 @@ from datetime import timedelta, datetime, timezone
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"          
-DURATION = 15            # مدة العقد 15 تيكس
+DURATION = 15             # مدة العقد 5 تيكس
 DURATION_UNIT = "t" 
-MARTINGALE_STEPS = 6     # الحد الأقصى لخطوات المضاعفة
-MAX_CONSECUTIVE_LOSSES = 6 # الحد الأقصى للخسائر المتتالية
+MARTINGALE_STEPS = 5 
+MAX_CONSECUTIVE_LOSSES = 6 # حد الخسارة: 5 خسارات متتالية
 RECONNECT_DELAY = 1       
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json" 
@@ -29,8 +29,8 @@ active_threads = {}
 active_ws = {} 
 is_contract_open = {} 
 # Trading State Definitions 
-TRADE_STATE_DEFAULT = {"type": "CALL"}  
-TRADE_STATE_MARTINGALE = {"type": "PUT"}  
+TRADE_STATE_DEFAULT = {"type": "CALL"}  # CALL = Rise
+TRADE_STATE_MARTINGALE = {"type": "PUT"}  # PUT = Fall 
 
 DEFAULT_SESSION_STATE = {
     "api_token": "",
@@ -45,10 +45,9 @@ DEFAULT_SESSION_STATE = {
     "total_losses": 0,
     "current_trade_state": TRADE_STATE_DEFAULT,
     "stop_reason": "Stopped Manually",
-    "last_entry_time": 0,          
-    "last_entry_price": 0.0,       
-    "start_of_minute_price": 0.0,  # لحفظ سعر الثانية 00
-    "last_tick_data": None         
+    "last_entry_time": 0,          # آخر مرة دخل فيها البوت (Timestamp)
+    "last_entry_price": 0.0,       # سعر النقطة الزمنية السابقة
+    "last_tick_data": None         # آخر تيك كامل تم استلامه من Deriv
 }
 # ==========================================================
 
@@ -173,7 +172,7 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
              delete_session_data(email)
              print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}) and session data cleared from file.")
     else:
-        print(f"⚠️ [INFO] WS closed for {email}. Attempting immediate reconnect.")
+        print(f"⚠ [INFO] WS closed for {email}. Attempting immediate reconnect.")
 
 # ==========================================================
 # TRADING BOT FUNCTIONS
@@ -298,7 +297,6 @@ def bot_core_logic(email, token, stake, tp):
         "stop_reason": "Running",
         "last_entry_time": 0,
         "last_entry_price": 0.0,
-        "start_of_minute_price": 0.0,
         "last_tick_data": None
     })
     save_session_data(email, session_data)
@@ -332,64 +330,75 @@ def bot_core_logic(email, token, stake, tp):
             if msg_type == 'tick':
                 current_timestamp = int(data['tick']['epoch'])
                 current_price = float(data['tick']['quote'])
-                current_second = datetime.fromtimestamp(current_timestamp, tz=timezone.utc).second
-
-                # 1. تحديث آخر تيك دائمًا
+                
+                # 1. تحديث آخر تيك تم استلامه دائمًا
                 current_data['last_tick_data'] = {
                     "price": current_price,
                     "timestamp": current_timestamp
                 }
                 
-                # 2. تحديث سعر بداية الدقيقة (عند الثانية 00-01)
-                if current_second == 0 or current_second == 1:
-                    current_data['start_of_minute_price'] = current_price
-                    # لا نحفظ الـ print هذه في الإنتاج لتجنب الكثرة
+                # 2. منطق فحص وقت الدخول
                 
+                # نقاط الدخول المطلوبة بالثواني
+                entry_seconds = [30]
+                
+                # حساب الثواني من التيك المستلم
+                current_second = datetime.fromtimestamp(current_timestamp, tz=timezone.utc).second
+                
+                # تحديد ما إذا كانت الثانية الحالية هي إحدى نقاط الدخول
+                is_entry_time = current_second in entry_seconds
+                
+                # يجب حفظ آخر تيك قبل أي منطق خروج محتمل
                 save_session_data(email, current_data) 
-
-                # 3. منطق فحص وقت الدخول - يتم حصره في الثانية 30 فقط
                 
-                entry_second = 30
-                is_entry_time = current_second == entry_second
-                
-                # إذا كان العقد مفتوح أو لم نصل إلى الثانية 30، نتوقف هنا
-                if is_contract_open.get(email) is True or not is_entry_time: 
+                # إذا كان العقد مفتوح، ننتظر
+                if is_contract_open.get(email) is True: 
                     return 
                     
-                # 4. وصلنا للثانية 30: نقوم بالتحليل والدخول
                 
-                start_price = current_data['start_of_minute_price'] # سعر الثانية 00
-                current_entry_price = current_price                    # سعر الثانية 30
+                # حساب الوقت منذ آخر دخول ناجح (last_entry_time)
+                time_since_last_entry = current_timestamp - current_data['last_entry_time']
                 
-                # نستخدم start_price كـ last_price للمقارنة
-                if start_price == 0.0:
-                    contract_type_to_use = "CALL" 
-                
-                elif current_entry_price > start_price:
-                    # 📈 صعود خلال 30 ثانية -> ندخل CALL (متابعة الاتجاه)
-                    contract_type_to_use = "CALL" 
-                    print(f"📈 [ENTRY] Trend: Rise ({start_price} -> {current_entry_price}). Entering CALL.")
+                # ⚠ إذا تجاوزنا 14 ثانية ووصلنا إلى نقطة دخول جديدة
+                if time_since_last_entry >= 14 and is_entry_time: 
                     
-                elif current_entry_price < start_price:
-                    # 📉 هبوط خلال 30 ثانية -> ندخل PUT (متابعة الاتجاه)
-                    contract_type_to_use = "PUT"
-                    print(f"📉 [ENTRY] Trend: Fall ({start_price} -> {current_entry_price}). Entering PUT.")
-                else:
-                    # لم يتغير السعر، نستخدم القرار الأخير
-                    contract_type_to_use = current_data['current_trade_state']['type']
-                    print(f"🔄 [ENTRY] Trend: Neutral. Entering {contract_type_to_use}.")
+                    # 3. نستخدم آخر تيك تم تخزينه للدخول
+                    tick_to_use = current_data['last_tick_data']
+                    
+                    if tick_to_use is None:
+                        return # لا يوجد تيك بعد، انتظر
 
-                # 5. حفظ البيانات وإرسال الصفقة
-                current_data['current_trade_state']['type'] = contract_type_to_use
-                current_data['last_entry_time'] = current_timestamp
-                current_data['last_entry_price'] = current_entry_price 
-                
-                save_session_data(email, current_data)
+                    # استخدام السعر من آخر تيك
+                    entry_price = tick_to_use['price']
+                    
+                    # 4. تحديد الاتجاه (Trend Detection) - 🚨 هنا تم عكس الإشارات
+                    last_price = current_data.get('last_entry_price', 0.0)
+                    
+                    if last_price == 0.0:
+                        # أول دخول، نختار CALL افتراضيًا
+                        contract_type_to_use = "CALL" 
+                    elif entry_price > last_price:
+                        # 🔄 ترند صاعد -> ندخل PUT (هبوط)
+                        contract_type_to_use = "PUT" 
+                    elif entry_price < last_price:
+                        # 🔄 ترند هابط -> ندخل CALL (صعود)
+                        contract_type_to_use = "CALL"
+                    else:
+                        contract_type_to_use = current_data['current_trade_state']['type']
 
-                # إرسال الصفقة 
-                stake_to_use = current_data['current_stake']
-                send_trade_order(email, stake_to_use, contract_type_to_use)
-                
+                    
+                    # 5. تحديد مبلغ الرهان
+                    stake_to_use = current_data['current_stake']
+                    
+                    # 6. حفظ بيانات نقطة الدخول الجديدة
+                    current_data['last_entry_price'] = entry_price
+                    current_data['last_entry_time'] = current_timestamp # تحديث وقت الدخول
+                    current_data['current_trade_state']['type'] = contract_type_to_use 
+                    save_session_data(email, current_data)
+
+                    # 7. إرسال الصفقة 
+                    send_trade_order(email, stake_to_use, contract_type_to_use)
+                    
             elif msg_type == 'buy':
                 contract_id = data['buy']['contract_id']
                 ws_app.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
@@ -427,7 +436,7 @@ def bot_core_logic(email, token, stake, tp):
 # ==========================================================
 # FLASK APP SETUP AND ROUTES
 # ==========================================================
-app = Flask(__name__) 
+app = Flask(_name_) # ⬅ تم تصحيح هذا السطر
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
 app.config['SESSION_PERMANENT'] = False 
 
@@ -524,20 +533,20 @@ CONTROL_FORM = """
 
 {% if session_data and session_data.is_running %}
     {% set current_state = session_data.current_trade_state %}
-    {% set strategy = "Follow Trend (30s Cycle)" %}
+    {% set strategy = current_state.type + " (Contrarian/Reversal)" %}
     
-    <p class="status-running">✅ Bot is **Running**! (Auto-refreshing)</p>
-    <p>Net Profit: **${{ session_data.current_profit|round(2) }}**</p>
-    <p>Current Stake: **${{ session_data.current_stake|round(2) }}**</p>
-    <p>Step: **{{ session_data.current_step }}** / {{ martingale_steps }}</p>
-    <p>Stats: **{{ session_data.total_wins }}** Wins | **{{ session_data.total_losses }}** Losses</p>
-    <p style="font-weight: bold; color: #007bff;">Current Strategy: **{{ strategy }}**</p>
+    <p class="status-running">✅ Bot is *Running*! (Auto-refreshing)</p>
+    <p>Net Profit: *${{ session_data.current_profit|round(2) }}*</p>
+    <p>Current Stake: *${{ session_data.current_stake|round(2) }}*</p>
+    <p>Step: *{{ session_data.current_step }}* / {{ martingale_steps }}</p>
+    <p>Stats: *{{ session_data.total_wins }}* Wins | *{{ session_data.total_losses }}* Losses</p>
+    <p style="font-weight: bold; color: #007bff;">Current Strategy: *{{ strategy }}*</p>
     
     <form method="POST" action="{{ url_for('stop_route') }}">
         <button type="submit" style="background-color: red; color: white;">🛑 Stop Bot</button>
     </form>
 {% else %}
-    <p class="status-stopped">🛑 Bot is **Stopped**. Enter settings to start a new session.</p>
+    <p class="status-stopped">🛑 Bot is *Stopped*. Enter settings to start a new session.</p>
     <form method="POST" action="{{ url_for('start_bot') }}">
         <label for="token">Deriv API Token:</label><br>
         <input type="text" id="token" name="token" required value="{{ session_data.api_token if session_data else '' }}" {% if session_data and session_data.api_token and session_data.is_running is not none %}readonly{% endif %}><br>
@@ -690,6 +699,6 @@ def logout():
     return redirect(url_for('auth_page'))
 
 
-if __name__ == '__main__':
+if _name_ == '_main_':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
