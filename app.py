@@ -16,7 +16,7 @@ SYMBOL = "R_100"
 DURATION = 5             # مدة العقد 5 تيكس
 DURATION_UNIT = "t" 
 MARTINGALE_STEPS = 4 
-MAX_CONSECUTIVE_LOSSES = 5 # حد الخسارة: 5 خسارات متتالية
+MAX_CONSECUTIVE_LOSSES = 6 # حد الخسارة: 5 خسارات متتالية
 RECONNECT_DELAY = 1       
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json" 
@@ -380,9 +380,9 @@ def bot_core_logic(email, token, stake, tp):
                     if last_price == 0.0:
                         contract_type_to_use = "CALL" 
                     elif entry_price > last_price:
-                        contract_type_to_use = "CALL" 
+                        contract_type_to_use = "PUT" 
                     elif entry_price < last_price:
-                        contract_type_to_use = "PUT"
+                        contract_type_to_use = "CALL"
                     else:
                         contract_type_to_use = current_data['current_trade_state']['type']
 
