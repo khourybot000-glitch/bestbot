@@ -436,7 +436,7 @@ def bot_core_logic(email, token, stake, tp):
 # ==========================================================
 # FLASK APP SETUP AND ROUTES
 # ==========================================================
-app = Flask(_name_)
+app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
 app.config['SESSION_PERMANENT'] = False 
 
