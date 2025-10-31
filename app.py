@@ -13,10 +13,10 @@ from datetime import timedelta, datetime, timezone
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"          
-DURATION = 5             # مدة العقد 5 تيكس
+DURATION = 15             # مدة العقد 5 تيكس
 DURATION_UNIT = "t" 
-MARTINGALE_STEPS = 4 
-MAX_CONSECUTIVE_LOSSES = 5 # حد الخسارة: 5 خسارات متتالية
+MARTINGALE_STEPS = 5 
+MAX_CONSECUTIVE_LOSSES = 6 # حد الخسارة: 5 خسارات متتالية
 RECONNECT_DELAY = 1       
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json" 
@@ -343,8 +343,7 @@ def bot_core_logic(email, token, stake, tp):
                 # 2. منطق فحص وقت الدخول
                 
                 # نقاط الدخول المطلوبة بالثواني
-                entry_seconds = [0, 15, 30, 45]
-                
+                entry_seconds = [30]
                 # حساب الثواني من التيك المستلم
                 current_second = datetime.fromtimestamp(current_timestamp, tz=timezone.utc).second
                 
