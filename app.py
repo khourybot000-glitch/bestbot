@@ -16,7 +16,7 @@ SYMBOL = "R_100"
 DURATION = 1 
 DURATION_UNIT = "t" 
 MARTINGALE_STEPS = 4 
-MAX_CONSECUTIVE_LOSSES = 2 # Stop limit after 2 consecutive losses
+MAX_CONSECUTIVE_LOSSES = 3 # حد الخسارة: 3 خسارات متتالية
 RECONNECT_DELAY = 1       
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json" 
@@ -29,9 +29,8 @@ active_threads = {}
 active_ws = {} 
 is_contract_open = {} 
 # Trading State Definitions
-# ⚠️ Dynamic Barrier: Barrier is None, calculated dynamically (last_digit - 1) for ALL trades.
-TRADE_STATE_DEFAULT = {"type": "DIGITDIFF", "barrier": None} 
-TRADE_STATE_MARTINGALE = {"type": "DIGITDIFF", "barrier": None} # Same as Default, just indicates Martingale mode
+TRADE_STATE_DEFAULT = {"type": "DIGITOVER", "barrier": 1} 
+TRADE_STATE_MARTINGALE = {"type": "DIGITUNDER", "barrier": 8} 
 
 DEFAULT_SESSION_STATE = {
     "api_token": "",
@@ -44,7 +43,8 @@ DEFAULT_SESSION_STATE = {
     "current_step": 0,
     "total_wins": 0,
     "total_losses": 0,
-    "current_trade_state": TRADE_STATE_DEFAULT 
+    "current_trade_state": TRADE_STATE_DEFAULT,
+    "stop_reason": "Stopped Manually" # ⚠️ سبب التوقف
 }
 # ==========================================================
 
@@ -113,6 +113,9 @@ def get_session_data(email):
     all_sessions = load_persistent_sessions()
     if email in all_sessions:
         data = all_sessions[email]
+        # Ensure 'stop_reason' key exists for consistency
+        if 'stop_reason' not in data:
+            data['stop_reason'] = DEFAULT_SESSION_STATE['stop_reason']
         if 'current_trade_state' not in data:
              data['current_trade_state'] = TRADE_STATE_DEFAULT
         return data
@@ -131,8 +134,8 @@ def load_allowed_users():
         print(f"❌ ERROR reading {USER_IDS_FILE}: {e}")
         return set()
         
-def stop_bot(email, clear_data=True): 
-    """ Stop the bot thread and clear WebSocket connection. If clear_data=True, clear all session data. """
+def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"): 
+    """ Stop the bot thread and clear WebSocket connection. """
     global is_contract_open 
     
     # 1. Close WebSocket connection if exists
@@ -150,6 +153,7 @@ def stop_bot(email, clear_data=True):
     current_data = get_session_data(email)
     if current_data.get("is_running") is True:
         current_data["is_running"] = False
+        current_data["stop_reason"] = stop_reason # ⚠️ حفظ سبب التوقف
         save_session_data(email, current_data) # Save stop state
 
     # 3. Remove thread registration
@@ -161,10 +165,14 @@ def stop_bot(email, clear_data=True):
 
     if clear_data:
         # 4. Delete the entire state (Explicit Stop/TP/SL)
-        delete_session_data(email)
-        print(f"🛑 [INFO] Bot for {email} stopped and session data cleared from file.")
+        # We don't delete immediately if the reason is TP/SL so the index route can read it
+        if stop_reason in ["SL Reached", "TP Reached"]:
+             print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}). Data kept for display.")
+        else:
+             delete_session_data(email)
+             print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}) and session data cleared from file.")
     else:
-        # 4. Disconnection case (Soft Stop): Only close WS, rely on loop for reconnect
+        # 4. Disconnection case (Soft Stop)
         print(f"⚠️ [INFO] WS closed for {email}. Attempting immediate reconnect.")
 
 # ==========================================================
@@ -178,12 +186,12 @@ def get_latest_price_digit(price):
         return -1
 
 def calculate_martingale_stake(base_stake, current_stake, current_step):
-    """ Martingale logic: multiply the losing stake by 19 """
+    """ Martingale logic: multiply the losing stake by 7 (as requested) """
     if current_step == 0:
         return base_stake
         
     if current_step <= MARTINGALE_STEPS:
-        return current_stake * 19 # Multiplier
+        return current_stake * 7 # Multiplier changed to 7
     else:
         return base_stake
 
@@ -193,11 +201,13 @@ def send_trade_order(email, stake, trade_type, barrier):
     if email not in active_ws: return
     ws_app = active_ws[email]
     
+    barrier_str = str(barrier)
+    
     trade_request = {
         "buy": 1, "price": stake,
         "parameters": {
             "amount": stake, "basis": "stake",
-            "contract_type": trade_type, "barrier": barrier, 
+            "contract_type": trade_type, "barrier": barrier_str, 
             "currency": "USD", "duration": DURATION,
             "duration_unit": DURATION_UNIT, "symbol": SYMBOL
         }
@@ -205,30 +215,24 @@ def send_trade_order(email, stake, trade_type, barrier):
     try:
         ws_app.send(json.dumps(trade_request))
         is_contract_open[email] = True 
-        print(f"💰 [TRADE] Sent {trade_type} {barrier} with stake: {stake:.2f}")
+        print(f"💰 [TRADE] Sent {trade_type} {barrier_str} with stake: {stake:.2f}")
     except Exception as e:
         print(f"❌ [TRADE ERROR] Could not send trade order: {e}")
         pass
 
 def re_enter_immediately(email, last_loss_stake):
-    """ Immediate entry after a loss using the calculated Martingale stake and dynamic barrier. 
-        Updates stake and state, relies on the next tick to trigger the trade.
-    """
+    """ Prepares state for the Martingale trade (Under 8). """
     current_data = get_session_data(email)
     
-    # 1. Calculate the compounded stake for the recovery trade
     new_stake = calculate_martingale_stake(
         current_data['base_stake'],
         last_loss_stake,
         current_data['current_step'] 
     )
 
-    # 2. Update the new stake and state to Martingale (dynamic)
     current_data['current_stake'] = new_stake
-    current_data['current_trade_state'] = TRADE_STATE_MARTINGALE
+    current_data['current_trade_state'] = TRADE_STATE_MARTINGALE 
     save_session_data(email, current_data)
-    
-    # The actual trade will be sent on the next incoming tick.
 
 
 def check_pnl_limits(email, profit_loss):
@@ -245,7 +249,7 @@ def check_pnl_limits(email, profit_loss):
     current_data['current_profit'] += profit_loss
     
     if profit_loss > 0:
-        # 1. Win: Reset and prepare for the base stake entry
+        # 1. Win: Reset and prepare for the base stake entry (Over 1)
         current_data['total_wins'] += 1
         current_data['current_step'] = 0 
         current_data['consecutive_losses'] = 0
@@ -253,14 +257,15 @@ def check_pnl_limits(email, profit_loss):
         current_data['current_trade_state'] = TRADE_STATE_DEFAULT
         
     else:
-        # 2. Loss: Increase step and attempt immediate recovery (re_enter_immediately handles stake update)
+        # 2. Loss: Increase step and attempt immediate recovery
         current_data['total_losses'] += 1
         current_data['consecutive_losses'] += 1
         current_data['current_step'] += 1
         
         # 2.1. Check Stop Loss (SL) limits
         if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES: 
-            stop_bot(email, clear_data=True) 
+            # 🛑 إيقاف بسبب حد الخسارة
+            stop_bot(email, clear_data=True, stop_reason="SL Reached") 
             return 
         
         # 2.2. Immediate re-entry preparation
@@ -270,13 +275,14 @@ def check_pnl_limits(email, profit_loss):
 
     # 3. Check Take Profit (TP)
     if current_data['current_profit'] >= current_data['tp_target']:
-        stop_bot(email, clear_data=True) 
+        # ✅ إيقاف بسبب حد الربح
+        stop_bot(email, clear_data=True, stop_reason="TP Reached") 
         return
     
     save_session_data(email, current_data)
         
-    # Logging uses 'Dynamic' as the barrier is calculated per tick
-    print(f"[LOG {email}] PNL: {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Last Stake: {last_stake:.2f}, State: {current_data['current_trade_state']['type']} Dynamic")
+    state = current_data['current_trade_state']
+    print(f"[LOG {email}] PNL: {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Last Stake: {last_stake:.2f}, State: {state['type']} {state['barrier']}")
 
 
 def bot_core_logic(email, token, stake, tp):
@@ -286,15 +292,15 @@ def bot_core_logic(email, token, stake, tp):
     is_contract_open[email] = False
 
     session_data = get_session_data(email)
-    # Ensure the bot always starts with the default state on new run
     session_data.update({
         "api_token": token, "base_stake": stake, "tp_target": tp,
         "is_running": True, "current_stake": stake,
-        "current_trade_state": TRADE_STATE_DEFAULT 
+        "current_trade_state": TRADE_STATE_DEFAULT,
+        "stop_reason": "Running" # تحديث سبب التوقف عند التشغيل
     })
     save_session_data(email, session_data)
 
-    while True: # Main reconnection loop: only breaks on manual stop or TP/SL
+    while True: 
         current_data = get_session_data(email)
         
         if not current_data.get('is_running'):
@@ -324,29 +330,17 @@ def bot_core_logic(email, token, stake, tp):
                 if is_contract_open.get(email) is True: 
                     return 
                 
-                # Get the last digit
-                last_digit = get_latest_price_digit(data['tick']['quote'])
-                
-                # 1. Determine the required barrier dynamically (last_digit - 1)
-                if last_digit == 0:
-                    # If last digit is 0, the target is Differs 9 (0 -> 9)
-                    required_barrier = 9 
-                else:
-                    # The dynamic pattern is: target barrier = last_digit - 1
-                    # (9 -> 8, 8 -> 7, ..., 1 -> 0)
-                    required_barrier = last_digit - 1
-                
-                # 2. Get the current stake (this will be the base or martingale stake already set)
+                # لا يوجد شرط للرقم الأخير، الدخول في كل تيك
+                current_trade_state = current_data['current_trade_state']
                 stake_to_use = current_data['current_stake']
                 
-                # 3. Send the trade with the calculated barrier and current stake
+                # إرسال الصفقة باستخدام الحالة الحالية (Over 1 أو Under 8)
                 send_trade_order(email, stake_to_use, 
-                                TRADE_STATE_DEFAULT['type'], # Always use DIGITDIFF
-                                required_barrier)
+                                current_trade_state['type'],
+                                current_trade_state['barrier'])
 
             elif msg_type == 'buy':
                 contract_id = data['buy']['contract_id']
-                # Subscribe to contract to ensure result is captured
                 ws_app.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
             elif msg_type == 'proposal_open_contract':
                 contract = data['proposal_open_contract']
@@ -355,8 +349,7 @@ def bot_core_logic(email, token, stake, tp):
                     if 'subscription_id' in data: ws_app.send(json.dumps({"forget": data['subscription_id']}))
 
         def on_close_wrapper(ws_app, code, msg):
-             # Don't change is_running state to allow immediate retry
-             stop_bot(email, clear_data=False) 
+             stop_bot(email, clear_data=False, stop_reason="Disconnected (Auto-Retry)") 
 
         try:
             ws = websocket.WebSocketApp(
@@ -370,7 +363,6 @@ def bot_core_logic(email, token, stake, tp):
         except Exception as e:
             print(f"❌ [ERROR] WebSocket failed for {email}: {e}")
         
-        # Check if the bot was manually stopped (break).
         if get_session_data(email).get('is_running') is False:
              break
         
@@ -387,7 +379,6 @@ def bot_core_logic(email, token, stake, tp):
 # ==========================================================
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
-# ⚠️ Session is NOT permanent; forces login on browser close
 app.config['SESSION_PERMANENT'] = False 
 
 # HTML TEMPLATE (AUTH_FORM)
@@ -482,12 +473,15 @@ CONTROL_FORM = """
 {% endwith %}
 
 {% if session_data and session_data.is_running %}
+    {% set current_state = session_data.current_trade_state %}
+    {% set strategy = current_state.type + " " + (current_state.barrier | string) %}
+    
     <p class="status-running">✅ Bot is **Running**! (Auto-refreshing)</p>
     <p>Net Profit: **${{ session_data.current_profit|round(2) }}**</p>
     <p>Current Stake: **${{ session_data.current_stake|round(2) }}**</p>
     <p>Step: **{{ session_data.current_step }}** / {{ martingale_steps }}</p>
     <p>Stats: **{{ session_data.total_wins }}** Wins | **{{ session_data.total_losses }}** Losses</p>
-    <p style="font-weight: bold; color: #007bff;">Current Strategy: **{{ session_data.current_trade_state.type }} Dynamic Barrier**</p>
+    <p style="font-weight: bold; color: #007bff;">Current Strategy: **{{ strategy }}**</p>
     
     <form method="POST" action="{{ url_for('stop_route') }}">
         <button type="submit" style="background-color: red; color: white;">🛑 Stop Bot</button>
@@ -533,7 +527,6 @@ CONTROL_FORM = """
 @app.before_request
 def check_user_status():
     """ Executes before every request to check if the user's email is still authorized. """
-    # Exclude login/logout/auth routes
     if request.endpoint in ('login', 'auth_page', 'logout', 'static'):
         return
 
@@ -541,12 +534,11 @@ def check_user_status():
         email = session['email']
         allowed_users = load_allowed_users()
         
-        # If the email in the session is no longer in the allowed list
         if email.lower() not in allowed_users:
             print(f"🛑 [SECURITY] User {email} removed from list. Forcing logout.")
-            session.pop('email', None) # Clear the session
+            session.pop('email', None) 
             flash('Your access has been revoked. Please log in again.', 'error')
-            return redirect(url_for('auth_page')) # Redirect to login page
+            return redirect(url_for('auth_page')) 
 
 @app.route('/')
 def index():
@@ -555,6 +547,24 @@ def index():
     
     email = session['email']
     session_data = get_session_data(email)
+
+    # ⚠️ منطق عرض سبب التوقف
+    if not session_data.get('is_running') and "stop_reason" in session_data and session_data["stop_reason"] not in ["Stopped Manually", "Running", "Disconnected (Auto-Retry)", "Displayed"]:
+        
+        reason = session_data["stop_reason"]
+        
+        if reason == "SL Reached":
+            flash(f"🛑 STOP: الحد الأقصى للخسارة ({MAX_CONSECUTIVE_LOSSES} خسارات متتالية) تم الوصول إليه! (SL Reached)", 'error')
+        elif reason == "TP Reached":
+            flash(f"✅ GOAL: هدف الربح ({session_data['tp_target']} $) تم الوصول إليه بنجاح! (TP Reached)", 'success')
+            
+        # وضع علامة على الرسالة كمعروضة لتجنب تكرارها في كل تحديث
+        session_data['stop_reason'] = "Displayed" 
+        save_session_data(email, session_data) 
+        
+        # بعد عرض السبب، نقوم بمسح البيانات النهائية للجلسة إذا كان التوقف بسبب TP/SL
+        delete_session_data(email)
+
 
     return render_template_string(CONTROL_FORM, 
         email=email,
@@ -621,7 +631,8 @@ def stop_route():
     if 'email' not in session:
         return redirect(url_for('auth_page'))
     
-    stop_bot(session['email'], clear_data=True) 
+    # ⚠️ تمرير سبب التوقف اليدوي
+    stop_bot(session['email'], clear_data=True, stop_reason="Stopped Manually") 
     flash('Bot stopped and session data cleared.', 'success')
     return redirect(url_for('index'))
 
