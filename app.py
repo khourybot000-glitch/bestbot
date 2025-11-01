@@ -14,10 +14,10 @@ from threading import Lock
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
-DURATION = 5 # مدة العقد 5 تيكس
+DURATION = 7 # مدة العقد 5 تيكس
 DURATION_UNIT = "t"
-MARTINGALE_STEPS = 4
-MAX_CONSECUTIVE_LOSSES = 5 # حد الخسارة: 5 خسارات متتالية
+MARTINGALE_STEPS = 5
+MAX_CONSECUTIVE_LOSSES = 6 # حد الخسارة: 5 خسارات متتالية
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
@@ -335,7 +335,7 @@ def bot_core_logic(email, token, stake, tp):
                     
                 
                 # منطق فحص وقت الدخول
-                entry_seconds = [0, 15, 30, 45]
+                entry_seconds = [15]
                 current_second = datetime.fromtimestamp(current_timestamp, tz=timezone.utc).second
                 is_entry_time = current_second in entry_seconds
                 time_since_last_entry = current_timestamp - current_data['last_entry_time']
