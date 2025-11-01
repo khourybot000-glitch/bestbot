@@ -16,8 +16,8 @@ WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
 DURATION = 30 # مدة العقد 30 ثانية
 DURATION_UNIT = "s" # الوحدة بالثواني (s)
-MARTINGALE_STEPS = 5 # ⬅️ تم التعديل إلى 5 خطوات كحد أقصى للمارتينجال
-MAX_CONSECUTIVE_LOSSES = 6 # ⬅️ تم التعديل إلى 6 خسارات متتالية (حد الخسارة)
+MARTINGALE_STEPS = 5 # ⬅️ Max Martingale Step
+MAX_CONSECUTIVE_LOSSES = 6 # ⬅️ Max Loss
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
@@ -165,10 +165,10 @@ def calculate_martingale_stake(base_stake, current_stake, current_step):
     if current_step == 0:
         return base_stake
         
-    # يستخدم MARTINGALE_STEPS = 5
     if current_step <= MARTINGALE_STEPS:
         return current_stake * 2.2
     else:
+        # إذا تجاوز الخطوات القصوى، يعود إلى الرهان الأساسي
         return base_stake
 
 def send_trade_order(email, stake, contract_type, currency):
@@ -330,11 +330,12 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     return
                     
                 
-                # منطق فحص وقت الدخول: فقط عند الثانية 30
-                entry_seconds = [30] 
+                # 🎯 منطق فحص وقت الدخول الجديد: عند الثانية 0 و 30
+                entry_seconds = [0, 30] 
                 current_second = datetime.fromtimestamp(current_timestamp, tz=timezone.utc).second
                 is_entry_time = current_second in entry_seconds
                 
+                # شرط زمني يضمن عدم تكرار الدخول في نفس الثانية (مرور 29 ثانية على الأقل)
                 time_since_last_entry = current_timestamp - current_data['last_entry_time']
                 
                 if time_since_last_entry >= 29 and is_entry_time:
@@ -348,9 +349,9 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     last_price = current_data.get('last_entry_price', 0.0)
                     
                     if last_price == 0.0 or entry_price > last_price:
-                        contract_type_to_use = "PUT"
-                    elif entry_price < last_price:
                         contract_type_to_use = "CALL"
+                    elif entry_price < last_price:
+                        contract_type_to_use = "PUT"
                     else:
                         contract_type_to_use = current_data['current_trade_state']['type']
 
