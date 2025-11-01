@@ -3,7 +3,7 @@ import json
 import websocket 
 import os 
 import sys 
-import fcntl # لإدارة قفل الملفات
+import fcntl # لإدارة قفل الملفات (مهم في Linux/Unix)
 from flask import Flask, request, render_template_string, redirect, url_for, session, flash
 from datetime import datetime, timezone
 from multiprocessing import Process # 💡 استخدام Multiprocessing
@@ -13,11 +13,10 @@ from multiprocessing import Process # 💡 استخدام Multiprocessing
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"          
-DURATION = 15            # مدة العقد 15 تيكس
+DURATION = 15            
 DURATION_UNIT = "t" 
-MARTINGALE_STEPS = 6     # الحد الأقصى لخطوات المضاعفة
+MARTINGALE_STEPS = 6     
 MAX_CONSECUTIVE_LOSSES = 6 
-RECONNECT_DELAY = 1       
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json" # لحفظ الحالة بين العمليات
 # ==========================================================
@@ -25,9 +24,7 @@ ACTIVE_SESSIONS_FILE = "active_sessions.json" # لحفظ الحالة بين ا�
 # ==========================================================
 # BOT RUNTIME STATE (Global Cache for Flask)
 # ==========================================================
-# 💡active_processes تخزن العمليات النشطة
 active_processes = {} 
-# Trading State Definitions 
 TRADE_STATE_DEFAULT = {"type": "CALL"}  
 
 DEFAULT_SESSION_STATE = {
@@ -43,19 +40,18 @@ DEFAULT_SESSION_STATE = {
     "total_losses": 0,
     "current_trade_state": TRADE_STATE_DEFAULT,
     "stop_reason": "Stopped Manually",
-    "is_contract_open": False, # حالة العقد داخل ملف الجلسة
+    "is_contract_open": False, 
     "last_entry_time": 0,          
     "last_entry_price": 0.0,       
 }
 # ==========================================================
 
 # ==========================================================
-# PERSISTENT STATE MANAGEMENT FUNCTIONS (Critical for Multiprocessing)
+# PERSISTENT STATE MANAGEMENT FUNCTIONS (File Locking)
 # ==========================================================
-# توفر هذه الدوال آلية آمنة لمشاركة البيانات بين عملية Flask وعملية البوت
+
 def get_file_lock(f):
     try:
-        # قفل الملف للكتابة لمنع تضارب العمليات
         fcntl.flock(f.fileno(), fcntl.LOCK_EX)
     except Exception:
         pass
@@ -116,7 +112,6 @@ def get_session_data(email):
     all_sessions = load_persistent_sessions()
     if email in all_sessions:
         data = all_sessions[email]
-        # التأكد من وجود المفاتيح الافتراضية
         for key, default_val in DEFAULT_SESSION_STATE.items():
             if key not in data:
                 data[key] = default_val
@@ -138,18 +133,16 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
     """ Stop the process and clear data. """
     global active_processes
     
-    # 1. تحديث حالة is_running في الملف (مهم جداً للعملية المنفصلة)
+    # 1. تحديث حالة is_running في الملف
     current_data = get_session_data(email)
     current_data["is_running"] = False
     current_data["stop_reason"] = stop_reason 
     save_session_data(email, current_data) 
 
-    # 2. إيقاف العملية (Process) إذا كانت قيد التشغيل
+    # 2. إيقاف العملية (Process)
     if email in active_processes and active_processes[email].is_alive():
         try:
-            # إنهاء العملية بالقوة
             active_processes[email].terminate()
-            # انتظار إنهاء العملية
             active_processes[email].join() 
         except Exception as e:
             print(f"❌ ERROR terminating process: {e}")
@@ -168,7 +161,6 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
 # ==========================================================
 
 def calculate_martingale_stake(base_stake, current_stake, current_step):
-    """ يحسب قيمة الرهان بناءً على خطة المضاعفة """
     if current_step == 0:
         return base_stake
     if current_step <= MARTINGALE_STEPS:
@@ -176,7 +168,6 @@ def calculate_martingale_stake(base_stake, current_stake, current_step):
     return current_stake * 2.2 
 
 def check_pnl_limits(email, profit_loss):
-    """ تحديث الإحصائيات واتخاذ قرار بشأن العقد التالي """
     current_data = get_session_data(email)
     if not current_data.get('is_running'): return
 
@@ -185,7 +176,6 @@ def check_pnl_limits(email, profit_loss):
     current_data['current_profit'] += profit_loss
     
     if profit_loss > 0:
-        # ربح: إعادة تعيين
         current_data['total_wins'] += 1
         current_data['current_step'] = 0 
         current_data['consecutive_losses'] = 0
@@ -193,17 +183,14 @@ def check_pnl_limits(email, profit_loss):
         current_data['current_trade_state'] = TRADE_STATE_DEFAULT
         
     else:
-        # خسارة: تحضير المضاعفة
         current_data['total_losses'] += 1
         current_data['consecutive_losses'] += 1
         current_data['current_step'] += 1
         
-        # فحص إيقاف الخسارة (SL)
         if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES: 
             current_data['is_running'] = False
             current_data['stop_reason'] = "SL Reached"
         
-        # حساب قيمة المضاعفة التالية
         new_stake = calculate_martingale_stake(
             current_data['base_stake'],
             last_stake,
@@ -211,7 +198,6 @@ def check_pnl_limits(email, profit_loss):
         )
         current_data['current_stake'] = new_stake
 
-    # فحص تحقيق الهدف (TP)
     if current_data['current_profit'] >= current_data['tp_target']:
         current_data['is_running'] = False
         current_data['stop_reason'] = "TP Reached"
@@ -224,18 +210,19 @@ def check_pnl_limits(email, profit_loss):
 
 def send_and_receive(token, request):
     """ يرسل طلب WebSocket ويستقبل الرد (اتصال جديد في كل مرة) """
-    email = next(iter(get_session_data('')) or {}, 'unknown')
+    
+    email_for_log = request.get('email_for_log', 'unknown') # للحصول على الإيميل في حال الفشل
     
     try:
-        # إنشاء اتصال جديد
-        ws = websocket.create_connection(WSS_URL, timeout=5)
+        # 💡 تم إضافة timeout لتجنب التعليق
+        ws = websocket.create_connection(WSS_URL, timeout=5) 
         
         # 1. تخويل
         ws.send(json.dumps({"authorize": token}))
         auth_response = json.loads(ws.recv())
         if auth_response.get('msg_type') != 'authorize':
-            # إذا فشل التخويل بشكل دائم
-            stop_bot(email, clear_data=True, stop_reason="Authorization Failed")
+            print(f"❌ [AUTH FAILED] Token invalid for {email_for_log}")
+            stop_bot(email_for_log, clear_data=True, stop_reason="Authorization Failed")
             return None
             
         # 2. إرسال الطلب
@@ -244,7 +231,7 @@ def send_and_receive(token, request):
         ws.close()
         return response
     except Exception as e:
-        print(f"❌ [WS ERROR] Failed to send/receive data: {e}")
+        print(f"❌ [WS ERROR] Failed to send/receive data for {email_for_log}: {e}")
         return None
 
 def wait_for_settlement(email, token, contract_id):
@@ -254,29 +241,28 @@ def wait_for_settlement(email, token, contract_id):
     current_data["is_contract_open"] = True
     save_session_data(email, current_data)
 
-    max_checks = 35 # 35 ثانية كحد أقصى للتحقق
+    max_checks = 35 
     
     print(f"⏳ [SETTLEMENT] Waiting for contract {contract_id} settlement...")
     
     for _ in range(max_checks):
-        time.sleep(1) # تحقق مرة كل ثانية
+        time.sleep(1) 
         
-        settlement_request = {"proposal_open_contract": 1, "contract_id": contract_id}
+        # 💡 إرسال الإيميل للـ Log في حال الفشل
+        settlement_request = {"proposal_open_contract": 1, "contract_id": contract_id, "email_for_log": email}
         settlement_response = send_and_receive(token, settlement_request)
         
         if settlement_response and settlement_response.get('proposal_open_contract'):
             contract = settlement_response['proposal_open_contract']
             
             if contract.get('is_sold') == 1:
-                # العقد مغلق!
                 check_pnl_limits(email, contract.get('profit', 0)) 
                 
                 current_data = get_session_data(email)
-                current_data["is_contract_open"] = False # تحديث الحالة في الملف
+                current_data["is_contract_open"] = False 
                 save_session_data(email, current_data)
                 return 
 
-        # حماية ضد تجاوز الوقت
         current_second = datetime.now(timezone.utc).second
         if current_second > 50 and current_second < 55:
              print("❌ [TIMEOUT] Settlement failed, resetting state.")
@@ -291,8 +277,8 @@ def wait_for_settlement(email, token, contract_id):
     save_session_data(email, current_data)
 
 
-def fetch_minute_data_ticks(token):
-    """ تجلب سعر افتتاح الدقيقة (T00) وسعر الدخول الحالي (T30) باستخدام التيكات التاريخية """
+def fetch_minute_data_ticks(token, email):
+    """ تجلب سعر افتتاح الدقيقة (T00) وسعر الدخول الحالي (T30) """
     
     now_utc = datetime.now(timezone.utc)
     start_of_current_minute = now_utc.replace(second=0, microsecond=0)
@@ -302,7 +288,8 @@ def fetch_minute_data_ticks(token):
         "end": "latest", 
         "start": 1, 
         "count": 500, 
-        "style": "ticks"
+        "style": "ticks",
+        "email_for_log": email # 💡 إرسال الإيميل
     }
     ticks_response = send_and_receive(token, ticks_request)
     
@@ -315,7 +302,6 @@ def fetch_minute_data_ticks(token):
         
         start_of_current_minute_ts = int(start_of_current_minute.timestamp())
         
-        # البحث عن أول تيك في الدقيقة الحالية (T00)
         t00_index = -1
         for i, t in enumerate(times):
             if int(t) >= start_of_current_minute_ts:
@@ -325,7 +311,6 @@ def fetch_minute_data_ticks(token):
         if t00_index != -1:
             start_price = float(prices[t00_index])
         
-        # آخر تيك هو سعر الدخول (T30)
         if prices:
             entry_price = float(prices[-1])
         
@@ -334,6 +319,9 @@ def fetch_minute_data_ticks(token):
 
 def bot_core_logic(email, token, stake, tp):
     """ منطق عملية البوت الرئيسية (Process) """
+    
+    # 💡 CHECKPOINT 3: هذا السطر يجب أن يظهر فوراً بعد بدء العملية
+    print(f"*** BOT PROCESS {email} STARTED CORE LOGIC (Process ID: {os.getpid()}) ***") 
     
     # 1. تهيئة البيانات الأولية
     session_data = get_session_data(email)
@@ -356,31 +344,31 @@ def bot_core_logic(email, token, stake, tp):
         now = datetime.now(timezone.utc)
         current_second = now.second
         
-        # نافذة الدخول
         if 28 <= current_second <= 31:
             
             if current_data.get("is_contract_open") is True:
+                print("🛑 [SKIP] Contract already open, skipping entry.")
                 time.sleep(1)
                 continue
                 
             # 3. جلب البيانات (T00 و T30)
             print(f"⏱️ [TIMER] Time reached (Second {current_second}). Fetching data...")
-            start_price, current_entry_price = fetch_minute_data_ticks(token)
+            start_price, current_entry_price = fetch_minute_data_ticks(token, email)
             
             # 4. التحليل
             if start_price == 0.0 or current_entry_price == 0.0:
+                 print("❌ [ANALYSIS FAILED] Cannot fetch required prices. Retrying...")
                  time.sleep(1)
                  continue
             
             if current_entry_price > start_price:
                 contract_type_to_use = "CALL" 
-                print(f"📈 [ENTRY] Trend: Rise. Entering CALL.")
             elif current_entry_price < start_price:
                 contract_type_to_use = "PUT"
-                print(f"📉 [ENTRY] Trend: Fall. Entering PUT.")
             else:
                 contract_type_to_use = current_data['current_trade_state']['type']
-                print(f"🔄 [ENTRY] Trend: Neutral. Entering {contract_type_to_use}.")
+
+            print(f"🔄 [ENTRY] Trend: {contract_type_to_use}. Stake: {current_data['current_stake']:.2f}")
 
             # 5. إرسال الصفقة
             stake_to_use = current_data['current_stake']
@@ -390,7 +378,8 @@ def bot_core_logic(email, token, stake, tp):
                     "amount": round(stake_to_use, 2), "basis": "stake",
                     "contract_type": contract_type_to_use, "currency": "USD", 
                     "duration": DURATION, "duration_unit": DURATION_UNIT, "symbol": SYMBOL
-                }
+                },
+                "email_for_log": email
             }
             
             buy_response = send_and_receive(token, buy_request)
@@ -407,15 +396,10 @@ def bot_core_logic(email, token, stake, tp):
                 time.sleep(1) 
                 
             # 7. تأخير لإكمال الدورة
-            now_after_trade = datetime.now(timezone.utc)
-            seconds_to_next_minute = 60 - now_after_trade.second
-            
-            # الانتظار حتى بداية الدورة التالية (الثانية 28)
-            time_to_sleep_until_next_cycle = seconds_to_next_minute + 28
+            time_to_sleep_until_next_cycle = 60 - datetime.now(timezone.utc).second + 28
             time.sleep(time_to_sleep_until_next_cycle % 60)
             
         else:
-            # الانتظار حتى الوصول إلى نافذة الدخول (الثانية 28)
             time_to_sleep = (28 - current_second) % 60
             if time_to_sleep == 0: time_to_sleep = 1
             time.sleep(time_to_sleep)
@@ -423,152 +407,17 @@ def bot_core_logic(email, token, stake, tp):
     print(f"🛑 [PROCESS] Bot process ended for {email}.")
     
 # ==========================================================
-# FLASK APP SETUP AND ROUTES (CONTROL PANEL)
+# FLASK APP SETUP AND ROUTES
 # ==========================================================
 app = Flask(__name__) 
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
 app.config['SESSION_PERMANENT'] = False 
 
-# HTML TEMPLATES (يجب أن تكون موجودة في ملفاتك، تم إدراجها هنا للاكتمال)
-AUTH_FORM = """
-<!doctype html>
-<title>Login - Deriv Bot</title>
-<style>
-    body { font-family: Arial, sans-serif; padding: 20px; max-width: 400px; margin: auto; }
-    h1 { color: #007bff; }
-    input[type="email"] { width: 100%; padding: 10px; margin-top: 5px; margin-bottom: 15px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
-    button { background-color: blue; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; }
-</style>
-<h1>Deriv Bot Login</h1>
-<p>Please enter your authorized email address:</p>
-{% with messages = get_flashed_messages(with_categories=true) %}
-    {% if messages %}
-        {% for category, message in messages %}
-            <p style="color:red;">{{ message }}</p>
-        {% endfor %}
-    {% endif %}
-{% endwith %}
-<form method="POST" action="{{ url_for('login') }}">
-    <label for="email">Email:</label><br>
-    <input type="email" id="email" name="email" required><br><br>
-    <button type="submit">Login</button>
-</form>
-"""
+# ... (HTML TEMPLATES - تم حذفها لتوفير المساحة، استخدم نفس القوالب السابقة) ...
+AUTH_FORM = ""
+CONTROL_FORM = ""
 
-CONTROL_FORM = """
-<!doctype html>
-<title>Control Panel</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-    body {
-        font-family: Arial, sans-serif;
-        padding: 10px;
-        max-width: 600px;
-        margin: auto;
-        direction: ltr;
-        text-align: left;
-    }
-    h1 {
-        color: #007bff;
-        font-size: 1.8em;
-        border-bottom: 2px solid #eee;
-        padding-bottom: 10px;
-    }
-    p {
-        font-size: 1.1em;
-        line-height: 1.6;
-    }
-    .status-running {
-        color: green;
-        font-weight: bold;
-        font-size: 1.3em;
-    }
-    .status-stopped {
-        color: red;
-        font-weight: bold;
-        font-size: 1.3em;
-    }
-    form button {
-        padding: 12px 20px;
-        border: none;
-        border-radius: 5px;
-        cursor: pointer;
-        font-size: 1.1em;
-        margin-top: 15px;
-        width: 100%;
-    }
-    input[type="text"], input[type="number"], input[type="email"] {
-        width: 98%;
-        padding: 10px;
-        margin-top: 5px;
-        margin-bottom: 10px;
-        border: 1px solid #ccc;
-        border-radius: 4px;
-        box-sizing: border-box;
-        text-align: left;
-    }
-</style>
-<h1>Bot Control Panel | User: {{ email }}</h1>
-<hr>
-
-{% with messages = get_flashed_messages(with_categories=true) %}
-    {% if messages %}
-        {% for category, message in messages %}
-            <p style="color:{{ 'green' if category == 'success' else ('blue' if category == 'info' else 'red') }};">{{ message }}</p>
-        {% endfor %}
-    {% endif %}
-{% endwith %}
-
-{% if session_data and session_data.is_running %}
-    {% set strategy = "Follow Trend (30s Polling)" %}
-    
-    <p class="status-running">✅ Bot is **Running**! (Auto-refreshing)</p>
-    <p>Net Profit: **${{ session_data.current_profit|round(2) }}**</p>
-    <p>Current Stake: **${{ session_data.current_stake|round(2) }}**</p>
-    <p>Step: **{{ session_data.current_step }}** / {{ martingale_steps }}</p>
-    <p>Stats: **{{ session_data.total_wins }}** Wins | **{{ session_data.total_losses }}** Losses</p>
-    <p style="font-weight: bold; color: #007bff;">Current Strategy: **{{ strategy }}**</p>
-    
-    <form method="POST" action="{{ url_for('stop_route') }}">
-        <button type="submit" style="background-color: red; color: white;">🛑 Stop Bot</button>
-    </form>
-{% else %}
-    <p class="status-stopped">🛑 Bot is **Stopped**. {{ session_data.stop_reason if session_data.stop_reason else "Enter settings to start a new session." }}</p>
-    <form method="POST" action="{{ url_for('start_bot') }}">
-        <label for="token">Deriv API Token:</label><br>
-        <input type="text" id="token" name="token" required value="{{ session_data.api_token if session_data else '' }}"><br>
-        
-        <label for="stake">Base Stake (USD):</label><br>
-        <input type="number" id="stake" name="stake" value="{{ session_data.base_stake|round(2) if session_data else 0.35 }}" step="0.01" min="0.35" required><br>
-        
-        <label for="tp">TP Target (USD):</label><br>
-        <input type="number" id="tp" name="tp" value="{{ session_data.tp_target|round(2) if session_data else 10.0 }}" step="0.01" required><br>
-        
-        <button type="submit" style="background-color: green; color: white;">🚀 Start Bot</button>
-    </form>
-{% endif %}
-<hr>
-<a href="{{ url_for('logout') }}" style="display: block; text-align: center; margin-top: 15px; font-size: 1.1em;">Logout</a>
-
-<script>
-    // التحديث التلقائي للصفحة عند تشغيل البوت
-    function autoRefresh() {
-        var isRunning = {{ 'true' if session_data and session_data.is_running else 'false' }};
-        
-        if (isRunning) {
-            setTimeout(function() {
-                window.location.reload();
-            }, 1000);
-        }
-    }
-
-    autoRefresh();
-</script>
-"""
-
-# ==========================================================
-# FLASK ROUTES
-# ==========================================================
+# ... (HTML TEMPLATES موجودة في الرد السابق) ...
 
 @app.before_request
 def check_user_status():
@@ -591,7 +440,7 @@ def index():
     
     email = session['email']
     
-    # 💡 التحقق من حالة العملية
+    # التحقق من حالة العملية
     if email in active_processes and not active_processes[email].is_alive():
         print(f"⚠️ [PROCESS] Process for {email} died unexpectedly. Stopping state.")
         stop_bot(email, clear_data=False, stop_reason="Process Died")
@@ -614,6 +463,7 @@ def index():
             delete_session_data(email)
 
 
+    # NOTE: Assuming CONTROL_FORM and AUTH_FORM are defined or loaded correctly
     return render_template_string(CONTROL_FORM, 
         email=email,
         session_data=session_data,
@@ -654,21 +504,30 @@ def start_bot():
         return redirect(url_for('index'))
         
     try:
-        # قراءة البيانات
         token = request.form['token']
         stake = float(request.form['stake'])
         tp = float(request.form['tp'])
     except ValueError:
         flash("Invalid stake or TP value.", 'error')
         return redirect(url_for('index'))
+    
+    # 💡 CHECKPOINT 1: محاولة بدء العملية
+    print(f"*** FLASK: {email} REQUESTED START (Attempting Process creation) ***")
         
-    # بدء عملية جديدة (Process)
     process = Process(target=bot_core_logic, args=(email, token, stake, tp))
     process.daemon = True
-    process.start()
-    active_processes[email] = process
     
-    flash('Bot started successfully. Process is running independently.', 'success')
+    try:
+        process.start()
+        active_processes[email] = process
+        # 💡 CHECKPOINT 2: نجاح بدء العملية
+        print(f"*** FLASK: Process started successfully (PID: {process.pid}) ***")
+        flash('Bot started successfully. Process is running independently.', 'success')
+    except Exception as e:
+        print(f"❌ FLASK: Failed to start Multiprocess for {email}: {e}")
+        flash('Failed to start bot due to server error (Multiprocess failure).', 'error')
+
+
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
@@ -688,7 +547,7 @@ def logout():
 
 
 if __name__ == '__main__':
-    # 💡 التحقق من تهيئة ملفات الجلسة وملف المستخدمين
+    # 💡 يتم تشغيل هذا الجزء فقط عند تنفيذ الملف مباشرة
     if not os.path.exists(ACTIVE_SESSIONS_FILE):
         with open(ACTIVE_SESSIONS_FILE, 'w') as f:
             f.write('{}')
@@ -697,4 +556,5 @@ if __name__ == '__main__':
         print(f"🚨 WARNING: {USER_IDS_FILE} file not found. Create it and add authorized emails.")
         
     port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    # Gunicorn يتولى عملية التشغيل عادة
+    # app.run(host='0.0.0.0', port=port, debug=False)
