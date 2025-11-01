@@ -14,7 +14,7 @@ from threading import Lock
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
-DURATION = 30 # مدة العقد 30 ثانية
+DURATION = 25 # مدة العقد 30 ثانية
 DURATION_UNIT = "s" # الوحدة بالثواني (s)
 MARTINGALE_STEPS = 5 # ⬅️ Max Martingale Step
 MAX_CONSECUTIVE_LOSSES = 6 # ⬅️ Max Loss
