@@ -349,9 +349,9 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     last_price = current_data.get('last_entry_price', 0.0)
                     
                     if last_price == 0.0 or entry_price > last_price:
-                        contract_type_to_use = "CALL"
-                    elif entry_price < last_price:
                         contract_type_to_use = "PUT"
+                    elif entry_price < last_price:
+                        contract_type_to_use = "CALL"
                     else:
                         contract_type_to_use = current_data['current_trade_state']['type']
 
