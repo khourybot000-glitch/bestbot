@@ -162,7 +162,7 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
 # ==========================================================
 
 def calculate_martingale_stake(base_stake, current_stake, current_step):
-    """ 💡 التغيير: منطق المضاعفة الآن هو (الرهان الخاسر × 6.5) """
+    """ منطق المضاعفة (الرهان الخاسر × 6.5) """
     if current_step == 0:
         return base_stake
         
@@ -213,6 +213,7 @@ def re_enter_immediately(email, last_loss_stake):
     )
 
     current_data['current_stake'] = new_stake
+    # إعادة تعيين وقت الدخول لضمان الدخول الفوري في التيك التالي
     current_data['last_entry_time'] = 0 
     save_session_data(email, current_data)
 
@@ -239,7 +240,7 @@ def check_pnl_limits(email, profit_loss):
         current_data['current_step'] = 0
         current_data['consecutive_losses'] = 0
         current_data['current_stake'] = current_data['base_stake']
-        current_data['last_entry_time'] = 0
+        current_data['last_entry_time'] = 0 # تصفير للسماح بالدخول في الثانية 0 القادمة
         
     else:
         current_data['total_losses'] += 1
@@ -337,18 +338,22 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     return
                     
                 
-                # توقيت الدخول فقط عند الثانية 0
+                # توقيت الدخول عند الثانية 0
                 entry_seconds = [0] 
                 current_second = datetime.fromtimestamp(current_timestamp, tz=timezone.utc).second
                 is_entry_time = current_second in entry_seconds
                 
                 time_since_last_entry = current_timestamp - current_data['last_entry_time']
                 
-                # الدخول مسموح إذا كانت:
-                # 1. مضاعفة فورية (last_entry_time=0)
-                # 2. أو دخول أولي (current_step=0) وعند الثانية 0
-                should_enter = (current_data['last_entry_time'] == 0) or \
-                                (time_since_last_entry >= 1 and is_entry_time and current_data['current_step'] == 0)
+                
+                # 💡💡 التعديل الهام هنا لضمان انتظار الثانية 0 بعد الربح/البداية 💡💡
+                if current_data['current_step'] > 0:
+                    # في حالة المضاعفة (بعد خسارة) -> الدخول فوري
+                    should_enter = (current_data['last_entry_time'] == 0)
+                else:
+                    # في حالة الرهان الأساسي (بعد ربح/بداية) -> انتظار الثانية 0
+                    should_enter = (time_since_last_entry >= 1 and is_entry_time)
+
 
                 if should_enter: 
                     
@@ -409,7 +414,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
     print(f"🛑 [PROCESS] Bot process loop ended for {email}.")
 
 # ==========================================================
-# FLASK APP SETUP AND ROUTES
+# FLASK APP SETUP AND ROUTES (لم تتغير)
 # ==========================================================
 
 app = Flask(__name__)
