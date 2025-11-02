@@ -10,21 +10,20 @@ from multiprocessing import Process
 from threading import Lock
 
 # ==========================================================
-# BOT CONSTANT SETTINGS
+# BOT CONSTANT SETTINGS (No change)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
-DURATION = 5                 # 💡 تم التغيير: 5 تيك
-DURATION_UNIT = "t"          # وحدة المدة "t" (تيك)
-MARTINGALE_STEPS = 4         # 💡 تم التغيير: الحد الأقصى لخطوات المضاعفة 4
-MAX_CONSECUTIVE_LOSSES = 5   # 💡 تم التغيير: الحد الأقصى للخسارات المتتالية 5
+DURATION = 5                 
+DURATION_UNIT = "t"          
+MARTINGALE_STEPS = 4         
+MAX_CONSECUTIVE_LOSSES = 5   
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 
 # 💡 الاستراتيجية
-CONTRACT_TYPE = "RISEFALL"   # 💡 تم التغيير: RISEFALL
-# TARGET_DIGIT = 8           # لم يعد مستخدماً
+CONTRACT_TYPE = "RISEFALL"   
 # ==========================================================
 
 # ==========================================================
@@ -53,85 +52,59 @@ DEFAULT_SESSION_STATE = {
     "currency": "USD", 
     "account_type": "demo",
     
-    # 💡 المتغيرات الجديدة للاستراتيجية الجديدة
-    "open_price": 0.0,          # سعر الافتتاح (عند الثانية 0)
-    "open_time": 0              # وقت الافتتاح (عند الثانية 0)
+    # 💡 المتغيرات الجديدة للاستراتيجية
+    "open_price": 0.0,          
+    "open_time": 0,             
+    "last_action_type": "CALL",
+    # 💡 المتغير الجديد لتخزين آخر تيك تم رصده قبل قرار الدخول
+    "last_valid_tick_price": 0.0 
 }
 # ==========================================================
 
 # ==========================================================
-# PERSISTENT STATE MANAGEMENT FUNCTIONS (لم تتغير)
+# PERSISTENT STATE MANAGEMENT FUNCTIONS (No change)
 # ==========================================================
 
-# ... (load_persistent_sessions, save_session_data, delete_session_data, get_session_data, load_allowed_users, stop_bot - No change)
-
 def load_persistent_sessions():
-    if not os.path.exists(ACTIVE_SESSIONS_FILE):
-        return {}
-    
+    if not os.path.exists(ACTIVE_SESSIONS_FILE): return {}
     try:
         with open(ACTIVE_SESSIONS_FILE, 'r') as f:
             content = f.read()
-            if content:
-                return json.loads(content)
-            else:
-                return {}
-    except json.JSONDecodeError:
-        print(f"❌ [JSON ERROR] {ACTIVE_SESSIONS_FILE} is corrupt or empty. Returning empty dict.")
-        return {}
-    except Exception as e:
-        print(f"❌ [FILE ERROR] Failed to read {ACTIVE_SESSIONS_FILE}: {e}")
-        return {}
-
+            return json.loads(content) if content else {}
+    except: return {}
 
 def save_session_data(email, session_data):
     all_sessions = load_persistent_sessions()
     all_sessions[email] = session_data
-    
     with open(ACTIVE_SESSIONS_FILE, 'w') as f:
-        try:
-            json.dump(all_sessions, f, indent=4)
-        except Exception as e:
-            print(f"❌ ERROR saving session data: {e}")
-
-def delete_session_data(email):
-    all_sessions = load_persistent_sessions()
-    if email in all_sessions:
-        del all_sessions[email]
-    
-    with open(ACTIVE_SESSIONS_FILE, 'w') as f:
-        try:
-            json.dump(all_sessions, f, indent=4)
-        except Exception as e:
-            print(f"❌ ERROR deleting session data: {e}")
+        try: json.dump(all_sessions, f, indent=4)
+        except: pass
 
 def get_session_data(email):
     all_sessions = load_persistent_sessions()
     if email in all_sessions:
         data = all_sessions[email]
         for key, default_val in DEFAULT_SESSION_STATE.items():
-            if key not in data:
-                data[key] = default_val
+            if key not in data: data[key] = default_val
         return data
-    
     return DEFAULT_SESSION_STATE.copy()
 
+def delete_session_data(email):
+    all_sessions = load_persistent_sessions()
+    if email in all_sessions: del all_sessions[email]
+    with open(ACTIVE_SESSIONS_FILE, 'w') as f:
+        try: json.dump(all_sessions, f, indent=4)
+        except: pass
+
 def load_allowed_users():
-    if not os.path.exists(USER_IDS_FILE):
-        print(f"❌ ERROR: Missing {USER_IDS_FILE} file.")
-        return set()
+    if not os.path.exists(USER_IDS_FILE): return set()
     try:
         with open(USER_IDS_FILE, 'r', encoding='utf-8') as f:
-            users = {line.strip().lower() for line in f if line.strip()}
-        return users
-    except Exception as e:
-        print(f"❌ ERROR reading {USER_IDS_FILE}: {e}")
-        return set()
+            return {line.strip().lower() for line in f if line.strip()}
+    except: return set()
         
 def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
-    """ Stop the bot process and clear WebSocket connection. """
     global is_contract_open, active_processes
-    
     current_data = get_session_data(email)
     if current_data.get("is_running") is True:
         current_data["is_running"] = False
@@ -148,11 +121,8 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
             del active_processes[email]
     
     with PROCESS_LOCK:
-        if email in active_ws:
-            del active_ws[email]
-
-    if email in is_contract_open:
-        is_contract_open[email] = False
+        if email in active_ws: del active_ws[email]
+    if email in is_contract_open: is_contract_open[email] = False
 
     if clear_data:
         if stop_reason in ["SL Reached", "TP Reached", "API Buy Error"]:
@@ -168,14 +138,12 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
 # ==========================================================
 
 def calculate_martingale_stake(base_stake, current_stake, current_step):
-    """ 💡 التغيير: منطق المضاعفة الآن هو (الرهان الخاسر × 2.2) """
+    """ منطق المضاعفة (الرهان الخاسر × 2.2) """
     if current_step == 0:
         return base_stake
-        
     if current_step <= MARTINGALE_STEPS:
-        return current_stake * 2.2 # 💡 تم التغيير من 6.5 إلى 2.2
-    else:
-        return base_stake
+        return current_stake * 2.2 
+    return base_stake
 
 def send_trade_order(email, stake, currency, action_type):
     """ إرسال أمر الشراء (RISE أو FALL) """
@@ -184,15 +152,13 @@ def send_trade_order(email, stake, currency, action_type):
     if email not in active_ws or active_ws[email] is None: return
     ws_app = active_ws[email]
     
-    rounded_stake = round(stake, 2)
-    
     trade_request = {
         "buy": 1,
-        "price": rounded_stake,
+        "price": round(stake, 2),
         "parameters": {
-            "amount": rounded_stake,
+            "amount": round(stake, 2),
             "basis": "stake",
-            "contract_type": action_type, # RISE أو FALL
+            "contract_type": action_type, 
             "currency": currency, 
             "duration": DURATION,
             "duration_unit": DURATION_UNIT, 
@@ -202,13 +168,13 @@ def send_trade_order(email, stake, currency, action_type):
     try:
         ws_app.send(json.dumps(trade_request))
         is_contract_open[email] = True
-        print(f"💰 [TRADE] Sent {action_type} {DURATION}{DURATION_UNIT} with stake: {rounded_stake:.2f} {currency}")
+        print(f"💰 [TRADE] Sent {action_type} {DURATION}{DURATION_UNIT} with stake: {round(stake, 2):.2f} {currency}")
     except Exception as e:
         print(f"❌ [TRADE ERROR] Could not send trade order: {e}")
         pass
 
-def re_enter_immediately(email, last_loss_stake, action_type):
-    """ المضاعفة والدخول الفوري بعد الخسارة (RISE أو FALL) """
+def calculate_and_store_martingale(email, last_loss_stake, last_action_type):
+    """ حساب الرهان الجديد وتخزينه دون الدخول الفوري """
     current_data = get_session_data(email)
     
     new_stake = calculate_martingale_stake(
@@ -218,17 +184,14 @@ def re_enter_immediately(email, last_loss_stake, action_type):
     )
 
     current_data['current_stake'] = new_stake
-    current_data['last_entry_time'] = 0 
+    current_data['last_action_type'] = last_action_type # تخزين نوع الصفقة للمحاولة القادمة
     save_session_data(email, current_data)
-
-    currency_to_use = current_data['currency'] 
-    send_trade_order(email, new_stake, currency_to_use, action_type)
-    print(f"💸 [MARTINGALE] Lost. Re-entering immediately (Step {current_data['current_step']}/{MARTINGALE_STEPS}) with stake: {new_stake:.2f} ({action_type})")
+    print(f"💸 [MARTINGALE] Lost. Calculating next stake: {new_stake:.2f}. Waiting for next opportunity (0s/15s cycle).")
 
 
 def check_pnl_limits(email, profit_loss, last_action_type):
     """ تحديث الإحصائيات واتخاذ قرار بشأن المضاعفة/الإيقاف """
-    global is_contract_open, CONTRACT_TYPE
+    global is_contract_open
     
     is_contract_open[email] = False
 
@@ -236,7 +199,6 @@ def check_pnl_limits(email, profit_loss, last_action_type):
     if not current_data.get('is_running'): return
 
     last_stake = current_data['current_stake']
-
     current_data['current_profit'] += profit_loss
     
     if profit_loss > 0:
@@ -244,26 +206,20 @@ def check_pnl_limits(email, profit_loss, last_action_type):
         current_data['current_step'] = 0
         current_data['consecutive_losses'] = 0
         current_data['current_stake'] = current_data['base_stake']
-        current_data['last_entry_time'] = 0 
+        current_data['last_action_type'] = last_action_type 
         
     else:
         current_data['total_losses'] += 1
         current_data['consecutive_losses'] += 1
         current_data['current_step'] += 1
         
-        # التحقق من الحد الأقصى للخسارات المتتالية
-        if current_data['consecutive_losses'] > MAX_CONSECUTIVE_LOSSES:
-            stop_bot(email, clear_data=True, stop_reason="SL Reached")
-            return
-        
-        # التحقق من تجاوز خطوات المارتنجيل 
-        if current_data['current_step'] > MARTINGALE_STEPS:
+        # التحقق من الحد الأقصى للخسارات المتتالية وخطوات المارتنجيل
+        if current_data['consecutive_losses'] > MAX_CONSECUTIVE_LOSSES or current_data['current_step'] > MARTINGALE_STEPS:
             stop_bot(email, clear_data=True, stop_reason="SL Reached")
             return
         
         save_session_data(email, current_data)
-        # المضاعفة الفورية بنفس نوع الصفقة السابقة
-        re_enter_immediately(email, last_stake, last_action_type) 
+        calculate_and_store_martingale(email, last_stake, last_action_type) 
         return
 
     if current_data['current_profit'] >= current_data['tp_target']:
@@ -298,16 +254,17 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         "last_tick_data": None,
         "currency": currency,
         "account_type": account_type,
-        "open_price": 0.0,      # إعادة تعيين
-        "open_time": 0          # إعادة تعيين
+        "open_price": 0.0,      
+        "open_time": 0,          
+        "last_action_type": "CALL", 
+        "last_valid_tick_price": 0.0 # إعادة تعيين
     })
     save_session_data(email, session_data)
 
     while True:
         current_data = get_session_data(email)
         
-        if not current_data.get('is_running'):
-            break
+        if not current_data.get('is_running'): break
 
         print(f"🔗 [PROCESS] Attempting to connect for {email} ({account_type.upper()}/{currency})...")
 
@@ -338,89 +295,70 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     "price": current_price,
                     "timestamp": current_timestamp
                 }
+                
+                # 💡 تخزين آخر سعر تيك صحيح ليكون هو سعر الإغلاق
+                current_data['last_valid_tick_price'] = current_price
                 save_session_data(email, current_data)
                 
-                if is_contract_open.get(email) is True:
-                    return
+                if is_contract_open.get(email) is True: return
                     
                 current_second = datetime.fromtimestamp(current_timestamp, tz=timezone.utc).second
-                time_since_last_entry = current_timestamp - current_data['last_entry_time']
-
-                # 1. 💡 تسجيل سعر الافتتاح عند الثانية 0
+                
+                # 1. تسجيل سعر الافتتاح عند الثانية 0
                 if current_second == 0 and current_data['open_time'] != current_timestamp:
                     current_data['open_price'] = current_price
                     current_data['open_time'] = current_timestamp
+                    current_data['last_entry_time'] = 0 
+                    current_data['last_valid_tick_price'] = current_price # تحديث أول سعر تيك صحيح عند 0
                     save_session_data(email, current_data)
                     print(f"🕒 [OPEN] Recorded Open Price: {current_price} at second 0.")
-                    return # لا ندخل صفقة عند الثانية 0
+                    return 
 
-                # 2. 💡 التحقق من الدخول عند الثانية 15 (أو الدخول الفوري بعد خسارة)
-                is_entry_time = current_second == 15
-                
-                # الدخول الفوري فقط في حالة المضاعفة (current_step > 0)
-                should_enter_immediately = current_data['current_step'] > 0 and current_data['last_entry_time'] == 0
-                
-                # الدخول عند الثانية 15 فقط في حالة الرهان الأساسي (current_step == 0)
-                should_enter_at_15 = current_data['current_step'] == 0 and is_entry_time and current_data['open_price'] != 0.0
-
-                if should_enter_immediately or should_enter_at_15:
+                # 2. منطق قرار الدخول: إذا كان سعر الافتتاح مُسجلاً والوقت تجاوز أو وصل الثانية 15، و لم يتم الدخول بعد
+                if current_data['open_price'] != 0.0 and current_second >= 15 and current_data['last_entry_time'] == 0:
                     
-                    entry_price = current_data['last_tick_data']['price']
+                    # سعر الإغلاق هو آخر تيك تم تسجيله
+                    entry_price = current_data['last_valid_tick_price'] 
                     stake_to_use = current_data['current_stake']
                     currency_to_use = current_data['currency']
                     
                     action_type = ""
                     
-                    if should_enter_at_15:
-                        # 3. 💡 منطق تحديد الاتجاه (سعر الإغلاق > سعر الافتتاح = RISE)
-                        open_price = current_data['open_price']
-                        close_price = entry_price # سعر الإغلاق هو آخر تيك (عند الثانية 15)
+                    # 3. منطق تحديد الاتجاه (سعر الإغلاق > سعر الافتتاح = RISE)
+                    open_price = current_data['open_price']
+                    close_price = entry_price 
+                    
+                    if close_price > open_price:
+                        action_type = "CALL" # RISE
+                    elif close_price < open_price:
+                        action_type = "PUT" # FALL
+                    else:
+                        print("⏸️ [SKIP] Open Price == Close Price. Skipping entry this cycle.")
+                        current_data['open_price'] = 0.0
+                        current_data['open_time'] = 0
+                        current_data['last_entry_time'] = current_timestamp 
+                        save_session_data(email, current_data)
+                        return
                         
-                        if close_price > open_price:
-                            action_type = "CALL" # RISE
-                        elif close_price < open_price:
-                            action_type = "PUT" # FALL
-                        else:
-                            # إذا تساوى السعران، ننتظر الدورة القادمة
-                            print("⏸️ [SKIP] Open Price == Close Price. Skipping entry this cycle.")
-                            current_data['open_price'] = 0.0
-                            current_data['open_time'] = 0
-                            save_session_data(email, current_data)
-                            return
-                            
-                    elif should_enter_immediately:
-                        # 4. 💡 في حالة المضاعفة، نستخدم نوع الصفقة التي خسرت في المرة الأخيرة (يجب أن يتم تخزينها)
-                        # بما أن دالة check_pnl_limits لا تخزن last_action_type، سنفترض أنه يجب إعادة إرسالها.
-                        # ولكن في هذا التصميم، re_enter_immediately هي من تحدد Action_Type.
-                        # لذا، إذا كان الدخول فورياً (مضاعفة)، فإن re_enter_immediately هي من أرسلت الأمر بالفعل، ولا يجب أن يصل التنفيذ إلى هذا الجزء.
-                        # إذا وصلنا إلى هنا وكانت should_enter_immediately صحيحة، فهذا يعني أننا لم نقم بالدخول في re_enter_immediately بعد.
-                        # الأسلوب الأفضل: re_enter_immediately ترسل الصفقة مباشرة ولا تعتمد على دورة التيك.
-                        # بما أننا الآن نقوم بتطبيق الدخول الفوري في re_enter_immediately، فإن should_enter_immediately في هذا الموقع يجب أن تكون دائماً False.
-                        # لذا، سنركز فقط على should_enter_at_15
-                        if current_data['current_step'] > 0:
-                            print("⚠️ [Warning] Martingale immediate re-entry logic should be handled by re_enter_immediately. Skipping tick logic.")
-                            return
-
                     if action_type:
-                        current_data['last_entry_price'] = entry_price
-                        current_data['last_entry_time'] = current_timestamp
-                        current_data['open_price'] = 0.0 # تصفير لبدء دورة جديدة
+                        
+                        current_data['last_entry_time'] = current_timestamp 
+                        current_data['open_price'] = 0.0 
                         current_data['open_time'] = 0
                         
                         send_trade_order(email, stake_to_use, currency_to_use, action_type)
                         save_session_data(email, current_data)
-
+                        
+                    return # إنهاء معالجة التيك بعد قرار الدخول
 
             elif msg_type == 'buy':
                 contract_id = data['buy']['contract_id']
-                # حفظ نوع الصفقة لتستخدم في المضاعفة إذا خسرت
                 action_type = data['buy']['shortcode'].split('_')[1] 
                 current_data['last_action_type'] = action_type
                 save_session_data(email, current_data)
                 
                 ws_app.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
             
-            # معالجة رسائل الأخطاء من API
             elif 'error' in data:
                 error_code = data['error'].get('code', 'N/A')
                 error_message = data['error'].get('message', 'Unknown Error')
@@ -432,7 +370,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             elif msg_type == 'proposal_open_contract':
                 contract = data['proposal_open_contract']
                 if contract.get('is_sold') == 1:
-                    last_action_type = get_session_data(email).get('last_action_type', 'CALL') # افتراض CALL إذا لم نجد
+                    last_action_type = get_session_data(email).get('last_action_type', 'CALL') 
                     check_pnl_limits(email, contract['profit'], last_action_type)
                     if 'subscription_id' in data: ws_app.send(json.dumps({"forget": data['subscription_id']}))
 
@@ -452,8 +390,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         except Exception as e:
             print(f"❌ [ERROR] WebSocket failed for {email}: {e}")
         
-        if get_session_data(email).get('is_running') is False:
-            break
+        if get_session_data(email).get('is_running') is False: break
         
         print(f"💤 [PROCESS] Waiting {RECONNECT_DELAY} seconds before retrying connection for {email}...")
         time.sleep(RECONNECT_DELAY)
@@ -461,14 +398,13 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
     print(f"🛑 [PROCESS] Bot process loop ended for {email}.")
 
 # ==========================================================
-# FLASK APP SETUP AND ROUTES (تم تحديث CONTROL_FORM)
+# FLASK APP SETUP AND ROUTES (No change)
 # ==========================================================
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
 app.config['SESSION_PERMANENT'] = False
 
-# HTML TEMPLATE (AUTH_FORM) - No change
 AUTH_FORM = """
 <!doctype html>
 <title>Login - Deriv Bot</title>
@@ -494,7 +430,6 @@ AUTH_FORM = """
 </form>
 """
 
-# HTML TEMPLATE (CONTROL_FORM) 
 CONTROL_FORM = """
 <!doctype html>
 <title>Control Panel</title>
@@ -572,6 +507,9 @@ CONTROL_FORM = """
     {% if session_data.open_price != 0.0 %}
         <p style="color: orange; font-weight: bold;">Current Open Price (0s): {{ session_data.open_price|round(5) }}</p>
     {% endif %}
+    {% if session_data.last_valid_tick_price != 0.0 %}
+        <p style="color: purple; font-weight: bold;">Last Tick Price: {{ session_data.last_valid_tick_price|round(5) }}</p>
+    {% endif %}
     <p style="font-weight: bold; color: #007bff;">Current Strategy: **{{ strategy }}**</p>
     
     <form method="POST" action="{{ url_for('stop_route') }}">
@@ -619,41 +557,29 @@ CONTROL_FORM = """
 
 @app.before_request
 def check_user_status():
-    if request.endpoint in ('login', 'auth_page', 'logout', 'static'):
-        return
-
+    if request.endpoint in ('login', 'auth_page', 'logout', 'static'): return
     if 'email' in session:
         email = session['email']
         allowed_users = load_allowed_users()
-        
         if email.lower() not in allowed_users:
-            print(f"🛑 [SECURITY] User {email} removed from list. Forcing logout.")
             session.pop('email', None)
             flash('Your access has been revoked. Please log in again.', 'error')
             return redirect(url_for('auth_page'))
 
 @app.route('/')
 def index():
-    if 'email' not in session:
-        return redirect(url_for('auth_page'))
-    
+    if 'email' not in session: return redirect(url_for('auth_page'))
     email = session['email']
     session_data = get_session_data(email)
 
     if not session_data.get('is_running') and "stop_reason" in session_data and session_data["stop_reason"] not in ["Stopped Manually", "Running", "Disconnected (Auto-Retry)", "Displayed"]:
-        
         reason = session_data["stop_reason"]
-        
-        if reason == "SL Reached":
-            flash(f"🛑 STOP: الحد الأقصى للخسارة ({MAX_CONSECUTIVE_LOSSES} خسارات متتالية أو تجاوز {MARTINGALE_STEPS} خطوات مضاعفة) تم الوصول إليه! (SL Reached)", 'error')
-        elif reason == "TP Reached":
-            flash(f"✅ GOAL: هدف الربح ({session_data['tp_target']} {session_data.get('currency', 'USD')}) تم الوصول إليه بنجاح! (TP Reached)", 'success')
-        elif reason.startswith("API Buy Error"):
-             flash(f"❌ API Error: {reason}. Check your token and account status.", 'error')
+        if reason == "SL Reached": flash(f"🛑 STOP: الحد الأقصى للخسارة ({MAX_CONSECUTIVE_LOSSES} خسارات متتالية أو تجاوز {MARTINGALE_STEPS} خطوات مضاعفة) تم الوصول إليه! (SL Reached)", 'error')
+        elif reason == "TP Reached": flash(f"✅ GOAL: هدف الربح ({session_data['tp_target']} {session_data.get('currency', 'USD')}) تم الوصول إليه بنجاح! (TP Reached)", 'success')
+        elif reason.startswith("API Buy Error"): flash(f"❌ API Error: {reason}. Check your token and account status.", 'error')
             
         session_data['stop_reason'] = "Displayed"
         save_session_data(email, session_data)
-        
         delete_session_data(email)
 
     return render_template_string(CONTROL_FORM,
@@ -662,7 +588,7 @@ def index():
         martingale_steps=MARTINGALE_STEPS,
         max_consecutive_losses=MAX_CONSECUTIVE_LOSSES,
         contract_type=CONTRACT_TYPE, 
-        duration=DURATION  # تم إضافة المدة للعرض
+        duration=DURATION  
     )
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -670,7 +596,6 @@ def login():
     if request.method == 'POST':
         email = request.form['email'].lower()
         allowed_users = load_allowed_users()
-        
         if email in allowed_users:
             session['email'] = email
             flash('Login successful.', 'success')
@@ -678,22 +603,17 @@ def login():
         else:
             flash('Email not authorized.', 'error')
             return redirect(url_for('auth_page'))
-    
     return redirect(url_for('auth_page'))
 
 @app.route('/auth')
 def auth_page():
-    if 'email' in session:
-        return redirect(url_for('index'))
+    if 'email' in session: return redirect(url_for('index'))
     return render_template_string(AUTH_FORM)
 
 @app.route('/start', methods=['POST'])
 def start_bot():
     global active_processes
-    
-    if 'email' not in session:
-        return redirect(url_for('auth_page'))
-    
+    if 'email' not in session: return redirect(url_for('auth_page'))
     email = session['email']
     
     with PROCESS_LOCK:
@@ -703,25 +623,11 @@ def start_bot():
             
     try:
         account_type = request.form['account_type']
-        
-        if account_type == 'demo':
-            currency = "USD"
-        elif account_type == 'live':
-            currency = "tUSDT"
-        else:
-            flash("Invalid account type selected.", 'error')
-            return redirect(url_for('index'))
-
+        currency = "USD" if account_type == 'demo' else "tUSDT"
         current_data = get_session_data(email)
-        
-        if current_data.get('api_token') and request.form.get('token') == current_data['api_token']:
-            token = current_data['api_token']
-        else:
-            token = request.form['token']
-
+        token = request.form['token'] if not current_data.get('api_token') or request.form.get('token') != current_data['api_token'] else current_data['api_token']
         stake = float(request.form['stake'])
         tp = float(request.form['tp'])
-
     except ValueError:
         flash("Invalid stake or TP value.", 'error')
         return redirect(url_for('index'))
@@ -730,17 +636,14 @@ def start_bot():
     process.daemon = True
     process.start()
     
-    with PROCESS_LOCK:
-        active_processes[email] = process
+    with PROCESS_LOCK: active_processes[email] = process
     
     flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {CONTRACT_TYPE} {DURATION} Ticks (x2.2 Martingale)', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
 def stop_route():
-    if 'email' not in session:
-        return redirect(url_for('auth_page'))
-    
+    if 'email' not in session: return redirect(url_for('auth_page'))
     stop_bot(session['email'], clear_data=True, stop_reason="Stopped Manually")
     flash('Bot stopped and session data cleared.', 'success')
     return redirect(url_for('index'))
