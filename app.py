@@ -329,10 +329,10 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
 
                     # 💡 منطق عكس الاتجاه: المقارنة بين سعر الفتح المرجعي وسعر الإغلاق الحالي
                     if current_close_price > reference_open_price:
-                        action_type = "CALL" # ترند صاعد (أغلق أعلى من الفتح المرجعي) -> دخول هبوط (FALL)
+                        action_type = "PUT" # ترند صاعد (أغلق أعلى من الفتح المرجعي) -> دخول هبوط (FALL)
                         print(f"📈 [STRAT] Trend: RISE ({reference_open_price} -> {current_close_price}). Entering CALL (FALL - Opposite Trend).")
                     elif current_close_price < reference_open_price:
-                        action_type = "PUT" # ترند هابط (أغلق أدنى من الفتح المرجعي) -> دخول صعود (RISE)
+                        action_type = "CALL" # ترند هابط (أغلق أدنى من الفتح المرجعي) -> دخول صعود (RISE)
                         print(f"📉 [STRAT] Trend: FALL ({reference_open_price} -> {current_close_price}). Entering PUT (RISE - Opposite Trend).")
                     else:
                         print("⏸ [SKIP] Price is Neutral. Skipping entry.")
