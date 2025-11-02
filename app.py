@@ -16,15 +16,15 @@ WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
 DURATION = 1                 # 1 تيك
 DURATION_UNIT = "t"          # وحدة المدة "t" (تيك)
-MARTINGALE_STEPS = 2         # الحد الأقصى لخطوات المضاعفة 2
-MAX_CONSECUTIVE_LOSSES = 3   # الحد الأقصى للخسارات المتتالية 3
+MARTINGALE_STEPS = 3         # الحد الأقصى لخطوات المضاعفة 2
+MAX_CONSECUTIVE_LOSSES = 4   # الحد الأقصى للخسارات المتتالية 3
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 
 # 💡 الاستراتيجية
 CONTRACT_TYPE = "DIGITUNDER" 
-TARGET_DIGIT = 8            
+TARGET_DIGIT = 7            
 # ==========================================================
 
 # ==========================================================
@@ -167,7 +167,7 @@ def calculate_martingale_stake(base_stake, current_stake, current_step):
         return base_stake
         
     if current_step <= MARTINGALE_STEPS:
-        return current_stake * 6.5
+        return current_stake * 3.5
     else:
         return base_stake
 
