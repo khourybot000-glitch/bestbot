@@ -329,9 +329,9 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     close_price = entry_price 
                     
                     if close_price > open_price:
-                        action_type = "CALL" # RISE
+                        action_type = "PUT" # RISE
                     elif close_price < open_price:
-                        action_type = "PUT" # FALL
+                        action_type = "CALL" # FALL
                     else:
                         print("⏸ [SKIP] Open Price == Close Price. Skipping entry this cycle.")
                         current_data['open_price'] = 0.0
