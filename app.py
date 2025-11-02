@@ -14,17 +14,17 @@ from threading import Lock
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
-DURATION = 1 
-DURATION_UNIT = "t" 
-MARTINGALE_STEPS = 2 
-MAX_CONSECUTIVE_LOSSES = 3 
+DURATION = 1                 # 1 تيك
+DURATION_UNIT = "t"          # وحدة المدة "t" (تيك)
+MARTINGALE_STEPS = 2         # الحد الأقصى لخطوات المضاعفة 2
+MAX_CONSECUTIVE_LOSSES = 3   # الحد الأقصى للخسارات المتتالية 3
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 
-# 💡 التغييرات الخاصة بالاستراتيجية: DIGITDIFF 0
-CONTRACT_TYPE = "DIGITUNDER" # نوع العقد: رقم مختلف
-TARGET_DIGIT = 8            # الرقم المستهدف للمخالفة: 0
+# 💡 الاستراتيجية
+CONTRACT_TYPE = "DIGITUNDER" 
+TARGET_DIGIT = 8            
 # ==========================================================
 
 # ==========================================================
@@ -34,8 +34,6 @@ active_processes = {}
 active_ws = {}
 is_contract_open = {}
 PROCESS_LOCK = Lock()
-
-# 💡 تمت إزالة حالة التداول CALL/PUT لتبني استراتيجية DIGITDIFF الثابتة
 
 DEFAULT_SESSION_STATE = {
     "api_token": "",
@@ -160,22 +158,22 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
         print(f"⚠️ [INFO] WS closed for {email}. Attempting immediate reconnect.")
 
 # ==========================================================
-# TRADING BOT FUNCTIONS (Martingale logic remains the same)
+# TRADING BOT FUNCTIONS
 # ==========================================================
 
 def calculate_martingale_stake(base_stake, current_stake, current_step):
-    """ Martingale logic: multiply the losing stake by 2.2 """
+    """ 💡 التغيير: منطق المضاعفة الآن هو (الرهان الخاسر × 6.5) """
     if current_step == 0:
         return base_stake
         
     if current_step <= MARTINGALE_STEPS:
-        return current_stake * 7
+        return current_stake * 6.5
     else:
         return base_stake
 
 def send_trade_order(email, stake, currency):
-    """ 💡 تحديث: إرسال طلب الشراء باستخدام DIGITDIFF 0 """
-    global is_contract_open, active_ws, CONTRACT_TYPE, TARGET_DIGIT
+    """ استخدام DURATION = 1 تيك و CONTRACT_TYPE = DIGITUNDER """
+    global is_contract_open, active_ws, CONTRACT_TYPE, TARGET_DIGIT, DURATION, DURATION_UNIT
     
     if email not in active_ws or active_ws[email] is None: return
     ws_app = active_ws[email]
@@ -188,8 +186,8 @@ def send_trade_order(email, stake, currency):
         "parameters": {
             "amount": rounded_stake,
             "basis": "stake",
-            "contract_type": CONTRACT_TYPE, # DIGITDIFF
-            "barrier": str(TARGET_DIGIT),   # 0
+            "contract_type": CONTRACT_TYPE, 
+            "barrier": str(TARGET_DIGIT),   
             "currency": currency, 
             "duration": DURATION,
             "duration_unit": DURATION_UNIT, 
@@ -205,7 +203,7 @@ def send_trade_order(email, stake, currency):
         pass
 
 def re_enter_immediately(email, last_loss_stake):
-    """ Prepares state for the Martingale stake. """
+    """ المضاعفة والدخول الفوري بعد الخسارة """
     current_data = get_session_data(email)
     
     new_stake = calculate_martingale_stake(
@@ -215,12 +213,16 @@ def re_enter_immediately(email, last_loss_stake):
     )
 
     current_data['current_stake'] = new_stake
-    # 💡 تم إزالة current_trade_state
+    current_data['last_entry_time'] = 0 
     save_session_data(email, current_data)
+
+    currency_to_use = current_data['currency'] 
+    send_trade_order(email, new_stake, currency_to_use)
+    print(f"💸 [MARTINGALE] Lost. Re-entering immediately (Step {current_data['current_step']}/{MARTINGALE_STEPS}) with stake: {new_stake:.2f}")
 
 
 def check_pnl_limits(email, profit_loss):
-    """ Update statistics and decide whether to re-enter immediately or wait. """
+    """ تحديث الإحصائيات واتخاذ قرار بشأن المضاعفة/الإيقاف """
     global is_contract_open, CONTRACT_TYPE, TARGET_DIGIT
     
     is_contract_open[email] = False
@@ -237,19 +239,26 @@ def check_pnl_limits(email, profit_loss):
         current_data['current_step'] = 0
         current_data['consecutive_losses'] = 0
         current_data['current_stake'] = current_data['base_stake']
-        # 💡 تم إزالة current_trade_state
+        current_data['last_entry_time'] = 0
         
     else:
         current_data['total_losses'] += 1
         current_data['consecutive_losses'] += 1
         current_data['current_step'] += 1
         
-        if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES:
+        # التحقق من الحد الأقصى للخسارات المتتالية
+        if current_data['consecutive_losses'] > MAX_CONSECUTIVE_LOSSES:
+            stop_bot(email, clear_data=True, stop_reason="SL Reached")
+            return
+        
+        # التحقق من تجاوز خطوات المارتنجيل (الحد الأقصى 2 خطوة بعد الرهان الأساسي)
+        if current_data['current_step'] > MARTINGALE_STEPS:
             stop_bot(email, clear_data=True, stop_reason="SL Reached")
             return
         
         save_session_data(email, current_data)
-        re_enter_immediately(email, last_stake)
+        # المضاعفة الفورية (الدالة re_enter_immediately سترسل الأمر)
+        re_enter_immediately(email, last_stake) 
         return
 
     if current_data['current_profit'] >= current_data['tp_target']:
@@ -264,7 +273,7 @@ def check_pnl_limits(email, profit_loss):
 
 
 def bot_core_logic(email, token, stake, tp, currency, account_type):
-    """ Main bot logic with auto-reconnect loop running in a separate process. """
+    """ منطق البوت الأساسي """
     
     global is_contract_open, active_ws, CONTRACT_TYPE, TARGET_DIGIT
 
@@ -278,7 +287,6 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         "tp_target": tp,
         "is_running": True, 
         "current_stake": stake,
-        # 💡 تم إزالة current_trade_state
         "stop_reason": "Running",
         "last_entry_time": 0,
         "last_entry_price": 0.0,
@@ -329,38 +337,39 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     return
                     
                 
-                # 💡 التغيير: توقيت الدخول عند الثواني 0, 15, 30, 45
+                # توقيت الدخول فقط عند الثانية 0
                 entry_seconds = [0] 
                 current_second = datetime.fromtimestamp(current_timestamp, tz=timezone.utc).second
                 is_entry_time = current_second in entry_seconds
                 
-                # زمن الدخول يجب أن يكون 14 ثانية على الأقل بين كل دخول وآخر (لأن مدة العقد 30 ثانية)
                 time_since_last_entry = current_timestamp - current_data['last_entry_time']
                 
-                if time_since_last_entry >= 14 and is_entry_time: # 14 ثانية كحد أدنى للتباعد
+                # الدخول مسموح إذا كانت:
+                # 1. مضاعفة فورية (last_entry_time=0)
+                # 2. أو دخول أولي (current_step=0) وعند الثانية 0
+                should_enter = (current_data['last_entry_time'] == 0) or \
+                                (time_since_last_entry >= 1 and is_entry_time and current_data['current_step'] == 0)
+
+                if should_enter: 
                     
                     tick_to_use = current_data['last_tick_data']
                     if tick_to_use is None: return
 
                     entry_price = tick_to_use['price']
                     
-                    # 💡 تم إزالة منطق تحديد الاتجاه (CALL/PUT)
                     stake_to_use = current_data['current_stake']
                     currency_to_use = current_data['currency'] 
                     
                     current_data['last_entry_price'] = entry_price
                     current_data['last_entry_time'] = current_timestamp
-                    # 💡 تم إزالة تحديث حالة التداول
-                    save_session_data(email, current_data)
-
-                    # 💡 إرسال الطلب بنوع العقد الجديد DIGITDIFF 0
+                    
                     send_trade_order(email, stake_to_use, currency_to_use)
                     
             elif msg_type == 'buy':
                 contract_id = data['buy']['contract_id']
                 ws_app.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
             
-            # 💡 معالجة رسائل الأخطاء من API
+            # معالجة رسائل الأخطاء من API
             elif 'error' in data:
                 error_code = data['error'].get('code', 'N/A')
                 error_message = data['error'].get('message', 'Unknown Error')
@@ -433,7 +442,7 @@ AUTH_FORM = """
 </form>
 """
 
-# HTML TEMPLATE (CONTROL_FORM) - 💡 تم تحديث عرض الاستراتيجية
+# HTML TEMPLATE (CONTROL_FORM) 
 CONTROL_FORM = """
 <!doctype html>
 <title>Control Panel</title>
@@ -491,17 +500,22 @@ CONTROL_FORM = """
         {% for category, message in messages %}
             <p style="color:{{ 'green' if category == 'success' else ('blue' if category == 'info' else 'red') }};">{{ message }}</p>
         {% endfor %}
+        
+        {% if session_data and session_data.stop_reason and session_data.stop_reason != "Running" %}
+            <p style="color:red; font-weight:bold;">Last Reason: {{ session_data.stop_reason }}</p>
+        {% endif %}
     {% endif %}
 {% endwith %}
 
+
 {% if session_data and session_data.is_running %}
-    {% set strategy = contract_type + " " + target_digit|string + " (0, 15, 30, 45s)" %}
+    {% set strategy = contract_type + " " + target_digit|string + " (1 Tick @ x6.5 Martingale)" %}
     
     <p class="status-running">✅ Bot is **Running**! (Auto-refreshing)</p>
     <p>Account Type: **{{ session_data.account_type.upper() }}** | Currency: **{{ session_data.currency }}**</p>
     <p>Net Profit: **{{ session_data.currency }} {{ session_data.current_profit|round(2) }}**</p>
     <p>Current Stake: **{{ session_data.currency }} {{ session_data.current_stake|round(2) }}**</p>
-    <p>Step: **{{ session_data.current_step }}** / {{ martingale_steps }}</p>
+    <p>Step: **{{ session_data.current_step }}** / {{ martingale_steps }} (Max Loss: {{ max_consecutive_losses }})</p>
     <p>Stats: **{{ session_data.total_wins }}** Wins | **{{ session_data.total_losses }}** Losses</p>
     <p style="font-weight: bold; color: #007bff;">Current Strategy: **{{ strategy }}**</p>
     
@@ -538,7 +552,6 @@ CONTROL_FORM = """
         var isRunning = {{ 'true' if session_data and session_data.is_running else 'false' }};
         
         if (isRunning) {
-            // تحديث كل 5 ثوانٍ للواجهة
             setTimeout(function() {
                 window.location.reload();
             }, 5000); 
@@ -548,6 +561,21 @@ CONTROL_FORM = """
     autoRefresh();
 </script>
 """
+
+@app.before_request
+def check_user_status():
+    if request.endpoint in ('login', 'auth_page', 'logout', 'static'):
+        return
+
+    if 'email' in session:
+        email = session['email']
+        allowed_users = load_allowed_users()
+        
+        if email.lower() not in allowed_users:
+            print(f"🛑 [SECURITY] User {email} removed from list. Forcing logout.")
+            session.pop('email', None)
+            flash('Your access has been revoked. Please log in again.', 'error')
+            return redirect(url_for('auth_page'))
 
 @app.route('/')
 def index():
@@ -562,7 +590,7 @@ def index():
         reason = session_data["stop_reason"]
         
         if reason == "SL Reached":
-            flash(f"🛑 STOP: الحد الأقصى للخسارة ({MAX_CONSECUTIVE_LOSSES} خسارات متتالية) تم الوصول إليه! (SL Reached)", 'error')
+            flash(f"🛑 STOP: الحد الأقصى للخسارة ({MAX_CONSECUTIVE_LOSSES} خسارات متتالية أو تجاوز {MARTINGALE_STEPS} خطوات مضاعفة) تم الوصول إليه! (SL Reached)", 'error')
         elif reason == "TP Reached":
             flash(f"✅ GOAL: هدف الربح ({session_data['tp_target']} {session_data.get('currency', 'USD')}) تم الوصول إليه بنجاح! (TP Reached)", 'success')
         elif reason.startswith("API Buy Error"):
@@ -577,11 +605,10 @@ def index():
         email=email,
         session_data=session_data,
         martingale_steps=MARTINGALE_STEPS,
-        contract_type=CONTRACT_TYPE, # 💡 تمرير اسم الاستراتيجية
-        target_digit=TARGET_DIGIT    # 💡 تمرير الرقم المستهدف
+        max_consecutive_losses=MAX_CONSECUTIVE_LOSSES,
+        contract_type=CONTRACT_TYPE, 
+        target_digit=TARGET_DIGIT    
     )
-
-# ... (بقية دوال Flask لم تتغير)
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -651,7 +678,7 @@ def start_bot():
     with PROCESS_LOCK:
         active_processes[email] = process
     
-    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: DIGITDIFF 0', 'success')
+    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {CONTRACT_TYPE} {TARGET_DIGIT} (1 Tick @ x6.5 Martingale)', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
