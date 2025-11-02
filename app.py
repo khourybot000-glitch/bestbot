@@ -14,14 +14,13 @@ from threading import Lock
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
-DURATION = 56 # 56 ثانية
-DURATION_UNIT = "s" # وحدة المدة ثواني
+DURATION = 5 # 5 تيك
+DURATION_UNIT = "t" # وحدة المدة تيك
 MARTINGALE_STEPS = 4
-MAX_CONSECUTIVE_LOSSES = 5
+MAX_CONSECUTIVE_LOSSES = 4
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
-MAX_TICKS = 30 # عدد التيكات التي سيتم تحليلها
 
 # 💡 الاستراتيجية
 CONTRACT_TYPE = "RISEFALL"
@@ -48,7 +47,7 @@ DEFAULT_SESSION_STATE = {
     "total_losses": 0,
     "stop_reason": "Stopped Manually",
     "last_entry_time": 0,
-    "last_entry_price": 0.0,
+    "last_entry_price": 0.0, # سيستخدم لتخزين سعر التيك المرجعي (سعر الإغلاق السابق)
     "last_tick_data": None,
     "currency": "USD",
     "account_type": "demo",
@@ -56,8 +55,7 @@ DEFAULT_SESSION_STATE = {
     "open_price": 0.0,
     "open_time": 0,
     "last_action_type": "CALL",
-    "last_valid_tick_price": 0.0,
-    "tick_history": []
+    "last_valid_tick_price": 0.0
 }
 # ==========================================================
 
@@ -186,7 +184,7 @@ def calculate_and_store_martingale(email, last_loss_stake, last_action_type):
     current_data['current_stake'] = new_stake
     current_data['last_action_type'] = last_action_type # تخزين نوع الصفقة للمحاولة القادمة
     save_session_data(email, current_data)
-    print(f"💸 [MARTINGALE] Lost. Calculating next stake: {new_stake:.2f}. Waiting for next opportunity (Second 0).")
+    print(f"💸 [MARTINGALE] Lost. Calculating next stake: {new_stake:.2f}. Waiting for next opportunity (Next Entry).")
 
 
 def check_pnl_limits(email, profit_loss, last_action_type):
@@ -236,7 +234,7 @@ def check_pnl_limits(email, profit_loss, last_action_type):
 def bot_core_logic(email, token, stake, tp, currency, account_type):
     """ منطق البوت الأساسي """
     
-    global is_contract_open, active_ws, CONTRACT_TYPE, MAX_TICKS
+    global is_contract_open, active_ws, CONTRACT_TYPE
 
     is_contract_open = {email: False}
     active_ws = {email: None}
@@ -250,15 +248,14 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         "current_stake": stake,
         "stop_reason": "Running",
         "last_entry_time": 0,
-        "last_entry_price": 0.0,
+        "last_entry_price": 0.0, # سيتم إعادة ضبطه هنا
         "last_tick_data": None,
         "currency": currency,
         "account_type": account_type,
         "open_price": 0.0,
         "open_time": 0,
         "last_action_type": "CALL",
-        "last_valid_tick_price": 0.0,
-        "tick_history": []
+        "last_valid_tick_price": 0.0
     })
     save_session_data(email, session_data)
 
@@ -272,8 +269,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         def on_open_wrapper(ws_app):
             current_data = get_session_data(email)
             ws_app.send(json.dumps({"authorize": current_data['api_token']}))
-            # طلب سجل التيكات الأولي (30 تيك)
-            ws_app.send(json.dumps({"ticks_history": SYMBOL, "count": MAX_TICKS, "end": "latest", "subscribe": 1, "style": "ticks"}))
+            # تم إزالة طلب ticks_history لعدم الحاجة إليه في هذه الاستراتيجية
             ws_app.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
             running_data = get_session_data(email)
             running_data['is_running'] = True
@@ -290,27 +286,15 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 ws_app.close()
                 return
 
-            # معالجة تاريخ التيكات الأولي
-            if msg_type == 'history':
-                if 'history' in data and 'prices' in data['history']:
-                    prices = data['history']['prices']
-                    current_data['tick_history'] = [float(p) for p in prices]
-                    save_session_data(email, current_data)
-                    print(f"📊 [HISTORY] Loaded initial {len(prices)} ticks for analysis.")
-
-            elif msg_type == 'tick':
+            if msg_type == 'tick':
                 current_timestamp = int(data['tick']['epoch'])
                 current_price = float(data['tick']['quote'])
                 
+                # تحديث بيانات التيك
                 current_data['last_tick_data'] = {
                     "price": current_price,
                     "timestamp": current_timestamp
                 }
-
-                # تحديث سجل التيكات (إزالة الأقدم وإضافة الجديد)
-                if len(current_data['tick_history']) >= MAX_TICKS:
-                    current_data['tick_history'].pop(0)
-                current_data['tick_history'].append(current_price)
                 
                 current_data['last_valid_tick_price'] = current_price # تحديث آخر سعر تيك صحيح
                 save_session_data(email, current_data)
@@ -319,33 +303,42 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     
                 current_second = datetime.fromtimestamp(current_timestamp, tz=timezone.utc).second
                 
-                # 💡 منطق قرار الدخول: عند الثانية 0 ولم يتم الدخول بعد في هذه الدقيقة
-                if current_second == 0 and current_data['open_time'] != current_timestamp:
+                # --- المنطق الجديد للدخول عند 0, 15, 30, 45 ثانية ---
+                
+                ENTRY_POINTS = [0, 15, 30, 45]
+                
+                if current_second in ENTRY_POINTS and current_data['open_time'] != current_timestamp:
+                    
                     current_data['open_time'] = current_timestamp
                     
-                    if len(current_data['tick_history']) < MAX_TICKS:
-                        print("⏸ [SKIP] Waiting for initial 30 ticks history to populate.")
-                        current_data['last_entry_time'] = current_timestamp
+                    # --- الحالة 1: عند تشغيل البوت للمرة الأولى عند الثانية 0 فقط ---
+                    # إذا كانت هذه هي أول دورة، يتم تسجيل السعر الحالي كسعر مرجعي أولي ويتخطى الدخول.
+                    if current_second == 0 and current_data['last_entry_price'] == 0.0:
+                        current_data['last_entry_price'] = current_price
+                        print(f"⏸ [SKIP] Initial start. Stored Reference Price (Open Price for next entry): {current_price}. Waiting for 15s entry.")
                         save_session_data(email, current_data)
                         return
 
-                    # --- تحليل الـ 30 تيك وتحديد الاتجاه المعاكس ---
-                    ticks = current_data['tick_history']
-                    first_tick_price = ticks[0]
-                    last_tick_price = ticks[-1]
+                    # --- تحليل الترند باستخدام السعر المرجعي (سعر الإغلاق السابق) ---
                     
+                    # 'reference_open_price' هو السعر الذي تم تسجيله في نقطة الدخول السابقة (0, 15, 30, أو 45)
+                    reference_open_price = current_data['last_entry_price']
+                    current_close_price = current_price # السعر الحالي هو سعر الإغلاق
+
                     action_type = ""
-                    
-                    # 💡 منطق عكس الاتجاه: ترند صاعد -> دخول هبوط (CALL) / ترند هابط -> دخول صعود (PUT)
-                    if last_tick_price > first_tick_price:
-                        action_type = "CALL" # ترند صاعد -> دخول هبوط (CALL/FALL)
-                        print(f"📈 [STRAT] Last 30 Ticks: RISE ({first_tick_price} -> {last_tick_price}). Entering CALL (FALL - Opposite Trend).")
-                    elif last_tick_price < first_tick_price:
-                        action_type = "PUT" # ترند هابط -> دخول صعود (PUT/RISE)
-                        print(f"📉 [STRAT] Last 30 Ticks: FALL ({first_tick_price} -> {last_tick_price}). Entering PUT (RISE - Opposite Trend).")
+
+                    # 💡 منطق عكس الاتجاه: المقارنة بين سعر الفتح المرجعي وسعر الإغلاق الحالي
+                    if current_close_price > reference_open_price:
+                        action_type = "CALL" # ترند صاعد (أغلق أعلى من الفتح المرجعي) -> دخول هبوط (FALL)
+                        print(f"📈 [STRAT] Trend: RISE ({reference_open_price} -> {current_close_price}). Entering CALL (FALL - Opposite Trend).")
+                    elif current_close_price < reference_open_price:
+                        action_type = "PUT" # ترند هابط (أغلق أدنى من الفتح المرجعي) -> دخول صعود (RISE)
+                        print(f"📉 [STRAT] Trend: FALL ({reference_open_price} -> {current_close_price}). Entering PUT (RISE - Opposite Trend).")
                     else:
-                        print("⏸ [SKIP] First Tick == Last Tick (Neutral). Skipping entry.")
+                        print("⏸ [SKIP] Price is Neutral. Skipping entry.")
                         current_data['last_entry_time'] = current_timestamp
+                        # نحدث السعر المرجعي حتى لو لم ندخل ليكون نقطة الانطلاق التالية
+                        current_data['last_entry_price'] = current_close_price 
                         save_session_data(email, current_data)
                         return
 
@@ -356,6 +349,10 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                         
                         send_trade_order(email, stake_to_use, currency_to_use, action_type)
                         current_data['last_entry_time'] = current_timestamp
+                        
+                        # تخزين السعر الحالي ليكون السعر المرجعي (سعر الفتح) لنقطة الدخول التالية
+                        current_data['last_entry_price'] = current_close_price 
+                        
                         save_session_data(email, current_data)
                         
                     return
@@ -505,7 +502,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = contract_type + " (" + duration|string + " Seconds @ x2.2 Martingale / 30 Ticks Opposite Trend)" %}
+    {% set strategy = contract_type + " (" + duration|string + " Ticks @ x2.2 Martingale / Opposite Trend (0, 15, 30, 45 seconds))" %}
     
     <p class="status-running">✅ Bot is *Running*! (Auto-refreshing)</p>
     <p>Account Type: *{{ session_data.account_type.upper() }}* | Currency: *{{ session_data.currency }}*</p>
@@ -514,7 +511,7 @@ CONTROL_FORM = """
     <p>Step: *{{ session_data.current_step }}* / {{ martingale_steps }} (Max Loss: {{ max_consecutive_losses }})</p>
     <p>Stats: *{{ session_data.total_wins }}* Wins | *{{ session_data.total_losses }}* Losses</p>
     {% if session_data.open_time != 0 %}
-        <p style="color: orange; font-weight: bold;">Last Entry Second: 0s</p>
+        <p style="color: orange; font-weight: bold;">Last Entry Second: {{ datetime.fromtimestamp(session_data.open_time).second }}s</p>
     {% endif %}
     {% if session_data.last_valid_tick_price != 0.0 %}
         <p style="color: purple; font-weight: bold;">Current Price: {{ session_data.last_valid_tick_price|round(5) }}</p>
@@ -597,7 +594,8 @@ def index():
         martingale_steps=MARTINGALE_STEPS,
         max_consecutive_losses=MAX_CONSECUTIVE_LOSSES,
         contract_type=CONTRACT_TYPE,
-        duration=DURATION
+        duration=DURATION,
+        datetime=datetime
     )
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -647,7 +645,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {CONTRACT_TYPE} {DURATION} Seconds (x2.2 Martingale - 30 Ticks Opposite Trend)', 'success')
+    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {CONTRACT_TYPE} {DURATION} Ticks (x2.2 Martingale - 0, 15, 30, 45 second entries)', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
