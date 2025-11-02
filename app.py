@@ -14,7 +14,7 @@ from threading import Lock
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
-DURATION = 5 # 5 تيك
+DURATION = 3 # 5 تيك
 DURATION_UNIT = "t" # وحدة المدة تيك
 MARTINGALE_STEPS = 4
 MAX_CONSECUTIVE_LOSSES = 5
@@ -47,6 +47,7 @@ DEFAULT_SESSION_STATE = {
     "total_losses": 0,
     "stop_reason": "Stopped Manually",
     "last_entry_time": 0,
+    "last_entry_second": -1, # متغير جديد لحفظ الثانية التي تم الدخول فيها لمنع التكرار
     "last_entry_price": 0.0, # سيستخدم لتخزين سعر التيك المرجعي (سعر الإغلاق السابق)
     "last_tick_data": None,
     "currency": "USD",
@@ -248,7 +249,8 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         "current_stake": stake,
         "stop_reason": "Running",
         "last_entry_time": 0,
-        "last_entry_price": 0.0, # سيتم إعادة ضبطه هنا
+        "last_entry_second": -1, # إعادة ضبط المتغير الجديد
+        "last_entry_price": 0.0,
         "last_tick_data": None,
         "currency": currency,
         "account_type": account_type,
@@ -269,7 +271,6 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         def on_open_wrapper(ws_app):
             current_data = get_session_data(email)
             ws_app.send(json.dumps({"authorize": current_data['api_token']}))
-            # تم إزالة طلب ticks_history لعدم الحاجة إليه في هذه الاستراتيجية
             ws_app.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
             running_data = get_session_data(email)
             running_data['is_running'] = True
@@ -307,9 +308,11 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 
                 ENTRY_POINTS = [0, 15, 30, 45]
                 
-                if current_second in ENTRY_POINTS and current_data['open_time'] != current_timestamp:
+                # 💡 الشرط الأساسي للدخول: الثانية الحالية هي إحدى نقاط الدخول و لم يتم الدخول في هذه الثانية مسبقاً
+                if current_second in ENTRY_POINTS and current_second != current_data['last_entry_second']:
                     
-                    current_data['open_time'] = current_timestamp
+                    # حفظ الثانية الحالية لمنع الدخول المزدوج حتى النقطة التالية
+                    current_data['last_entry_second'] = current_second
                     
                     # --- الحالة 1: عند تشغيل البوت للمرة الأولى عند الثانية 0 فقط ---
                     # إذا كانت هذه هي أول دورة، يتم تسجيل السعر الحالي كسعر مرجعي أولي ويتخطى الدخول.
@@ -329,14 +332,13 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
 
                     # 💡 منطق عكس الاتجاه: المقارنة بين سعر الفتح المرجعي وسعر الإغلاق الحالي
                     if current_close_price > reference_open_price:
-                        action_type = "PUT" # ترند صاعد (أغلق أعلى من الفتح المرجعي) -> دخول هبوط (FALL)
+                        action_type = "CALL" # ترند صاعد (أغلق أعلى من الفتح المرجعي) -> دخول هبوط (FALL)
                         print(f"📈 [STRAT] Trend: RISE ({reference_open_price} -> {current_close_price}). Entering CALL (FALL - Opposite Trend).")
                     elif current_close_price < reference_open_price:
-                        action_type = "CALL" # ترند هابط (أغلق أدنى من الفتح المرجعي) -> دخول صعود (RISE)
+                        action_type = "PUT" # ترند هابط (أغلق أدنى من الفتح المرجعي) -> دخول صعود (RISE)
                         print(f"📉 [STRAT] Trend: FALL ({reference_open_price} -> {current_close_price}). Entering PUT (RISE - Opposite Trend).")
                     else:
                         print("⏸ [SKIP] Price is Neutral. Skipping entry.")
-                        current_data['last_entry_time'] = current_timestamp
                         # نحدث السعر المرجعي حتى لو لم ندخل ليكون نقطة الانطلاق التالية
                         current_data['last_entry_price'] = current_close_price 
                         save_session_data(email, current_data)
