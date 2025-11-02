@@ -14,8 +14,8 @@ from threading import Lock
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
-DURATION = 56 # تم التعديل: 56 تيك
-DURATION_UNIT = "s"          
+DURATION = 56 # تم التعديل: 56 ثانية
+DURATION_UNIT = "s" # تم التعديل: وحدة المدة ثواني
 MARTINGALE_STEPS = 4         
 MAX_CONSECUTIVE_LOSSES = 5   
 RECONNECT_DELAY = 1
@@ -53,19 +53,16 @@ DEFAULT_SESSION_STATE = {
     "currency": "USD", 
     "account_type": "demo",
     
-    # 💡 المتغيرات الجديدة للاستراتيجية
     "open_price": 0.0,          
     "open_time": 0,             
     "last_action_type": "CALL",
-    # 💡 المتغير الجديد لتخزين آخر تيك تم رصده قبل قرار الدخول
     "last_valid_tick_price": 0.0,
-    # 💡 متغير جديد لتخزين تاريخ التيكات (آخر 30)
     "tick_history": []
 }
 # ==========================================================
 
 # ==========================================================
-# PERSISTENT STATE MANAGEMENT FUNCTIONS (No change)
+# PERSISTENT STATE MANAGEMENT FUNCTIONS
 # ==========================================================
 
 def load_persistent_sessions():
@@ -260,8 +257,8 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         "open_price": 0.0,      
         "open_time": 0,          
         "last_action_type": "CALL", 
-        "last_valid_tick_price": 0.0, # إعادة تعيين
-        "tick_history": [] # إعادة تعيين
+        "last_valid_tick_price": 0.0,
+        "tick_history": []
     })
     save_session_data(email, session_data)
 
@@ -328,24 +325,24 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     
                     if len(current_data['tick_history']) < MAX_TICKS:
                         print("⏸ [SKIP] Waiting for initial 30 ticks history to populate.")
-                        current_data['last_entry_time'] = current_timestamp # لمنع الدخول مرة أخرى في نفس الثانية 0
+                        current_data['last_entry_time'] = current_timestamp
                         save_session_data(email, current_data)
                         return
 
-                    # --- تحليل التيكات الـ 30 الأخيرة لتحديد الاتجاه ---
+                    # --- تحليل الـ 30 تيك وتحديد الاتجاه المعاكس ---
                     ticks = current_data['tick_history']
                     first_tick_price = ticks[0]
                     last_tick_price = ticks[-1]
                     
                     action_type = ""
                     
-                    # 💡 منطق تحديد الاتجاه (نفس الاتجاه: الـ 30 تيك صاعدة = PUT/RISE)
+                    # 💡 منطق عكس الاتجاه: ترند صاعد -> دخول هبوط (CALL) / ترند هابط -> دخول صعود (PUT)
                     if last_tick_price > first_tick_price:
-                        action_type = "CALL" # PUT/RISE (صعود)
-                        print(f"📈 [STRAT] Last 30 Ticks: RISE ({first_tick_price} -> {last_tick_price}). Entering CALL.")
+                        action_type = "CALL" # ترند صاعد -> دخول هبوط (CALL/FALL)
+                        print(f"📈 [STRAT] Last 30 Ticks: RISE ({first_tick_price} -> {last_tick_price}). Entering CALL (FALL - Opposite Trend).")
                     elif last_tick_price < first_tick_price:
-                        action_type = "PUT" # CALL/FALL (هبوط)
-                        print(f"📉 [STRAT] Last 30 Ticks: FALL ({first_tick_price} -> {last_tick_price}). Entering PUT.")
+                        action_type = "PUT" # ترند هابط -> دخول صعود (PUT/RISE)
+                        print(f"📉 [STRAT] Last 30 Ticks: FALL ({first_tick_price} -> {last_tick_price}). Entering PUT (RISE - Opposite Trend).")
                     else:
                         print("⏸ [SKIP] First Tick == Last Tick (Neutral). Skipping entry.")
                         current_data['last_entry_time'] = current_timestamp 
@@ -410,7 +407,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
     print(f"🛑 [PROCESS] Bot process loop ended for {email}.")
 
 # ==========================================================
-# FLASK APP SETUP AND ROUTES (No change)
+# FLASK APP SETUP AND ROUTES
 # ==========================================================
 
 app = Flask(__name__)
@@ -508,7 +505,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = contract_type + " (" + duration|string + " Ticks @ x2.2 Martingale / 30 Ticks Trend)" %}
+    {% set strategy = contract_type + " (" + duration|string + " Seconds @ x2.2 Martingale / 30 Ticks Opposite Trend)" %}
     
     <p class="status-running">✅ Bot is *Running*! (Auto-refreshing)</p>
     <p>Account Type: *{{ session_data.account_type.upper() }}* | Currency: *{{ session_data.currency }}*</p>
@@ -650,7 +647,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {CONTRACT_TYPE} {DURATION} Ticks (x2.2 Martingale - 30 Ticks Trend)', 'success')
+    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {CONTRACT_TYPE} {DURATION} Seconds (x2.2 Martingale - 30 Ticks Opposite Trend)', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
