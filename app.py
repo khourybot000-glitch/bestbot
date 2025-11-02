@@ -14,8 +14,8 @@ from threading import Lock
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
-DURATION = 5                 
-DURATION_UNIT = "t"          
+DURATION = 56                 
+DURATION_UNIT = "s"          
 MARTINGALE_STEPS = 4         
 MAX_CONSECUTIVE_LOSSES = 5   
 RECONNECT_DELAY = 1
@@ -315,7 +315,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     return 
 
                 # 2. منطق قرار الدخول: إذا كان سعر الافتتاح مُسجلاً والوقت تجاوز أو وصل الثانية 15، و لم يتم الدخول بعد
-                if current_data['open_price'] != 0.0 and current_second >= 15 and current_data['last_entry_time'] == 0:
+                if current_data['open_price'] != 0.0 and current_second >= 58 and current_data['last_entry_time'] == 0:
                     
                     # سعر الإغلاق هو آخر تيك تم تسجيله
                     entry_price = current_data['last_valid_tick_price'] 
