@@ -10,20 +10,20 @@ from multiprocessing import Process
 from threading import Lock
 
 # ==========================================================
-# BOT CONSTANT SETTINGS
+# BOT CONSTANT SETTINGS (UPDATED) ⚙️
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
-DURATION = 1 
+DURATION = 5 # 💡 5 تيك
 DURATION_UNIT = "t"
-MARTINGALE_STEPS = 1
-MAX_CONSECUTIVE_LOSSES = 2
+MARTINGALE_STEPS = 2 # 💡 خطوتان مضاعفة
+MAX_CONSECUTIVE_LOSSES = 3 # 💡 3 خسائر متتالية
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 
-# Strategy: DIGITDIFF
-CONTRACT_TYPE = "DIGITDIFF" 
+# Strategy: NOTOUCH
+CONTRACT_TYPE = "NOTOUCH" 
 # ==========================================================
 
 # ==========================================================
@@ -54,16 +54,16 @@ DEFAULT_SESSION_STATE = {
     
     "open_price": 0.0,        
     "open_time": 0,           
-    "last_action_type": "DIGITDIFF", 
+    "last_action_type": CONTRACT_TYPE, 
     "last_valid_tick_price": 0.0,
     
-    "enter_immediately": False,
-    "last_barrier_value": -1 
+    "last_barrier_value": "-1", # Used for display only now, reset after loss
+    "monitoring_start_price": 0.0, 
 }
 # ==========================================================
 
 # ==========================================================
-# PERSISTENT STATE MANAGEMENT FUNCTIONS (No change)
+# PERSISTENT STATE MANAGEMENT FUNCTIONS
 # ==========================================================
 
 def load_persistent_sessions():
@@ -139,15 +139,16 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
 # ==========================================================
 
 def calculate_martingale_stake(base_stake, current_stake, current_step):
-    """ Martingale logic (Last losing stake * 19) """
+    """ Martingale logic (Last losing stake * 7) """
     if current_step == 0:
         return base_stake
-    if current_step <= MARTINGALE_STEPS:
-        return current_stake * 19.0 
+    # 💡 المضاعفة x7 تنطبق على الخطوات 1 و 2
+    if 1 <= current_step <= MARTINGALE_STEPS:
+        return current_stake * 7.0 
     return base_stake
 
-def send_trade_order(email, stake, currency, contract_type_param, barrier_value=None):
-    """ Sending the purchase order. Modified to accept Barrier for Digit contracts. """
+def send_trade_order(email, stake, currency, contract_type_param, barrier_offset=None):
+    """ Sending the purchase order. Uses barrier_offset as relative barrier. """
     global is_contract_open, active_ws, DURATION, DURATION_UNIT, SYMBOL
     
     if email not in active_ws or active_ws[email] is None: return
@@ -161,26 +162,26 @@ def send_trade_order(email, stake, currency, contract_type_param, barrier_value=
             "basis": "stake",
             "contract_type": contract_type_param, 
             "currency": currency, 
-            "duration": DURATION,
+            "duration": DURATION, # 💡 استخدام DURATION = 5
             "duration_unit": DURATION_UNIT, 
             "symbol": SYMBOL
         }
     }
     
-    # Adding Barrier/Target Digit
-    if barrier_value is not None:
-        trade_request["parameters"]["barrier"] = str(barrier_value) 
+    # Adding Relative Barrier
+    if barrier_offset is not None and barrier_offset != "-1":
+        trade_request["parameters"]["barrier"] = str(barrier_offset) 
     
     try:
         ws_app.send(json.dumps(trade_request))
         is_contract_open[email] = True
-        print(f"💰 [TRADE] Sent {contract_type_param} with Barrier: {barrier_value} | Stake: {round(stake, 2):.2f} {currency}")
+        print(f"💰 [TRADE] Sent {contract_type_param} with Barrier Offset: {barrier_offset} | Stake: {round(stake, 2):.2f} {currency}")
     except Exception as e:
         print(f"❌ [TRADE ERROR] Could not send trade order: {e}")
         pass
 
 def calculate_and_store_martingale(email, last_loss_stake, last_action_type):
-    """ Calculates the new stake and stores it for immediate entry on the next tick """
+    """ Calculates the new stake and stores it for the next scheduled entry """
     current_data = get_session_data(email)
     
     new_stake = calculate_martingale_stake(
@@ -191,9 +192,12 @@ def calculate_and_store_martingale(email, last_loss_stake, last_action_type):
 
     current_data['current_stake'] = new_stake
     current_data['last_action_type'] = last_action_type 
-    current_data['enter_immediately'] = True 
+    
+    # 💡 التعديل: إعادة تعيين الـ Barrier القديم مباشرة بعد الخسارة (لإجباره على استخدام تحليل جديد في 30s)
+    current_data['last_barrier_value'] = "-1" 
+    
     save_session_data(email, current_data)
-    print(f"💸 [MARTINGALE] Lost. Calculating next stake: {new_stake:.2f}. **Entering immediately on next tick using the previous barrier.**")
+    print(f"💸 [MARTINGALE] Lost. Step {current_data['current_step']}. Calculating next stake: {new_stake:.2f}. **Waiting for 30s entry and new analysis.**")
 
 
 def check_pnl_limits(email, profit_loss, last_action_type):
@@ -215,16 +219,16 @@ def check_pnl_limits(email, profit_loss, last_action_type):
         current_data['current_stake'] = current_data['base_stake']
         current_data['last_action_type'] = last_action_type 
         
-        # ✅ FIX: Resetting enter_immediately and last_barrier_value after a win
-        current_data['enter_immediately'] = False
-        current_data['last_barrier_value'] = -1
+        # Resetting entry flags after a win
+        current_data['last_barrier_value'] = "-1" 
+        current_data['monitoring_start_price'] = 0.0 # Reset monitoring
         
     else: # Loss
         current_data['total_losses'] += 1
         current_data['consecutive_losses'] += 1
         current_data['current_step'] += 1
         
-        # Checking Max Consecutive Losses/Martingale Steps
+        # 💡 التحقق من الخسارة القصوى: 3 خسائر متتالية (الخطوات 0, 1, 2)
         if current_data['consecutive_losses'] > MAX_CONSECUTIVE_LOSSES or current_data['current_step'] > MARTINGALE_STEPS:
             stop_bot(email, clear_data=True, stop_reason="SL Reached")
             return
@@ -270,8 +274,8 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         "open_time": 0,            
         "last_action_type": CONTRACT_TYPE, 
         "last_valid_tick_price": 0.0,
-        "enter_immediately": False,
-        "last_barrier_value": -1 
+        "last_barrier_value": "-1", 
+        "monitoring_start_price": 0.0
     })
     save_session_data(email, session_data)
 
@@ -316,51 +320,64 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 if is_contract_open.get(email) is True: return
                     
                 current_second = datetime.fromtimestamp(current_timestamp, tz=timezone.utc).second
-                should_enter_immediately = current_data.get('enter_immediately', False)
 
-                if should_enter_immediately or (current_second == 0 or current_second == 30):
+                # 💡 MONITORING: Record price at second 0
+                if current_second == 0:
+                    current_data['monitoring_start_price'] = current_price
+                    save_session_data(email, current_data)
+                    print(f"👁️ [MONITOR] Recording Start Price at 0s: {current_price:.5f}")
+                    return # Do not enter trade yet
+
+                
+                # 💡 ENTRY CONDITION: Scheduled at 30 seconds only
+                should_enter_scheduled = current_second == 30 
+
+                if should_enter_scheduled:
                     
                     if current_data['last_entry_time'] == current_timestamp: 
                         return
                     
-                    if should_enter_immediately and current_data['last_barrier_value'] != -1:
-                        # Use the saved barrier from the losing trade
-                        barrier_value = current_data['last_barrier_value']
-                        
-                        current_data['enter_immediately'] = False # Reset flag after use
-                        
-                        print(f"🚀 [IMMEDIATE] Executing Martingale Stake using OLD Barrier: {barrier_value}")
-                        
-                    else:
-                        # Calculate new barrier for initial entry or entry after a win (00/30 seconds)
-                        price_string = str(current_price)
-                        
-                        if '.' in price_string:
-                            last_digit_char = price_string.split('.')[-1][-1]
-                        else:
-                            last_digit_char = price_string[-1]
-                            
-                        try:
-                            barrier_value = int(last_digit_char)
-                        except ValueError:
-                            print(f"⚠️ [DIGIT ERROR] Could not extract last digit from price: {current_price}. Skipping trade.")
-                            return
-                        
                     stake_to_use = current_data['current_stake']
                     currency_to_use = current_data['currency']
                     action_type_to_use = CONTRACT_TYPE 
                     
-                    # 3. Send Purchase Order with Barrier/Target Digit
+                    barrier_offset = None
+                    
+                    # 💡 Logic: Analyze price movement from 0s to 30s
+                    start_price = current_data['monitoring_start_price']
+                    
+                    # Direction UP: Current price > Start price -> Use negative offset (-0.5)
+                    if current_price > start_price:
+                        barrier_offset = "-0.5"
+                        direction_info = "Price UP"
+                        
+                    # Direction DOWN: Current price < Start price -> Use positive offset (+0.5)
+                    elif current_price < start_price:
+                        barrier_offset = "+0.5"
+                        direction_info = "Price DOWN"
+                    
+                    # NO CLEAR DIRECTION or price is the same, SKIP TRADE
+                    else:
+                        print("⚠️ [ENTRY SKIPPED @ 30s] Price remained stable/same between 0s and 30s. Skipping scheduled trade.")
+                        current_data['monitoring_start_price'] = 0.0 
+                        save_session_data(email, current_data)
+                        return
+                    
+                    # Log the type of entry
+                    entry_type = "Initial Entry" if current_data['current_step'] == 0 else f"Martingale Step {current_data['current_step']}"
+                    print(f"🎯 [ENTRY @ 30s] {entry_type} | {direction_info}. Setting NOTOUCH Barrier: {barrier_offset}")
+                    
+                    # Execute the trade
                     send_trade_order(
                         email, 
                         stake_to_use, 
                         currency_to_use, 
                         action_type_to_use, 
-                        barrier_value
+                        barrier_offset
                     )
                     
-                    # Save the barrier used in this trade (to be used in next Martingale if loss occurs)
-                    current_data['last_barrier_value'] = barrier_value 
+                    # Save the barrier used in this trade (mainly for display/logging)
+                    current_data['last_barrier_value'] = barrier_offset 
 
                     # Update last entry time to prevent double entry
                     current_data['last_entry_time'] = current_timestamp
@@ -368,7 +385,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     current_data['last_action_type'] = action_type_to_use 
                     save_session_data(email, current_data)
                     
-                    print(f"✅ [ENTRY @ {current_second}s] Entered {action_type_to_use} with Target Digit: {barrier_value} on price: {current_price}")
+                    print(f"✅ [TRADE SENT] Notouch {barrier_offset} sent successfully.")
                     return 
 
             elif msg_type == 'buy':
@@ -418,7 +435,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
     print(f"🛑 [PROCESS] Bot process loop ended for {email}.")
 
 # ==========================================================
-# FLASK APP SETUP AND ROUTES (No change)
+# FLASK APP SETUP AND ROUTES (Control Panel)
 # ==========================================================
 
 app = Flask(__name__)
@@ -516,7 +533,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = contract_type + " (" + duration|string + " Tick @ x" + 19|string + " Martingale)" %}
+    {% set strategy = contract_type + " (" + duration|string + " Ticks @ x" + 7|string + " Martingale, Max Steps " + martingale_steps|string + ")" %}
     
     <p class="status-running">✅ Bot is *Running*! (Auto-refreshing)</p>
     <p>Account Type: *{{ session_data.account_type.upper() }}* | Currency: *{{ session_data.currency }}*</p>
@@ -527,7 +544,8 @@ CONTROL_FORM = """
     <p style="font-weight: bold; color: green;">Last Entry Price: {{ session_data.last_entry_price|round(5) }}</p>
     <p style="font-weight: bold; color: purple;">Last Tick Price: {{ session_data.last_valid_tick_price|round(5) }}</p>
     <p style="font-weight: bold; color: #007bff;">Current Strategy: *{{ strategy }}*</p>
-    <p style="font-weight: bold; color: #ff5733;">Last Barrier Used: {{ session_data.last_barrier_value }}</p>
+    <p style="font-weight: bold; color: #ff5733;">Last Barrier Offset: {{ session_data.last_barrier_value }}</p>
+    <p style="font-weight: bold; color: #00aaff;">Start Price (0s): {{ session_data.monitoring_start_price|round(5) }}</p>
     
     <form method="POST" action="{{ url_for('stop_route') }}">
         <button type="submit" style="background-color: red; color: white;">🛑 Stop Bot</button>
@@ -655,7 +673,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {CONTRACT_TYPE} {DURATION} Tick (x19 Martingale)', 'success')
+    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {CONTRACT_TYPE} {DURATION} Ticks (x7 Martingale, Max Steps {MARTINGALE_STEPS})', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
