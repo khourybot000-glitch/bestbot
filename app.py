@@ -452,7 +452,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
 # FLASK APP SETUP AND ROUTES (لم تتغير)
 # ==========================================================
 
-app = Flask(_name_)
+app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
 app.config['SESSION_PERMANENT'] = False
 
@@ -709,6 +709,6 @@ def logout():
     return redirect(url_for('auth_page'))
 
 
-if _name_ == '_main_':
+if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
