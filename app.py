@@ -2,7 +2,7 @@ import time
 import json
 import websocket 
 from multiprocessing import Process, Manager 
-import os # 👈 تم التأكد من استيراد os لاستخدام os.kill
+import os 
 import sys 
 import fcntl 
 from flask import Flask, request, render_template_string, redirect, url_for, session, flash, g
@@ -26,7 +26,6 @@ ACTIVE_SESSIONS_FILE = "active_sessions.json"
 # BOT RUNTIME STATE (Runtime Cache)
 # ==========================================================
 manager = Manager()
-# 👇 تخزين الـ PID بدلاً من كائن العملية
 active_threads = manager.dict() 
 active_ws = manager.dict() 
 is_contract_open = manager.dict() 
@@ -159,9 +158,8 @@ def stop_bot(email, clear_data=True):
     # 3. Terminate Process using PID and remove registration
     if clear_data and email in active_threads:
         try:
-            # 👇 استخدام os.kill مع الـ PID لإنهاء العملية بأمان
             pid = active_threads[email] 
-            os.kill(pid, 15) # SIGTERM (إشارة إنهاء لطيفة)
+            os.kill(pid, 15) 
         except Exception as e:
             print(f"⚠️ [ERROR] Failed to terminate process {active_threads.get(email)}: {e}")
             pass
@@ -178,7 +176,7 @@ def stop_bot(email, clear_data=True):
         print(f"⚠️ [INFO] WS closed for {email}. Attempting immediate reconnect.")
 
 # ==========================================================
-# TRADING BOT FUNCTIONS
+# TRADING BOT CORE FUNCTIONS
 # ==========================================================
 
 def get_latest_price_digit(price):
@@ -192,7 +190,7 @@ def calculate_martingale_stake(base_stake, current_stake, current_step):
     if current_step == 0:
         return base_stake
     
-    if current_step <= MARTINGALE_STEPS: # MARTINGALE_STEPS = 1
+    if current_step <= MARTINGALE_STEPS:
         return current_stake * 19 
     else:
         return base_stake
@@ -249,7 +247,7 @@ def check_pnl_limits(email, profit_loss):
     current_data['current_profit'] += profit_loss
     
     if profit_loss > 0:
-        # 1. Win: Reset and prepare for the base stake entry
+        # 1. Win: Reset 
         current_data['total_wins'] += 1
         current_data['current_step'] = 0 
         current_data['consecutive_losses'] = 0
@@ -257,7 +255,7 @@ def check_pnl_limits(email, profit_loss):
         current_data['current_trade_state'] = TRADE_STATE_DEFAULT
         
     else:
-        # 2. Loss: Increase step and attempt immediate recovery 
+        # 2. Loss: Increase step 
         current_data['total_losses'] += 1
         current_data['consecutive_losses'] += 1
         current_data['current_step'] += 1
@@ -281,9 +279,76 @@ def check_pnl_limits(email, profit_loss):
         
     print(f"[LOG {email}] PNL: {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Last Stake: {last_stake:.2f}, State: {current_data['current_trade_state']['type']} Dynamic")
 
+# ==========================================================
+# WS CALLBACKS (MOVED TO GLOBAL SCOPE FOR PICKLING FIX)
+# ==========================================================
+
+def on_open(ws_app, email, token, currency):
+    """ Handle connection open. """
+    current_data = get_session_data(email)
+    ws_app.send(json.dumps({"authorize": token})) 
+    ws_app.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
+    current_data['is_running'] = True
+    save_session_data(email, current_data)
+    print(f"✅ [PROCESS] Connection established for {email}.")
+    is_contract_open[email] = False 
+
+def on_message(ws_app, message, email, currency):
+    """ Handle incoming WebSocket messages. """
+    data = json.loads(message)
+    msg_type = data.get('msg_type')
+    
+    current_data = get_session_data(email) 
+    if not current_data.get('is_running'):
+        ws_app.close()
+        return
+        
+    if msg_type == 'tick':
+        if is_contract_open.get(email) is True: 
+            return 
+        
+        epoch = data['tick'].get('epoch')
+        if epoch is None:
+            return
+
+        current_second = int(epoch) % 60
+        
+        # Check time filter (0 or 30 seconds)
+        if current_second != 0 and current_second != 30:
+            return
+
+        # Get last digit for the barrier
+        last_digit = get_latest_price_digit(data['tick']['quote'])
+        required_barrier = last_digit 
+        
+        stake_to_use = current_data['current_stake']
+        
+        # Send the trade
+        send_trade_order(email, stake_to_use, 
+                            TRADE_STATE_DEFAULT['type'], 
+                            required_barrier,
+                            currency) 
+
+    elif msg_type == 'buy':
+        contract_id = data['buy']['contract_id']
+        ws_app.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
+    elif msg_type == 'proposal_open_contract':
+        contract = data['proposal_open_contract']
+        if contract.get('is_sold') == 1:
+            check_pnl_limits(email, contract['profit']) 
+            if 'subscription_id' in data: ws_app.send(json.dumps({"forget": data['subscription_id']}))
+
+def on_close(ws_app, close_code, close_msg, email):
+    """ Handle connection close. """
+    # Soft stop to allow the while True loop (in bot_core_logic) to reconnect
+    stop_bot(email, clear_data=False) 
+
+# ==========================================================
+# BOT MAIN PROCESS FUNCTION
+# ==========================================================
 
 def bot_core_logic(email, token, stake, tp, account_type): 
-    """ Main bot logic running in a separate process. """
+    """ Main bot logic running in a separate process with auto-reconnect loop. """
     global active_ws, is_contract_open 
 
     is_contract_open[email] = False
@@ -312,67 +377,14 @@ def bot_core_logic(email, token, stake, tp, account_type):
 
         print(f"🔗 [PROCESS] Attempting to connect for {email}...")
 
-        def on_open_wrapper(ws_app):
-            ws_app.send(json.dumps({"authorize": current_data['api_token']})) 
-            ws_app.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
-            running_data = get_session_data(email)
-            running_data['is_running'] = True
-            save_session_data(email, running_data)
-            print(f"✅ [PROCESS] Connection established for {email}.")
-            is_contract_open[email] = False 
-
-        def on_message_wrapper(ws_app, message):
-            data = json.loads(message)
-            msg_type = data.get('msg_type')
-            
-            current_data = get_session_data(email) 
-            if not current_data.get('is_running'):
-                ws_app.close()
-                return
-                
-            if msg_type == 'tick':
-                if is_contract_open.get(email) is True: 
-                    return 
-                
-                # تحديد توقيت الدخول (الثانية 0 و 30)
-                epoch = data['tick'].get('epoch')
-                if epoch is None:
-                    return
-
-                current_second = int(epoch) % 60
-                
-                if current_second != 0 and current_second != 30:
-                    return
-
-                # منطق الحاجز: DIFFERS على نفس الرقم الأخير من التيك اللحظي
-                last_digit = get_latest_price_digit(data['tick']['quote'])
-                required_barrier = last_digit 
-                
-                stake_to_use = current_data['current_stake']
-                
-                # 3. Send the trade
-                send_trade_order(email, stake_to_use, 
-                                 TRADE_STATE_DEFAULT['type'], 
-                                 required_barrier,
-                                 currency) 
-
-            elif msg_type == 'buy':
-                contract_id = data['buy']['contract_id']
-                ws_app.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
-            elif msg_type == 'proposal_open_contract':
-                contract = data['proposal_open_contract']
-                if contract.get('is_sold') == 1:
-                    check_pnl_limits(email, contract['profit']) 
-                    if 'subscription_id' in data: ws_app.send(json.dumps({"forget": data['subscription_id']}))
-
-        def on_close_wrapper(ws_app, code, msg):
-             stop_bot(email, clear_data=False) 
-
         try:
+            # 👇 استخدام lambda لربط الوسائط الثابتة بالـ Callbacks التي في المستوى العام
             ws = websocket.WebSocketApp(
-                WSS_URL, on_open=on_open_wrapper, on_message=on_message_wrapper, 
+                WSS_URL, 
+                on_open=lambda ws: on_open(ws, email, token, currency), 
+                on_message=lambda ws, msg: on_message(ws, msg, email, currency), 
                 on_error=lambda ws, err: print(f"[WS Error {email}] {err}"),
-                on_close=on_close_wrapper 
+                on_close=lambda ws, code, msg: on_close(ws, code, msg, email) 
             )
             active_ws[email] = ws
             ws.run_forever(ping_interval=20, ping_timeout=10) 
@@ -607,17 +619,15 @@ def start_bot():
     if email in active_threads:
         try:
             pid = active_threads[email]
-            # التحقق من أن الـ PID لا يزال نشطًا
-            os.kill(pid, 0) # os.kill(pid, 0) لا يفعل شيئاً سوى التحقق من وجود العملية
+            os.kill(pid, 0)
             flash('Bot is already running.', 'info')
             return redirect(url_for('index'))
         except OSError:
-            # العملية غير موجودة، يمكن المتابعة
             pass
         
     try:
         current_data = get_session_data(email)
-        token = request.form.get('token') or current_data['api_token']
+        token = request.form.get('token') or current_data.get('api_token')
         stake = float(request.form['stake'])
         tp = float(request.form['tp'])
         account_type = request.form.get('account_type', 'demo')
@@ -631,7 +641,6 @@ def start_bot():
     process.daemon = True
     process.start()
     
-    # 👇 التعديل: تخزين الـ PID (معرّف العملية) بدلاً من كائن العملية
     active_threads[email] = process.pid
     
     flash('Bot started successfully. It will attempt to connect and auto-reconnect.', 'success')
