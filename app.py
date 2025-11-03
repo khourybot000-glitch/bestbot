@@ -1,9 +1,8 @@
 import time
 import json
 import websocket 
-# 👇 استخدام Multiprocessing
 from multiprocessing import Process, Manager 
-import os 
+import os # 👈 تم التأكد من استيراد os لاستخدام os.kill
 import sys 
 import fcntl 
 from flask import Flask, request, render_template_string, redirect, url_for, session, flash, g
@@ -16,9 +15,8 @@ WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"       
 DURATION = 1 
 DURATION_UNIT = "t"  
-# 👇 Max Martingale Step = 1
 MARTINGALE_STEPS = 1  
-MAX_CONSECUTIVE_LOSSES = 2 # Stop limit after 2 consecutive losses
+MAX_CONSECUTIVE_LOSSES = 2 
 RECONNECT_DELAY = 1      
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json" 
@@ -28,6 +26,7 @@ ACTIVE_SESSIONS_FILE = "active_sessions.json"
 # BOT RUNTIME STATE (Runtime Cache)
 # ==========================================================
 manager = Manager()
+# 👇 تخزين الـ PID بدلاً من كائن العملية
 active_threads = manager.dict() 
 active_ws = manager.dict() 
 is_contract_open = manager.dict() 
@@ -137,7 +136,7 @@ def load_allowed_users():
         return set()
         
 def stop_bot(email, clear_data=True): 
-    """ Stop the bot process and clear WebSocket connection. If clear_data=True, clear all session data. """
+    """ Stop the bot process and clear WebSocket connection. """
     global active_threads, active_ws, is_contract_open
     
     # 1. Close WebSocket connection
@@ -151,18 +150,22 @@ def stop_bot(email, clear_data=True):
         if email in active_ws:
              del active_ws[email]
 
-    # 2. Update is_running state (to break the while True loop)
+    # 2. Update is_running state 
     current_data = get_session_data(email)
     if current_data.get("is_running") is True:
         current_data["is_running"] = False
         save_session_data(email, current_data) 
 
-    # 3. Terminate Process and remove registration
+    # 3. Terminate Process using PID and remove registration
     if clear_data and email in active_threads:
         try:
-            active_threads[email].terminate() 
-        except Exception:
+            # 👇 استخدام os.kill مع الـ PID لإنهاء العملية بأمان
+            pid = active_threads[email] 
+            os.kill(pid, 15) # SIGTERM (إشارة إنهاء لطيفة)
+        except Exception as e:
+            print(f"⚠️ [ERROR] Failed to terminate process {active_threads.get(email)}: {e}")
             pass
+        
         del active_threads[email]
         
     if email in is_contract_open:
@@ -192,7 +195,6 @@ def calculate_martingale_stake(base_stake, current_stake, current_step):
     if current_step <= MARTINGALE_STEPS: # MARTINGALE_STEPS = 1
         return current_stake * 19 
     else:
-        # If step exceeds the max (i.e., step 2+), return to base stake (though SL should trigger first)
         return base_stake
 
 def send_trade_order(email, stake, trade_type, barrier, currency): 
@@ -260,7 +262,7 @@ def check_pnl_limits(email, profit_loss):
         current_data['consecutive_losses'] += 1
         current_data['current_step'] += 1
         
-        # 2.1. Check Stop Loss (SL) limits (2 consecutive losses)
+        # 2.1. Check Stop Loss (SL) limits 
         if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES: 
             stop_bot(email, clear_data=True) 
             return 
@@ -295,7 +297,6 @@ def bot_core_logic(email, token, stake, tp, account_type):
     })
     save_session_data(email, session_data)
 
-    # تحديد العملة
     if account_type == 'real':
         currency = "tUSDT"
     else: 
@@ -333,7 +334,7 @@ def bot_core_logic(email, token, stake, tp, account_type):
                 if is_contract_open.get(email) is True: 
                     return 
                 
-                # 👇 تحديد توقيت الدخول (الثانية 0 و 30)
+                # تحديد توقيت الدخول (الثانية 0 و 30)
                 epoch = data['tick'].get('epoch')
                 if epoch is None:
                     return
@@ -343,7 +344,7 @@ def bot_core_logic(email, token, stake, tp, account_type):
                 if current_second != 0 and current_second != 30:
                     return
 
-                # 👇 منطق الحاجز: DIFFERS على نفس الرقم الأخير من التيك اللحظي
+                # منطق الحاجز: DIFFERS على نفس الرقم الأخير من التيك اللحظي
                 last_digit = get_latest_price_digit(data['tick']['quote'])
                 required_barrier = last_digit 
                 
@@ -365,7 +366,6 @@ def bot_core_logic(email, token, stake, tp, account_type):
                     if 'subscription_id' in data: ws_app.send(json.dumps({"forget": data['subscription_id']}))
 
         def on_close_wrapper(ws_app, code, msg):
-             # Soft stop to allow the while True loop to reconnect
              stop_bot(email, clear_data=False) 
 
         try:
@@ -603,17 +603,21 @@ def start_bot():
     
     email = session['email']
     
-    if email in active_threads and active_threads[email].is_alive():
-        flash('Bot is already running.', 'info')
-        return redirect(url_for('index'))
+    # التحقق من أن العملية غير موجودة بالفعل
+    if email in active_threads:
+        try:
+            pid = active_threads[email]
+            # التحقق من أن الـ PID لا يزال نشطًا
+            os.kill(pid, 0) # os.kill(pid, 0) لا يفعل شيئاً سوى التحقق من وجود العملية
+            flash('Bot is already running.', 'info')
+            return redirect(url_for('index'))
+        except OSError:
+            # العملية غير موجودة، يمكن المتابعة
+            pass
         
     try:
         current_data = get_session_data(email)
-        if current_data.get('api_token') and request.form.get('token') == current_data['api_token']:
-            token = current_data['api_token']
-        else:
-            token = request.form['token']
-
+        token = request.form.get('token') or current_data['api_token']
         stake = float(request.form['stake'])
         tp = float(request.form['tp'])
         account_type = request.form.get('account_type', 'demo')
@@ -622,11 +626,13 @@ def start_bot():
         flash("Invalid stake or TP value.", 'error')
         return redirect(url_for('index'))
         
-    # Starting the process
+    # بدء العملية
     process = Process(target=bot_core_logic, args=(email, token, stake, tp, account_type))
     process.daemon = True
     process.start()
-    active_threads[email] = process
+    
+    # 👇 التعديل: تخزين الـ PID (معرّف العملية) بدلاً من كائن العملية
+    active_threads[email] = process.pid
     
     flash('Bot started successfully. It will attempt to connect and auto-reconnect.', 'success')
     return redirect(url_for('index'))
