@@ -14,8 +14,8 @@ from threading import Lock
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
-DURATION = 1                 
-DURATION_UNIT = "t"          
+DURATION = 1           
+DURATION_UNIT = "t"         
 MARTINGALE_STEPS = 1         
 MAX_CONSECUTIVE_LOSSES = 2   
 RECONNECT_DELAY = 1          
@@ -52,8 +52,8 @@ DEFAULT_SESSION_STATE = {
     "last_tick_data": None,
     "currency": "USD", 
     "account_type": "demo",
-    "open_price": 0.0,         
-    "open_time": 0,            
+    "open_price": 0.0,          
+    "open_time": 0,             
     "last_action_type": "DIGITDIFF", 
     "last_valid_tick_price": 0.0,
     "last_trade_barrier": None,  # تخزين الرقم الهدف الأخير
@@ -105,6 +105,7 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
     
     # تحديث الحالة قبل إغلاق العملية
     if current_data.get("is_running") is True:
+        # 💡 تم تعيين is_running إلى False مؤقتاً هنا، لكنها ستعود True إذا كان stop_reason هو Auto-Retry (انظر أدناه).
         current_data["is_running"] = False
         current_data["stop_reason"] = stop_reason
         save_session_data(email, current_data)
@@ -123,14 +124,22 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
                     except:
                         pass
                 
-                time.sleep(0.5) 
+                time.sleep(0.5)
                 
-                if process.is_alive():
+                # 💡 الإصلاح: لا تقم بإنهاء العملية بالكامل إذا كان السبب هو محاولة المضاعفة الفورية (Auto-Retry)
+                if process.is_alive() and stop_reason != "Disconnected (Auto-Retry)":
                     print(f"🛑 [INFO] Forcing termination of process for {email}...")
-                    process.terminate() 
-                    process.join()      
-            del active_processes[email]
-    
+                    process.terminate()
+                    process.join()
+                    # عند الإيقاف النهائي، نحذف العملية من القائمة
+                    del active_processes[email]
+                else:
+                    # عند المضاعفة، يجب أن يعود is_running إلى True ليتابع اللوب الخارجي
+                    current_data['is_running'] = True
+                    save_session_data(email, current_data)
+                    print(f"⚠ [INFO] Process for {email} remains alive for Martingale retry.")
+
+
     # حذف WS من القائمة
     with PROCESS_LOCK:
         if email in active_ws: del active_ws[email]
@@ -139,7 +148,7 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
     if clear_data:
         if stop_reason in ["SL Reached", "TP Reached", "API Buy Error"]:
             print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}). Data kept for display.")
-        else:
+        elif stop_reason != "Disconnected (Auto-Retry)": # تأكد من عدم مسح البيانات إذا كان Auto-Retry
             delete_session_data(email)
             print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}) and session data cleared from file.")
     else:
@@ -208,7 +217,7 @@ def check_pnl_limits(email, profit_loss, last_action_type, ws_app):
         current_data['current_step'] = 0
         current_data['consecutive_losses'] = 0
         current_data['current_stake'] = current_data['base_stake']
-        current_data['last_action_type'] = last_action_type 
+        current_data['last_action_type'] = last_action_type
         current_data['last_trade_barrier'] = None # 💡 مسح الرقم الهدف والعودة لانتظار 0 و 30
         save_session_data(email, current_data)
         
@@ -230,7 +239,7 @@ def check_pnl_limits(email, profit_loss, last_action_type, ws_app):
             current_data['current_step']
         )
         
-        # 2. تخزين الرهان الجديد ونوع الحركة. *نحتفظ بـ last_trade_barrier*
+        # 2. تخزين الرهان الجديد ونوع الحركة. نحتفظ بـ last_trade_barrier
         current_data['current_stake'] = new_stake
         current_data['last_action_type'] = last_action_type
         save_session_data(email, current_data)
@@ -239,10 +248,10 @@ def check_pnl_limits(email, profit_loss, last_action_type, ws_app):
         
         # 3. إغلاق اتصال WebSocket لإعادة تشغيل دورة الاتصال لـ 'Immediate Entry'
         try:
-            ws_app.close()
+            # 💡 الإصلاح: نعتمد على stop_bot لـ closing WS بشكل آمن ومنع إنهاء العملية
             stop_bot(email, clear_data=False, stop_reason="Disconnected (Auto-Retry)")
         except Exception as e:
-            print(f"❌ [MARTINGALE ERROR] Error closing WS: {e}")
+            print(f"❌ [MARTINGALE ERROR] Error engaging retry logic: {e}")
             pass
         return
 
@@ -277,8 +286,8 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         "last_tick_data": None,
         "currency": currency,
         "account_type": account_type,
-        "open_price": 0.0,         
-        "open_time": 0,            
+        "open_price": 0.0,          
+        "open_time": 0,             
         "last_action_type": CONTRACT_TYPE, 
         "last_valid_tick_price": 0.0,
         "last_trade_barrier": None, # إعادة تعيين عند البدء
@@ -430,6 +439,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             print(f"❌ [ERROR] WebSocket failed for {email}: {e}")
         
         current_data = get_session_data(email)
+        # 💡 تم تعديل شرط الكسر في stop_bot، لكن هذا الشرط يجب أن يبقى للتحقق من التوقف اليدوي أو الوصول للحدود
         if current_data.get('is_running') is False and current_data.get('stop_reason') != "Disconnected (Auto-Retry)": 
             break
         
@@ -442,7 +452,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
 # FLASK APP SETUP AND ROUTES (لم تتغير)
 # ==========================================================
 
-app = Flask(__name__)
+app = Flask(_name_)
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
 app.config['SESSION_PERMANENT'] = False
 
@@ -699,6 +709,6 @@ def logout():
     return redirect(url_for('auth_page'))
 
 
-if __name__ == '__main__':
+if _name_ == '_main_':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
