@@ -10,14 +10,14 @@ from multiprocessing import Process
 from threading import Lock
 
 # ==========================================================
-# BOT CONSTANT SETTINGS (UPDATED)
+# BOT CONSTANT SETTINGS
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
-DURATION = 1 # Contract duration: 1 tick
-DURATION_UNIT = "t" # Duration unit: ticks
-MARTINGALE_STEPS = 1 # Max Martingale step (after first loss)
-MAX_CONSECUTIVE_LOSSES = 2 # Stop after 2 consecutive losses (Step 0 + Step 1)
+DURATION = 1 
+DURATION_UNIT = "t"
+MARTINGALE_STEPS = 1
+MAX_CONSECUTIVE_LOSSES = 2
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
@@ -52,14 +52,13 @@ DEFAULT_SESSION_STATE = {
     "currency": "USD", 
     "account_type": "demo",
     
-    # Old variables kept for compatibility
     "open_price": 0.0,        
     "open_time": 0,           
-    "last_action_type": "DIGITDIFF", # Default contract type
+    "last_action_type": "DIGITDIFF", 
     "last_valid_tick_price": 0.0,
     
-    # 💡 MODIFICATION: New flag for immediate Martingale entry
     "enter_immediately": False,
+    "last_barrier_value": -1 
 }
 # ==========================================================
 
@@ -191,11 +190,10 @@ def calculate_and_store_martingale(email, last_loss_stake, last_action_type):
     )
 
     current_data['current_stake'] = new_stake
-    current_data['last_action_type'] = last_action_type # Store contract type for the next attempt
-    # 💡 MODIFICATION: Setting the immediate entry flag
+    current_data['last_action_type'] = last_action_type 
     current_data['enter_immediately'] = True 
     save_session_data(email, current_data)
-    print(f"💸 [MARTINGALE] Lost. Calculating next stake: {new_stake:.2f}. **Entering immediately on next tick.**")
+    print(f"💸 [MARTINGALE] Lost. Calculating next stake: {new_stake:.2f}. **Entering immediately on next tick using the previous barrier.**")
 
 
 def check_pnl_limits(email, profit_loss, last_action_type):
@@ -216,8 +214,10 @@ def check_pnl_limits(email, profit_loss, last_action_type):
         current_data['consecutive_losses'] = 0
         current_data['current_stake'] = current_data['base_stake']
         current_data['last_action_type'] = last_action_type 
-        # 💡 MODIFICATION: Reset to wait for scheduled entry (00/30)
+        
+        # ✅ FIX: Resetting enter_immediately and last_barrier_value after a win
         current_data['enter_immediately'] = False
+        current_data['last_barrier_value'] = -1
         
     else: # Loss
         current_data['total_losses'] += 1
@@ -229,11 +229,9 @@ def check_pnl_limits(email, profit_loss, last_action_type):
             stop_bot(email, clear_data=True, stop_reason="SL Reached")
             return
         
-        # Calculate and store Martingale stake, and set enter_immediately=True
-        save_session_data(email, current_data) # Save current step count before calculating next
+        save_session_data(email, current_data) 
         calculate_and_store_martingale(email, last_stake, last_action_type) 
         
-        # We return here, the immediate entry will be handled by the next tick event.
         return
 
     if current_data['current_profit'] >= current_data['tp_target']:
@@ -272,7 +270,8 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         "open_time": 0,            
         "last_action_type": CONTRACT_TYPE, 
         "last_valid_tick_price": 0.0,
-        "enter_immediately": False # Ensure reset on restart
+        "enter_immediately": False,
+        "last_barrier_value": -1 
     })
     save_session_data(email, session_data)
 
@@ -311,53 +310,44 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     "timestamp": current_timestamp
                 }
                 
-                # Store last valid tick price
                 current_data['last_valid_tick_price'] = current_price
-                save_session_data(email, current_data)
+                save_session_data(email, current_data) 
                 
-                # Check if a contract is already open
                 if is_contract_open.get(email) is True: return
                     
-                # Get current second (in UTC)
                 current_second = datetime.fromtimestamp(current_timestamp, tz=timezone.utc).second
-                
-                # 💡 MODIFICATION: Check for immediate entry flag
                 should_enter_immediately = current_data.get('enter_immediately', False)
 
-                # Entry logic: Immediate after loss OR scheduled at 00/30 seconds
                 if should_enter_immediately or (current_second == 0 or current_second == 30):
                     
-                    # Prevent double entry on the same second/tick
                     if current_data['last_entry_time'] == current_timestamp: 
                         return
                     
-                    # 💡 MODIFICATION: Reset the flag if we are entering immediately
-                    if should_enter_immediately:
-                        current_data['enter_immediately'] = False
-                        save_session_data(email, current_data)
-                        print(f"🚀 [IMMEDIATE] Executing Martingale Stake.")
-
-                    # 1. Calculate Barrier (Target Digit) from the last tick
-                    price_string = str(current_price)
-                    
-                    # Extract the last digit
-                    if '.' in price_string:
-                        # If decimal, last digit is the last character after the dot
-                        last_digit_char = price_string.split('.')[-1][-1]
-                    else:
-                        # If integer, last digit is the last character
-                        last_digit_char = price_string[-1]
+                    if should_enter_immediately and current_data['last_barrier_value'] != -1:
+                        # Use the saved barrier from the losing trade
+                        barrier_value = current_data['last_barrier_value']
                         
-                    try:
-                        barrier_value = int(last_digit_char)
-                    except ValueError:
-                        print(f"⚠️ [DIGIT ERROR] Could not extract last digit from price: {current_price}. Skipping trade.")
-                        return
+                        current_data['enter_immediately'] = False # Reset flag after use
+                        
+                        print(f"🚀 [IMMEDIATE] Executing Martingale Stake using OLD Barrier: {barrier_value}")
+                        
+                    else:
+                        # Calculate new barrier for initial entry or entry after a win (00/30 seconds)
+                        price_string = str(current_price)
+                        
+                        if '.' in price_string:
+                            last_digit_char = price_string.split('.')[-1][-1]
+                        else:
+                            last_digit_char = price_string[-1]
+                            
+                        try:
+                            barrier_value = int(last_digit_char)
+                        except ValueError:
+                            print(f"⚠️ [DIGIT ERROR] Could not extract last digit from price: {current_price}. Skipping trade.")
+                            return
                         
                     stake_to_use = current_data['current_stake']
                     currency_to_use = current_data['currency']
-                    
-                    # 2. Set Contract Type
                     action_type_to_use = CONTRACT_TYPE 
                     
                     # 3. Send Purchase Order with Barrier/Target Digit
@@ -369,9 +359,12 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                         barrier_value
                     )
                     
+                    # Save the barrier used in this trade (to be used in next Martingale if loss occurs)
+                    current_data['last_barrier_value'] = barrier_value 
+
                     # Update last entry time to prevent double entry
                     current_data['last_entry_time'] = current_timestamp
-                    current_data['last_entry_price'] = current_price # Save price used for barrier
+                    current_data['last_entry_price'] = current_price 
                     current_data['last_action_type'] = action_type_to_use 
                     save_session_data(email, current_data)
                     
@@ -534,6 +527,7 @@ CONTROL_FORM = """
     <p style="font-weight: bold; color: green;">Last Entry Price: {{ session_data.last_entry_price|round(5) }}</p>
     <p style="font-weight: bold; color: purple;">Last Tick Price: {{ session_data.last_valid_tick_price|round(5) }}</p>
     <p style="font-weight: bold; color: #007bff;">Current Strategy: *{{ strategy }}*</p>
+    <p style="font-weight: bold; color: #ff5733;">Last Barrier Used: {{ session_data.last_barrier_value }}</p>
     
     <form method="POST" action="{{ url_for('stop_route') }}">
         <button type="submit" style="background-color: red; color: white;">🛑 Stop Bot</button>
@@ -679,7 +673,6 @@ def logout():
 
 
 if __name__ == '__main__':
-    # Stop any running processes before starting the flask app
     all_sessions = load_persistent_sessions()
     for email in list(all_sessions.keys()):
         stop_bot(email, clear_data=False, stop_reason="Disconnected (Auto-Retry)")
