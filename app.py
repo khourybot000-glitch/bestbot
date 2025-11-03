@@ -22,7 +22,7 @@ RECONNECT_DELAY = 1          # Immediate Martingale (1 second delay for quick re
 
 # Strategy: DIGITDIFF (Differs from the barrier digit)
 CONTRACT_TYPE = "DIGITDIFF"
-MARTINGALE_MULTIPLIER = 19.0 # Stake multiplier for Martingale step
+MARTINGALE_MULTIPLIER = 19.0 
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 # ==========================================================
@@ -108,8 +108,8 @@ def load_allowed_users():
 
 def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
     """
-    Stops the bot.
-    If clear_data=False (Immediate Martingale), keeps is_running=True temporarily.
+    Stops the bot process.
+    If clear_data=False (Immediate Martingale), keeps is_running=True temporarily for auto-retry.
     """
     global is_contract_open, active_processes
     current_data = get_session_data(email)
@@ -300,7 +300,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             ws_app.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
             running_data = get_session_data(email)
             # Ensure the running state is True upon reconnect for immediate re-entry
-            running_data['is_running'] = True
+            running_data['is_running'] = True 
             save_session_data(email, running_data)
             is_contract_open[email] = False
 
@@ -327,7 +327,24 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 if current_data['last_entry_time'] == current_timestamp: return
 
                 # ==========================================================
-                # 💡 Barrier Digit Determination Logic
+                # 💡 Timed Entry Logic (00 or 30 seconds on Win/Start)
+                # ==========================================================
+                
+                # Check timing constraints only if not in a Martingale step
+                if current_data['current_step'] == 0:
+                    # Convert timestamp to datetime object (Ticks are UTC)
+                    dt_object = datetime.fromtimestamp(current_timestamp, tz=timezone.utc)
+                    current_second = dt_object.second
+                    
+                    # Only enter at second 00 or 30
+                    if current_second != 0 and current_second != 30:
+                        return # Skip trade if outside the time window
+                
+                # If current_step > 0 (Loss), we skip the time check and enter immediately.
+                # ==========================================================
+                
+                # ==========================================================
+                # Barrier Digit Determination Logic
                 # ==========================================================
                 if current_data['current_step'] > 0 and current_data['last_trade_barrier'] is not None:
                     # 1. Martingale Step: Use the stored barrier from the losing trade
@@ -355,7 +372,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 currency_to_use = current_data['currency']
                 action_type_to_use = CONTRACT_TYPE
 
-                # 4. Send the purchase order (Instant Entry)
+                # 4. Send the purchase order
                 send_trade_order(
                     email,
                     stake_to_use,
@@ -411,7 +428,6 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             print(f"❌ [ERROR] WebSocket failed for {email}: {e}")
 
         # Wait briefly before attempting reconnect (Martingale)
-        # If is_running is still True (Immediate Martingale), the next run_forever will start quickly
         time.sleep(RECONNECT_DELAY)
 
     print(f"🛑 [PROCESS] Bot process loop ended for {email}.")
@@ -459,6 +475,8 @@ CONTROL_FORM = """
         padding: 10px;
         max-width: 600px;
         margin: auto;
+        direction: ltr; /* Ensure LTR for English interface */
+        text-align: left;
     }
     h1 {
         color: #007bff;
@@ -484,6 +502,8 @@ CONTROL_FORM = """
         border: 1px solid #ccc;
         border-radius: 4px;
         box-sizing: border-box;
+        text-align: left;
+        direction: ltr;
     }
     form button {
         padding: 12px 20px;
@@ -512,7 +532,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running or session_data.stop_reason == "Disconnected (Auto-Retry)" %}
-    {% set strategy = contract_type + " (1 Tick | Immediate Martingale x" + 19|string + ")" %}
+    {% set strategy = contract_type + " (1 Tick | Timed 00/30s | Immediate Martingale x" + 19|string + ")" %}
 
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     {% if session_data.stop_reason == "Disconnected (Auto-Retry)" %}
@@ -663,7 +683,7 @@ def start_bot():
 
     with PROCESS_LOCK: active_processes[email] = process
 
-    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {CONTRACT_TYPE} 1 Tick (x19 Immediate Martingale with same Barrier)', 'success')
+    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {CONTRACT_TYPE} 1 Tick (Timed 00/30s | x19 Immediate Martingale with same Barrier)', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
