@@ -10,7 +10,7 @@ from multiprocessing import Process
 from threading import Lock
 
 # ==========================================================
-# BOT CONSTANT SETTINGS (UNCHANGED)
+# BOT CONSTANT SETTINGS
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
@@ -27,7 +27,7 @@ CONTRACT_TYPE = "NOTOUCH"
 # ==========================================================
 
 # ==========================================================
-# GLOBAL STATE (Shared between processes via File/Lock)
+# GLOBAL STATE
 # ==========================================================
 active_processes = {}
 active_ws = {}
@@ -57,14 +57,14 @@ DEFAULT_SESSION_STATE = {
     "last_action_type": CONTRACT_TYPE, 
     "last_valid_tick_price": 0.0,
     
-    "last_barrier_value": "-1", # Preserved barrier for immediate Martingale
+    "last_barrier_value": "-1", 
     "monitoring_start_price": 0.0, 
-    "immediate_martingale_pending": False, # 💡 FLAG جديد: للدخول الفوري بعد الخسارة
+    "immediate_martingale_pending": False, 
 }
 # ==========================================================
 
 # ==========================================================
-# PERSISTENT STATE MANAGEMENT FUNCTIONS (No change)
+# PERSISTENT STATE MANAGEMENT FUNCTIONS 
 # ==========================================================
 
 def load_persistent_sessions():
@@ -182,7 +182,7 @@ def send_trade_order(email, stake, currency, contract_type_param, barrier_offset
         pass
 
 def calculate_and_store_martingale(email, last_loss_stake, last_action_type):
-    """ Calculates the new stake and stores it for the next scheduled entry """
+    """ Calculates the new stake and stores it for the next immediate entry """
     current_data = get_session_data(email)
     
     new_stake = calculate_martingale_stake(
@@ -194,7 +194,7 @@ def calculate_and_store_martingale(email, last_loss_stake, last_action_type):
     current_data['current_stake'] = new_stake
     current_data['last_action_type'] = last_action_type 
     
-    # 💡 التعديل: لا نعيد تعيين الـ Barrier، بل نحافظ عليه (last_barrier_value) لاستخدامه فورياً.
+    # لا نعيد تعيين الـ Barrier، بل نحافظ عليه (last_barrier_value) لاستخدامه فورياً.
     current_data['immediate_martingale_pending'] = True # تفعيل علامة الدخول الفوري
     
     save_session_data(email, current_data)
@@ -214,7 +214,7 @@ def check_pnl_limits(email, profit_loss, last_action_type):
     current_data['current_profit'] += profit_loss
     
     if profit_loss > 0:
-        # 💡 Win: Reset to base stake and scheduled entry (30s)
+        # Win: Reset to base stake and scheduled entry (30s)
         current_data['total_wins'] += 1
         current_data['current_step'] = 0
         current_data['consecutive_losses'] = 0
@@ -279,7 +279,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         "last_valid_tick_price": 0.0,
         "last_barrier_value": "-1", 
         "monitoring_start_price": 0.0,
-        "immediate_martingale_pending": False # Flag reset on start
+        "immediate_martingale_pending": False 
     })
     save_session_data(email, session_data)
 
@@ -321,56 +321,33 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 current_data['last_valid_tick_price'] = current_price
                 save_session_data(email, current_data) 
                 
-                # Check 1: IMMEDIATE MARTINGALE ENTRY 🚀 (أولوية الدخول الفوري)
-                if current_data['immediate_martingale_pending'] and is_contract_open.get(email) is False:
-                    
-                    stake_to_use = current_data['current_stake']
-                    currency_to_use = current_data['currency']
-                    action_type_to_use = CONTRACT_TYPE 
-                    
-                    # نستخدم الـ Barrier المحفوظ من الصفقة الخاسرة السابقة
-                    barrier_offset = current_data['last_barrier_value']
-                    
-                    if barrier_offset != "-1":
-                        send_trade_order(
-                            email, 
-                            stake_to_use, 
-                            currency_to_use, 
-                            action_type_to_use, 
-                            barrier_offset
-                        )
-                        
-                        current_data['immediate_martingale_pending'] = False # إيقاف الفلاغ
-                        current_data['last_entry_time'] = current_timestamp
-                        current_data['last_entry_price'] = current_price 
-                        save_session_data(email, current_data)
-                        
-                        print(f"🚀 [IMMEDIATE MARTINGALE] Executing Step {current_data['current_step']} with preserved Barrier: {barrier_offset}")
-                        return 
-                
-                # إذا كانت المضاعفة فورية معلقة أو كان هناك عقد مفتوح، ننتظر
-                if current_data['immediate_martingale_pending'] or is_contract_open.get(email) is True:
-                    return
-
-                # Check 2: MONITORING and SCHEDULED ENTRY (فقط للدخول الأساسي - بعد الربح)
-                    
                 current_second = datetime.fromtimestamp(current_timestamp, tz=timezone.utc).second
-                
-                # MONITORING: Record price at second 0
+
+                # 💡 التعديل: MONITORING: Record price at second 0 (Independent of Contract Status)
                 if current_second == 0:
                     current_data['monitoring_start_price'] = current_price
                     save_session_data(email, current_data)
-                    print(f"👁️ [MONITOR] Recording Start Price at 0s: {current_price:.5f}")
+                    print(f"👁️ [MONITOR] Recording Start Price at 0s: {current_price:.5f} (Contract Status: {is_contract_open.get(email)})")
+
+                # ❌ STOP: Do not enter scheduled trade if contract is open or immediate martingale is pending
+                if current_data['immediate_martingale_pending'] or is_contract_open.get(email) is True:
+                    # We still process ticks for the monitoring above, but we stop entry logic here
                     return 
-                
-                # SCHEDULED ENTRY AT 30s (ONLY FOR BASE STAKE - current_step == 0) 🎯
+
+                # Check 1: IMMEDIATE MARTINGALE ENTRY 🚀 (Only executes if pending is TRUE and contract is CLOSED)
+                if current_data['immediate_martingale_pending'] == False and current_data['current_step'] > 0:
+                    # This path should technically not be hit often, as immediate_martingale_pending is set to True upon loss
+                    # but including it for robustness:
+                    pass
+
+                # Check 2: SCHEDULED ENTRY AT 30s (ONLY FOR BASE STAKE - after a WIN) 🎯
                 should_enter_scheduled = current_second == 30 
 
                 if should_enter_scheduled:
                     
                     # لا ندخل هنا إلا إذا كنا في الخطوة 0 (دخول أساسي بعد ربح)
                     if current_data['current_step'] > 0:
-                        print(f"⚠️ [SCHEDULED SKIP @ 30s] Martingale Step {current_data['current_step']} is active. Waiting for immediate entry trigger.")
+                        # Should not happen due to the STOP check above, but as a safeguard
                         return 
 
                     if current_data['last_entry_time'] == current_timestamp: 
@@ -472,7 +449,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
     print(f"🛑 [PROCESS] Bot process loop ended for {email}.")
 
 # ==========================================================
-# FLASK APP SETUP AND ROUTES (Control Panel - No change)
+# FLASK APP SETUP AND ROUTES 
 # ==========================================================
 
 app = Flask(__name__)
