@@ -330,7 +330,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
 
                 
                 # 💡 ENTRY CONDITION: Scheduled at 30 seconds only
-                should_enter_scheduled = current_second == 30 
+                should_enter_scheduled = current_second == 10 
 
                 if should_enter_scheduled:
                     
