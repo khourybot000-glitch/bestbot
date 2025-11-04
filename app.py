@@ -381,12 +381,12 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     
                     # Direction UP: Current price > Start price -> Use negative offset (-0.5)
                     if current_price > start_price:
-                        barrier_offset = "-0.5"
+                        barrier_offset = "+0.5"
                         direction_info = "Price UP"
                         
                     # Direction DOWN: Current price < Start price -> Use positive offset (+0.5)
                     elif current_price < start_price:
-                        barrier_offset = "+0.5"
+                        barrier_offset = "-0.5"
                         direction_info = "Price DOWN"
                     
                     # NO CLEAR DIRECTION or price is the same, SKIP TRADE
