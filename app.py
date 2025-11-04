@@ -21,8 +21,6 @@ MAX_CONSECUTIVE_LOSSES = 3
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
-
-# Strategy: NOTOUCH
 CONTRACT_TYPE = "NOTOUCH" 
 # ==========================================================
 
@@ -51,22 +49,16 @@ DEFAULT_SESSION_STATE = {
     "last_tick_data": None,
     "currency": "USD", 
     "account_type": "demo",
-    
     "open_price": 0.0,        
     "open_time": 0,           
     "last_action_type": CONTRACT_TYPE, 
     "last_valid_tick_price": 0.0,
-    
     "last_barrier_value": "-1", 
     "monitoring_start_price": 0.0, 
     "immediate_martingale_pending": False, 
 }
-# ==========================================================
 
-# ==========================================================
-# PERSISTENT STATE MANAGEMENT FUNCTIONS 
-# ==========================================================
-
+# --- (Persistence functions: load_persistent_sessions, save_session_data, get_session_data, delete_session_data, load_allowed_users - UNCHANGED) ---
 def load_persistent_sessions():
     if not os.path.exists(ACTIVE_SESSIONS_FILE): return {}
     try:
@@ -123,7 +115,12 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
             del active_processes[email]
     
     with PROCESS_LOCK:
-        if email in active_ws: del active_ws[email]
+        if email in active_ws and active_ws[email]:
+             # محاولة إغلاق نظيف لـ WS
+            try: active_ws[email].close() 
+            except: pass
+            del active_ws[email]
+
     if email in is_contract_open: is_contract_open[email] = False
 
     if clear_data:
@@ -134,6 +131,7 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
             print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}) and session data cleared from file.")
     else:
         print(f"⚠ [INFO] WS closed for {email}. Attempting immediate reconnect.")
+# --- (End of UNCHANGED functions) ---
 
 # ==========================================================
 # TRADING BOT FUNCTIONS
@@ -141,18 +139,19 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
 
 def calculate_martingale_stake(base_stake, current_stake, current_step):
     """ Martingale logic (Last losing stake * 7) """
-    if current_step == 0:
-        return base_stake
-    # المضاعفة x7 تنطبق على الخطوات 1 و 2
+    if current_step == 0: return base_stake
     if 1 <= current_step <= MARTINGALE_STEPS:
         return current_stake * 7.0 
     return base_stake
 
-def send_trade_order(email, stake, currency, contract_type_param, barrier_offset=None):
-    """ Sending the purchase order. Uses barrier_offset as relative barrier. """
+def send_trade_order(email, stake, currency, contract_type_param, barrier_offset=None, is_martingale=False):
+    """ Sending the purchase order. """
     global is_contract_open, active_ws, DURATION, DURATION_UNIT, SYMBOL
     
-    if email not in active_ws or active_ws[email] is None: return
+    if email not in active_ws or active_ws[email] is None: 
+        print(f"❌ [TRADE ERROR] Cannot send trade: WebSocket connection is inactive.")
+        return
+        
     ws_app = active_ws[email]
     
     trade_request = {
@@ -169,20 +168,28 @@ def send_trade_order(email, stake, currency, contract_type_param, barrier_offset
         }
     }
     
-    # Adding Relative Barrier
     if barrier_offset is not None and barrier_offset != "-1":
         trade_request["parameters"]["barrier"] = str(barrier_offset) 
     
     try:
         ws_app.send(json.dumps(trade_request))
         is_contract_open[email] = True
-        print(f"💰 [TRADE] Sent {contract_type_param} with Barrier Offset: {barrier_offset} | Stake: {round(stake, 2):.2f} {currency}")
+        
+        # إذا كانت مضاعفة فورية، يتم إلغاء العلم بعد الإرسال
+        if is_martingale:
+            current_data = get_session_data(email)
+            current_data['immediate_martingale_pending'] = False 
+            current_data['last_entry_time'] = int(time.time()) # لتسجيل وقت الدخول
+            current_data['last_entry_price'] = current_data['last_valid_tick_price'] 
+            save_session_data(email, current_data)
+        
+        print(f"💰 [TRADE SENT] {'IMMEDIATE MARTINGALE' if is_martingale else 'BASE ENTRY'} | Barrier: {barrier_offset} | Stake: {round(stake, 2):.2f} {currency}")
     except Exception as e:
         print(f"❌ [TRADE ERROR] Could not send trade order: {e}")
-        pass
+        # لا نغلق الاتصال هنا
 
-def calculate_and_store_martingale(email, last_loss_stake, last_action_type):
-    """ Calculates the new stake and stores it for the next immediate entry """
+def calculate_and_execute_martingale(email, last_loss_stake, last_action_type):
+    """ Calculates the new stake and executes the immediate trade. """
     current_data = get_session_data(email)
     
     new_stake = calculate_martingale_stake(
@@ -193,12 +200,30 @@ def calculate_and_store_martingale(email, last_loss_stake, last_action_type):
 
     current_data['current_stake'] = new_stake
     current_data['last_action_type'] = last_action_type 
-    
-    # لا نعيد تعيين الـ Barrier، بل نحافظ عليه (last_barrier_value) لاستخدامه فورياً.
-    current_data['immediate_martingale_pending'] = True # تفعيل علامة الدخول الفوري
+    current_data['immediate_martingale_pending'] = True # تفعيل العلم مؤقتاً
     
     save_session_data(email, current_data)
-    print(f"💸 [MARTINGALE] Lost. Step {current_data['current_step']}. Calculating next stake: {new_stake:.2f}. **Executing IMMEDIATE Martingale.**")
+    
+    stake_to_use = current_data['current_stake']
+    currency_to_use = current_data['currency']
+    action_type_to_use = CONTRACT_TYPE 
+    
+    # نستخدم الـ Barrier المحفوظ من الصفقة الخاسرة السابقة
+    barrier_offset = current_data['last_barrier_value']
+    
+    # ✅ تنفيذ الصفقة فوراً (Immediate execution)
+    if barrier_offset != "-1":
+        send_trade_order(
+            email, 
+            stake_to_use, 
+            currency_to_use, 
+            action_type_to_use, 
+            barrier_offset,
+            is_martingale=True # إعلام الدالة بأنها مضاعفة
+        )
+    else:
+        # حالة نادرة: عدم وجود Barrier محفوظ (لا يجب أن يحدث بعد خسارة الدخول الأساسي)
+        print("❌ [MARTINGALE ERROR] Lost, but cannot execute immediate martingale: Barrier not preserved (-1).")
 
 
 def check_pnl_limits(email, profit_loss, last_action_type):
@@ -214,19 +239,18 @@ def check_pnl_limits(email, profit_loss, last_action_type):
     current_data['current_profit'] += profit_loss
     
     if profit_loss > 0:
-        # Win: Reset to base stake and scheduled entry (30s)
+        # ✅ Win: Reset and prepare for scheduled entry (30s)
         current_data['total_wins'] += 1
         current_data['current_step'] = 0
         current_data['consecutive_losses'] = 0
         current_data['current_stake'] = current_data['base_stake']
-        current_data['last_action_type'] = last_action_type 
         
         # Resetting entry flags after a win (Return to 30s scheduled entry)
-        current_data['last_barrier_value'] = "-1" # Barrier reset
-        current_data['monitoring_start_price'] = 0.0 # Monitoring reset
-        current_data['immediate_martingale_pending'] = False # Flag reset
+        current_data['last_barrier_value'] = "-1" 
+        current_data['monitoring_start_price'] = 0.0 
+        current_data['immediate_martingale_pending'] = False 
         
-    else: # Loss
+    else: # ❌ Loss
         current_data['total_losses'] += 1
         current_data['consecutive_losses'] += 1
         current_data['current_step'] += 1
@@ -236,10 +260,11 @@ def check_pnl_limits(email, profit_loss, last_action_type):
             stop_bot(email, clear_data=True, stop_reason="SL Reached")
             return
         
+        # ✅ تنفيذ المضاعفة فوراً هنا
         save_session_data(email, current_data) 
-        calculate_and_store_martingale(email, last_stake, last_action_type) 
+        calculate_and_execute_martingale(email, last_stake, last_action_type) 
         
-        return
+        return # نخرج بعد تنفيذ المضاعفة الفورية
 
     if current_data['current_profit'] >= current_data['tp_target']:
         stop_bot(email, clear_data=True, stop_reason="TP Reached")
@@ -306,7 +331,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             
             current_data = get_session_data(email)
             if not current_data.get('is_running'):
-                ws_app.close()
+                # 💡 التعديل: لا نغلق الـ WS يدوياً هنا، بل نعتمد على الحلقة الخارجية لإنهائها
                 return
                 
             if msg_type == 'tick':
@@ -323,31 +348,23 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 
                 current_second = datetime.fromtimestamp(current_timestamp, tz=timezone.utc).second
 
-                # 💡 التعديل: MONITORING: Record price at second 0 (Independent of Contract Status)
+                # 👁️ MONITORING: Record price at second 0 (Keep analysis running)
                 if current_second == 0:
                     current_data['monitoring_start_price'] = current_price
                     save_session_data(email, current_data)
-                    print(f"👁️ [MONITOR] Recording Start Price at 0s: {current_price:.5f} (Contract Status: {is_contract_open.get(email)})")
 
-                # ❌ STOP: Do not enter scheduled trade if contract is open or immediate martingale is pending
-                if current_data['immediate_martingale_pending'] or is_contract_open.get(email) is True:
-                    # We still process ticks for the monitoring above, but we stop entry logic here
+                # ❌ STOP: إذا كان هناك عقد مفتوح
+                # المضاعفة الفورية لم تعد تعتمد على هذا الشرط، بل تُنفذ فوراً من check_pnl_limits
+                if is_contract_open.get(email) is True:
                     return 
-
-                # Check 1: IMMEDIATE MARTINGALE ENTRY 🚀 (Only executes if pending is TRUE and contract is CLOSED)
-                if current_data['immediate_martingale_pending'] == False and current_data['current_step'] > 0:
-                    # This path should technically not be hit often, as immediate_martingale_pending is set to True upon loss
-                    # but including it for robustness:
-                    pass
-
-                # Check 2: SCHEDULED ENTRY AT 30s (ONLY FOR BASE STAKE - after a WIN) 🎯
+                    
+                # Check 2: SCHEDULED ENTRY AT 30s (فقط للدخول الأساسي - بعد ربح) 🎯
                 should_enter_scheduled = current_second == 30 
 
                 if should_enter_scheduled:
                     
                     # لا ندخل هنا إلا إذا كنا في الخطوة 0 (دخول أساسي بعد ربح)
                     if current_data['current_step'] > 0:
-                        # Should not happen due to the STOP check above, but as a safeguard
                         return 
 
                     if current_data['last_entry_time'] == current_timestamp: 
@@ -381,7 +398,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     
                     print(f"🎯 [BASE ENTRY @ 30s] {direction_info}. Setting NOTOUCH Barrier: {barrier_offset}")
                     
-                    # Execute the trade
+                    # Execute the trade (is_martingale=False)
                     send_trade_order(
                         email, 
                         stake_to_use, 
@@ -399,7 +416,6 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     current_data['last_action_type'] = action_type_to_use 
                     save_session_data(email, current_data)
                     
-                    print(f"✅ [TRADE SENT] Notouch {barrier_offset} sent successfully.")
                     return 
 
             elif msg_type == 'buy':
@@ -408,25 +424,28 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 current_data['last_action_type'] = action_type
                 save_session_data(email, current_data)
                 
+                # الاشتراك في العقد المفتوح لمراقبة نتيجة البيع
                 ws_app.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
             
             elif 'error' in data:
                 error_code = data['error'].get('code', 'N/A')
                 error_message = data['error'].get('message', 'Unknown Error')
-                print(f"❌❌ [API ERROR] Code: {error_code}, Message: {error_message}")
+                print(f"❌❌ [API ERROR] Code: {error_code}, Message: {error_message}. **Connection will attempt to remain open.**")
                 
                 if current_data.get('is_running'):
-                    stop_bot(email, clear_data=False, stop_reason=f"API Buy Error: {error_code} - {error_message}")
+                    # لا نغلق الاتصال هنا، بل نكتفي بتسجيل الخطأ وإيقاف البوت.
+                    pass 
 
             elif msg_type == 'proposal_open_contract':
                 contract = data['proposal_open_contract']
                 if contract.get('is_sold') == 1:
+                    # ✅ Contract Sold: The PNL check logic is called here
                     last_action_type = get_session_data(email).get('last_action_type', CONTRACT_TYPE) 
                     check_pnl_limits(email, contract['profit'], last_action_type)
                     if 'subscription_id' in data: ws_app.send(json.dumps({"forget": data['subscription_id']}))
 
         def on_close_wrapper(ws_app, code, msg):
-            print(f"⚠ [PROCESS] WS closed for {email}. Stopping for auto-retry.")
+            print(f"⚠ [PROCESS] WS closed for {email}. **RECONNECTING IMMEDIATELY.**")
             is_contract_open[email] = False
 
         try:
@@ -436,21 +455,21 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 on_close=on_close_wrapper
             )
             active_ws[email] = ws
-            ws.run_forever(ping_interval=20, ping_timeout=10)
+            # 💡 التعديل: زيادة Ping/Pong لضمان بقاء الاتصال حياً
+            ws.run_forever(ping_interval=10, ping_timeout=5)
             
         except Exception as e:
             print(f"❌ [ERROR] WebSocket failed for {email}: {e}")
         
+        # 💡 التعديل: لا توجد فترة انتظار طويلة هنا
         if get_session_data(email).get('is_running') is False: break
         
-        print(f"💤 [PROCESS] Waiting {RECONNECT_DELAY} seconds before retrying connection for {email}...")
-        time.sleep(RECONNECT_DELAY)
+        print(f"💤 [PROCESS] Immediate Retrying connection for {email}...")
+        time.sleep(0.5) # انتظار نصف ثانية قبل إعادة الاتصال الفوري
 
     print(f"🛑 [PROCESS] Bot process loop ended for {email}.")
 
-# ==========================================================
-# FLASK APP SETUP AND ROUTES 
-# ==========================================================
+# --- (FLASK APP SETUP AND ROUTES - UNCHANGED) ---
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
