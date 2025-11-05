@@ -16,8 +16,8 @@ WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
 DURATION = 5 
 DURATION_UNIT = "t"
-MARTINGALE_STEPS = 2 
-MAX_CONSECUTIVE_LOSSES = 3 
+MARTINGALE_STEPS = 1 
+MAX_CONSECUTIVE_LOSSES = 2 
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
@@ -141,7 +141,7 @@ def calculate_martingale_stake(base_stake, current_stake, current_step):
     """ Martingale logic (Last losing stake * 7) """
     if current_step == 0: return base_stake
     if 1 <= current_step <= MARTINGALE_STEPS:
-        return current_stake * 7.0 
+        return current_stake * 29.0 
     return base_stake
 
 def send_trade_order(email, stake, currency, contract_type_param, barrier_offset=None, is_martingale=False):
@@ -359,7 +359,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     return 
                     
                 # Check 2: SCHEDULED ENTRY AT 30s (فقط للدخول الأساسي - بعد ربح) 🎯
-                should_enter_scheduled = current_second == 30 
+                should_enter_scheduled = current_second == 10 
 
                 if should_enter_scheduled:
                     
@@ -381,12 +381,12 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     
                     # Direction UP: Current price > Start price -> Use negative offset (-0.5)
                     if current_price > start_price:
-                        barrier_offset = "+0.5"
+                        barrier_offset = "+0.7"
                         direction_info = "Price UP"
                         
                     # Direction DOWN: Current price < Start price -> Use positive offset (+0.5)
                     elif current_price < start_price:
-                        barrier_offset = "-0.5"
+                        barrier_offset = "-0.7"
                         direction_info = "Price DOWN"
                     
                     # NO CLEAR DIRECTION or price is the same, SKIP TRADE
