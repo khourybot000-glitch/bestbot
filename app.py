@@ -16,14 +16,15 @@ WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
 DURATION = 5 
 DURATION_UNIT = "t"
-MARTINGALE_STEPS = 1 
-MAX_CONSECUTIVE_LOSSES = 2 
+# 🚨 التعديل: الحد الأقصى للمضاعفة والخسائر المتتالية
+MARTINGALE_STEPS = 3 
+MAX_CONSECUTIVE_LOSSES = 4 
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
-CONTRACT_TYPE = "NOTOUCH" 
-BARRIER_OFFSET = "0.7" 
-MARTINGALE_MULTIPLIER = 29.0 
+CONTRACT_TYPE = "ONETOUCH"  # 🚨 التعديل: استراتيجية Touch
+BARRIER_OFFSET = "0.1"      # 🚨 التعديل: قيمة الحاجز الجديدة
+MARTINGALE_MULTIPLIER = 3.5 # 🚨 التعديل: معامل المضاعفة الجديد
 # ==========================================================
 
 # ==========================================================
@@ -189,8 +190,7 @@ def send_trade_order(email, stake, currency, contract_type_param, barrier_offset
         print(f"❌ [TRADE ERROR] Could not send trade order: {e}")
 
 def calculate_and_execute_martingale(email, last_loss_stake, last_action_type):
-    """ Calculates the new stake and executes the immediate trade with REVERSED barrier. """
-    global BARRIER_OFFSET
+    """ Calculates the new stake and executes the immediate trade with the SAME barrier. """
     current_data = get_session_data(email)
     
     new_stake = calculate_martingale_stake(
@@ -199,27 +199,21 @@ def calculate_and_execute_martingale(email, last_loss_stake, last_action_type):
         current_data['current_step']
     )
     
-    # منطق عكس الحاجز (Reversal Martingale Logic)
-    losing_barrier = current_data['last_barrier_value'] 
-    new_barrier = losing_barrier
+    # 🚨 منطق المضاعفة بنفس الاتجاه (Same Direction Martingale Logic) 🚨
+    # نستخدم الحاجز الذي خسرنا فيه الصفقة السابقة
+    new_barrier = current_data['last_barrier_value'] 
     
-    positive_barrier = f"+{BARRIER_OFFSET}"
-    negative_barrier = f"-{BARRIER_OFFSET}"
-    
-    if losing_barrier == positive_barrier:
-        new_barrier = negative_barrier # عكس إلى هبوط
-        print(f"🔄 [REVERSAL] Last Loss Barrier ({positive_barrier}). New Martingale Barrier: {negative_barrier}")
-    elif losing_barrier == negative_barrier:
-        new_barrier = positive_barrier # عكس إلى صعود
-        print(f"🔄 [REVERSAL] Last Loss Barrier ({negative_barrier}). New Martingale Barrier: {positive_barrier}")
+    if new_barrier in [f"+{BARRIER_OFFSET}", f"-{BARRIER_OFFSET}"]:
+        print(f"🔄 [MARTINGALE] Last Loss Barrier ({new_barrier}). New Martingale Barrier: {new_barrier} (Same Direction)")
     else:
-        print("⚠️ [REVERSAL WARNING] Last barrier not clear. Using default (-1).")
+        # حالة نادرة
+        print("⚠️ [MARTINGALE WARNING] Last barrier not clear. Using default (-1).")
         new_barrier = "-1"
 
     current_data['current_stake'] = new_stake
     current_data['last_action_type'] = last_action_type 
     current_data['immediate_martingale_pending'] = True 
-    current_data['last_barrier_value'] = new_barrier 
+    current_data['last_barrier_value'] = new_barrier # حفظ الحاجز للصفقة الحالية (لاستخدامه في الخطوة التالية إذا خسرت)
     
     save_session_data(email, current_data)
     
@@ -272,7 +266,7 @@ def check_pnl_limits(email, profit_loss, last_action_type):
         current_data['consecutive_losses'] += 1
         current_data['current_step'] += 1
         
-        # التحقق من الخسارة القصوى
+        # 🚨 التحقق من الخسارة القصوى (3 خطوات مضاعفة + صفقة أساسية = 4 خسائر)
         if current_data['consecutive_losses'] > MAX_CONSECUTIVE_LOSSES or current_data['current_step'] > MARTINGALE_STEPS:
             stop_bot(email, clear_data=True, stop_reason="SL Reached")
             return
@@ -366,7 +360,6 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 current_second = datetime.fromtimestamp(current_timestamp, tz=timezone.utc).second
 
                 # 👁️ MONITORING: Record price at second 0 (Keep analysis running)
-                # يبقى هذا عند الثانية 0 لمقارنة الحركة في أول 10 ثوانٍ
                 if current_second == 0:
                     current_data['monitoring_start_price'] = current_price
                     save_session_data(email, current_data)
@@ -376,7 +369,6 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     return 
                     
                 # 🎯 Check 2: SCHEDULED ENTRY AT 10s (للدخول الأساسي فقط) 
-                # 🚨 التعديل: تغيير وقت الدخول إلى الثانية 10
                 should_enter_scheduled = current_second == 10 
 
                 if should_enter_scheduled:
@@ -402,15 +394,15 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                         print("⚠️ [ENTRY SKIPPED @ 10s] Price monitoring failed: Start price (0s) not recorded or reset.")
                         return 
                         
-                    # ✅ استراتيجية NOTOUCH بنفس اتجاه الحركة
-                    # Direction UP: Current price > Start price -> Use positive offset (+0.7)
+                    # ✅ استراتيجية ONETOUCH بنفس اتجاه الحركة
+                    # Direction UP: Current price > Start price -> Use positive offset (+0.1)
                     if current_price > start_price:
-                        barrier_offset = f"-{BARRIER_OFFSET}" 
+                        barrier_offset = f"+{BARRIER_OFFSET}" 
                         direction_info = "Price UP"
                         
-                    # Direction DOWN: Current price < Start price -> Use negative offset (-0.7)
+                    # Direction DOWN: Current price < Start price -> Use negative offset (-0.1)
                     elif current_price < start_price:
-                        barrier_offset = f"+{BARRIER_OFFSET}" 
+                        barrier_offset = f"-{BARRIER_OFFSET}" 
                         direction_info = "Price DOWN"
                     
                     # NO CLEAR DIRECTION or price is the same, SKIP TRADE
@@ -420,7 +412,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                         save_session_data(email, current_data)
                         return
                     
-                    print(f"🎯 [BASE ENTRY @ 10s] {direction_info}. Setting NOTOUCH Barrier: {barrier_offset}")
+                    print(f"🎯 [BASE ENTRY @ 10s] {direction_info}. Setting ONETOUCH Barrier: {barrier_offset}")
                     
                     # Execute the trade (is_martingale=False)
                     send_trade_order(
@@ -587,7 +579,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = contract_type + " (" + duration|string + " Ticks @ x" + martingale_multiplier|string + " Reversal Martingale, Max Steps " + martingale_steps|string + ")" %}
+    {% set strategy = contract_type + " (" + duration|string + " Ticks @ x" + martingale_multiplier|string + " Martingale Same Direction, Max Steps " + martingale_steps|string + ")" %}
     
     <p class="status-running">✅ Bot is *Running*! (Auto-refreshing)</p>
     <p>Account Type: *{{ session_data.account_type.upper() }}* | Currency: *{{ session_data.currency }}*</p>
@@ -676,7 +668,7 @@ def index():
         session_data=session_data,
         martingale_steps=MARTINGALE_STEPS,
         max_consecutive_losses=MAX_CONSECUTIVE_LOSSES,
-        martingale_multiplier=int(MARTINGALE_MULTIPLIER),
+        martingale_multiplier=MARTINGALE_MULTIPLIER, # تمرير القيمة العشرية
         contract_type=CONTRACT_TYPE, 
         duration=DURATION  
     )
@@ -728,7 +720,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {CONTRACT_TYPE} {DURATION} Ticks (x{int(MARTINGALE_MULTIPLIER)} Reversal Martingale, Max Steps {MARTINGALE_STEPS})', 'success')
+    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {CONTRACT_TYPE} {DURATION} Ticks (x{MARTINGALE_MULTIPLIER} Martingale Same Direction, Max Steps {MARTINGALE_STEPS})', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
