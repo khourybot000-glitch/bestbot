@@ -405,12 +405,12 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     # ✅ استراتيجية NOTOUCH بنفس اتجاه الحركة
                     # Direction UP: Current price > Start price -> Use positive offset (+0.7)
                     if current_price > start_price:
-                        barrier_offset = f"+{BARRIER_OFFSET}" 
+                        barrier_offset = f"-{BARRIER_OFFSET}" 
                         direction_info = "Price UP"
                         
                     # Direction DOWN: Current price < Start price -> Use negative offset (-0.7)
                     elif current_price < start_price:
-                        barrier_offset = f"-{BARRIER_OFFSET}" 
+                        barrier_offset = f"+{BARRIER_OFFSET}" 
                         direction_info = "Price DOWN"
                     
                     # NO CLEAR DIRECTION or price is the same, SKIP TRADE
