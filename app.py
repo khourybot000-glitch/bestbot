@@ -353,11 +353,11 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                             
                     # Logic: ONETOUCH بنفس اتجاه الحركة (0s to 10s)
                     if current_price > start_price:
-                        barrier_offset = f"+{BARRIER_OFFSET}" 
+                        barrier_offset = f"-{BARRIER_OFFSET}" 
                         direction_info = "Price UP"
                             
                     elif current_price < start_price:
-                        barrier_offset = f"-{BARRIER_OFFSET}" 
+                        barrier_offset = f"+{BARRIER_OFFSET}" 
                         direction_info = "Price DOWN"
                         
                     else:
