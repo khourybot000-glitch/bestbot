@@ -14,17 +14,20 @@ from threading import Lock
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
-DURATION = 5 
+DURATION = 10                  # مدة الصفقة: 10 تيكات
 DURATION_UNIT = "t"
 MARTINGALE_STEPS = 3 
 MAX_CONSECUTIVE_LOSSES = 4 
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
-CONTRACT_TYPE = "ONETOUCH"  # استراتيجية اللمس
-BARRIER_OFFSET = "0.1"      # الحاجز +/- 0.1
-MARTINGALE_MULTIPLIER = 3.5 # معامل المضاعفة
-TICKS_TO_ANALYZE = 5        # عدد التيكات لتحليل الاتجاه
+CONTRACT_TYPE = "ONETOUCH"     # استراتيجية اللمس
+BARRIER_OFFSET = "0.2"         # الحاجز +/- 0.2
+MARTINGALE_MULTIPLIER = 3.5 
+
+# ثوابت تحليل الوقت
+OPEN_PRICE_SECOND = 0
+CLOSE_PRICE_SECOND = 58       # توقيت الإغلاق للمقارنة: 58 ثانية
 # ==========================================================
 
 # ==========================================================
@@ -34,7 +37,7 @@ active_processes = {}
 active_ws = {}
 is_contract_open = {}
 PROCESS_LOCK = Lock()
-TRADE_LOCK = Lock() # قفل للتأكد من عدم إرسال طلبات متعددة في نفس الوقت
+TRADE_LOCK = Lock() 
 
 DEFAULT_SESSION_STATE = {
     "api_token": "",
@@ -53,15 +56,20 @@ DEFAULT_SESSION_STATE = {
     "last_tick_data": None,
     "currency": "USD", 
     "account_type": "demo",
+    
+    # حالة تحليل الوقت
     "open_price": 0.0,        
-    "open_time": 0,           
+    "close_price": 0.0,
+    "open_price_recorded": False, 
+    "close_price_recorded": False,
+    
     "last_action_type": CONTRACT_TYPE, 
     "last_valid_tick_price": 0.0,
     "last_barrier_value": "-1", 
-    "immediate_trade_pending": False, # مؤشر للدخول الفوري بعد انتهاء الصفقة
+    "immediate_trade_pending": False, 
 }
 
-# --- (Persistence functions - UNCHANGED) ---
+# --- Persistence functions ---
 def load_persistent_sessions():
     if not os.path.exists(ACTIVE_SESSIONS_FILE): return {}
     try:
@@ -132,7 +140,7 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
             print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}) and session data cleared from file.")
     else:
         print(f"⚠ [INFO] WS closed for {email}. Attempting immediate reconnect.")
-# --- (End of Persistence and Control functions) ---
+# --- End of Persistence and Control functions ---
 
 # ==========================================================
 # TRADING BOT FUNCTIONS
@@ -173,7 +181,6 @@ def send_trade_order(email, stake, currency, contract_type_param, barrier_offset
         trade_request["parameters"]["barrier"] = str(barrier_offset) 
     
     try:
-        # ⚠️ تأكد من عدم وجود صفقة مفتوحة قبل الإرسال
         if is_contract_open.get(email) is True:
             print(f"❌ [TRADE SKIPPED] Contract already open for {email}.")
             return
@@ -193,90 +200,7 @@ def send_trade_order(email, stake, currency, contract_type_param, barrier_offset
         
     except Exception as e:
         print(f"❌ [TRADE ERROR] Could not send trade order: {e}")
-        is_contract_open[email] = False # تأكد من تحرير القفل في حالة الفشل
-
-
-def request_5_ticks_and_trade(email):
-    """ يطلب آخر 5 تيكات من API لتحديد الاتجاه ثم يفتح صفقة """
-    global active_ws, SYMBOL, TICKS_TO_ANALYZE
-    
-    if email not in active_ws or active_ws[email] is None:
-        print("❌ [TICK REQUEST] Cannot request ticks: WS connection is inactive.")
-        return
-        
-    ws_app = active_ws[email]
-    
-    # استخدام lock لضمان عدم إرسال طلبات تداول متداخلة
-    with TRADE_LOCK:
-        current_data = get_session_data(email)
-        if current_data.get('is_running') is False: return
-        if is_contract_open.get(email) is True: return
-        
-        # إرسال طلب history للحصول على آخر 5 تيكات
-        history_request = {
-            "ticks_history": SYMBOL,
-            "end": "latest",
-            "count": TICKS_TO_ANALYZE,
-            "subscribe": 0,
-            "style": "ticks"
-        }
-        
-        try:
-            ws_app.send(json.dumps(history_request))
-            current_data['immediate_trade_pending'] = True # وضع علامة انتظار للرد
-            save_session_data(email, current_data)
-            print(f"📈 [REQUEST SENT] Requesting last {TICKS_TO_ANALYZE} ticks for analysis...")
-        except Exception as e:
-            print(f"❌ [TICK REQUEST ERROR] Could not send history request: {e}")
-            current_data['immediate_trade_pending'] = False
-            save_session_data(email, current_data)
-
-
-def execute_trade_based_on_ticks(email, ticks_data):
-    """ ينفذ الصفقة بناءً على تحليل الـ 5 تيكات """
-    global BARRIER_OFFSET
-    
-    current_data = get_session_data(email)
-    current_data['immediate_trade_pending'] = False 
-    
-    if len(ticks_data) < TICKS_TO_ANALYZE:
-        print("⚠️ [TRADE SKIPPED] Not enough tick data received. Waiting for next opportunity.")
-        save_session_data(email, current_data)
-        return
-
-    # التيك الأقدم (البداية) هو الأول في القائمة
-    start_price = ticks_data[0] 
-    # التيك الأحدث (النهاية) هو الأخير في القائمة
-    end_price = ticks_data[-1] 
-    
-    stake_to_use = current_data['current_stake']
-    currency_to_use = current_data['currency']
-    
-    barrier_offset = None
-    
-    if end_price > start_price:
-        # صاعد: الحاجز +0.1
-        barrier_offset = f"+{BARRIER_OFFSET}" 
-        direction_info = "UP (5 Ticks Analysis)"
-    elif end_price < start_price:
-        # هابط: الحاجز -0.1
-        barrier_offset = f"-{BARRIER_OFFSET}" 
-        direction_info = "DOWN (5 Ticks Analysis)"
-    else:
-        print("⚠️ [TRADE SKIPPED] Price remained stable/same across last 5 ticks.")
-        save_session_data(email, current_data)
-        return
-
-    entry_type_tag = "BASE ENTRY" if current_data['current_step'] == 0 else "MARTINGALE ENTRY"
-    print(f"🧠 [ANALYSIS & ENTRY] {entry_type_tag} | Direction: {direction_info} | Barrier: {barrier_offset}")
-    
-    send_trade_order(
-        email, 
-        stake_to_use, 
-        currency_to_use, 
-        CONTRACT_TYPE, 
-        barrier_offset
-    )
+        is_contract_open[email] = False 
 
 
 def check_pnl_limits(email, profit_loss, last_action_type):
@@ -291,8 +215,14 @@ def check_pnl_limits(email, profit_loss, last_action_type):
     last_stake = current_data['current_stake']
     current_data['current_profit'] += profit_loss
     
+    # إعادة تعيين متغيرات تحليل الوقت بعد انتهاء الصفقة
+    current_data['open_price'] = 0.0
+    current_data['close_price'] = 0.0
+    current_data['open_price_recorded'] = False
+    current_data['close_price_recorded'] = False
+    
     if profit_loss > 0:
-        # ✅ Win: Reset and prepare for the next immediate base entry
+        # ✅ Win: Reset and prepare for the next base entry
         current_data['total_wins'] += 1
         current_data['current_step'] = 0
         current_data['consecutive_losses'] = 0
@@ -309,7 +239,7 @@ def check_pnl_limits(email, profit_loss, last_action_type):
             stop_bot(email, clear_data=True, stop_reason="SL Reached")
             return
         
-        # ⚠️ منطق المضاعفة: حساب الرهان الجديد
+        # منطق المضاعفة: حساب الرهان الجديد
         new_stake = calculate_martingale_stake(
             current_data['base_stake'],
             last_stake,
@@ -317,7 +247,7 @@ def check_pnl_limits(email, profit_loss, last_action_type):
         )
         current_data['current_stake'] = new_stake
         
-        print(f"🔄 [LOSS] Next Martingale Stake calculated: {round(new_stake, 2):.2f} {current_data['currency']}. Requesting new direction...")
+        print(f"🔄 [LOSS] Next Martingale Stake calculated: {round(new_stake, 2):.2f} {current_data['currency']}. Waiting for next 0s-58s analysis.")
         
     if current_data['current_profit'] >= current_data['tp_target']:
         stop_bot(email, clear_data=True, stop_reason="TP Reached")
@@ -329,14 +259,11 @@ def check_pnl_limits(email, profit_loss, last_action_type):
     currency = current_data.get('currency', 'USD')
     print(f"[LOG {email}] PNL: {currency} {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Last Stake: {rounded_last_stake:.2f}, Strategy: {CONTRACT_TYPE}")
     
-    # 🎯 بعد تحديث الـ PNL، اطلب التيكات لبدء الصفقة الجديدة فوراً
-    request_5_ticks_and_trade(email)
-
 
 def bot_core_logic(email, token, stake, tp, currency, account_type):
     """ Core bot logic """
     
-    global is_contract_open, active_ws, CONTRACT_TYPE
+    global is_contract_open, active_ws, CONTRACT_TYPE, OPEN_PRICE_SECOND, CLOSE_PRICE_SECOND
 
     is_contract_open = {email: False}
     active_ws = {email: None}
@@ -354,12 +281,13 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         "last_tick_data": None,
         "currency": currency,
         "account_type": account_type,
-        "open_price": 0.0,         
-        "open_time": 0,            
         "last_action_type": CONTRACT_TYPE, 
         "last_valid_tick_price": 0.0,
         "last_barrier_value": "-1", 
-        "immediate_trade_pending": False 
+        "open_price": 0.0,        
+        "close_price": 0.0,
+        "open_price_recorded": False, 
+        "close_price_recorded": False,
     })
     save_session_data(email, session_data)
 
@@ -379,11 +307,9 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             save_session_data(email, running_data)
             print(f"✅ [PROCESS] Connection established for {email}.")
             is_contract_open[email] = False
-            
-            # 💡 عند فتح الاتصال، نطلب التيكات للدخول الأولي
-            request_5_ticks_and_trade(email) 
 
         def on_message_wrapper(ws_app, message):
+            global BARRIER_OFFSET, OPEN_PRICE_SECOND, CLOSE_PRICE_SECOND
             data = json.loads(message)
             msg_type = data.get('msg_type')
             
@@ -392,17 +318,84 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 return
                 
             if msg_type == 'tick':
+                current_timestamp = int(data['tick']['epoch'])
                 current_price = float(data['tick']['quote'])
+                
+                dt_object = datetime.fromtimestamp(current_timestamp, tz=timezone.utc)
+                current_second = dt_object.second
+                
                 current_data['last_valid_tick_price'] = current_price
                 current_data['last_tick_data'] = data['tick']
                 save_session_data(email, current_data) 
                 
-            elif msg_type == 'history':
-                # 🧠 تحليل التيكات وتنفيذ الصفقة
-                if current_data['immediate_trade_pending'] is True:
-                    ticks_prices = data.get('history', {}).get('prices', [])
-                    execute_trade_based_on_ticks(email, ticks_prices)
+                # STOP: إذا كان هناك عقد مفتوح
+                if is_contract_open.get(email) is True:
+                    return 
+                
+                # 1. تسجيل سعر الافتتاح (Open Price)
+                if not current_data['open_price_recorded'] and current_second >= OPEN_PRICE_SECOND and current_second <= CLOSE_PRICE_SECOND:
+                    current_data['open_price'] = current_price
+                    current_data['open_price_recorded'] = True
+                    # يجب إعادة تعيين close_price_recorded لضمان فحص جديد في كل دقيقة
+                    current_data['close_price_recorded'] = False 
+                    print(f"⏱️ [PRICE] Open Price recorded at {current_second}s: {current_price:.5f}")
+                    save_session_data(email, current_data)
+                    return 
+                
+                # 2. تسجيل سعر الإغلاق (Close Price) ومحاولة الدخول
+                if current_data['open_price_recorded'] and not current_data['close_price_recorded'] and current_second >= CLOSE_PRICE_SECOND:
+                    current_data['close_price'] = current_price
+                    current_data['close_price_recorded'] = True
+                    save_session_data(email, current_data)
                     
+                    open_price = current_data['open_price']
+                    close_price = current_data['close_price']
+                    
+                    if open_price == 0.0:
+                        print("❌ [TRADE SKIP] Open price was 0.0, cannot proceed with analysis.")
+                        current_data['open_price_recorded'] = False 
+                        current_data['close_price_recorded'] = False 
+                        save_session_data(email, current_data)
+                        return
+                    
+                    stake_to_use = current_data['current_stake']
+                    currency_to_use = current_data['currency']
+                    
+                    barrier_offset = None
+                    direction_info = "STABLE"
+                    
+                    if close_price > open_price:
+                        # صاعد: الحاجز +0.2
+                        barrier_offset = f"+{BARRIER_OFFSET}" 
+                        direction_info = "UP"
+                    elif close_price < open_price:
+                        # هابط: الحاجز -0.2
+                        barrier_offset = f"-{BARRIER_OFFSET}" 
+                        direction_info = "DOWN"
+                    else:
+                        # ثابت
+                        print("⚠️ [TRADE SKIP] Price was stable between 0s and 58s. Waiting for next minute.")
+                        # إعادة تعيين للسماح بالدخول في الدقيقة التالية
+                        current_data['open_price'] = 0.0
+                        current_data['close_price'] = 0.0
+                        current_data['open_price_recorded'] = False
+                        current_data['close_price_recorded'] = False
+                        save_session_data(email, current_data)
+                        return
+
+                    entry_type_tag = "BASE ENTRY (0s-58s Analysis)" if current_data['current_step'] == 0 else "MARTINGALE ENTRY (0s-58s Analysis)"
+                    print(f"🧠 [ANALYSIS & ENTRY] {entry_type_tag} | Direction: {direction_info} | Barrier: {barrier_offset}. Open: {open_price:.5f}, Close: {close_price:.5f}")
+                    
+                    send_trade_order(
+                        email, 
+                        stake_to_use, 
+                        currency_to_use, 
+                        CONTRACT_TYPE, 
+                        barrier_offset
+                    )
+                    
+                    return
+
             elif msg_type == 'buy':
                 contract_id = data['buy']['contract_id']
                 action_type = CONTRACT_TYPE
@@ -420,7 +413,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             elif msg_type == 'proposal_open_contract':
                 contract = data['proposal_open_contract']
                 if contract.get('is_sold') == 1:
-                    # ✅ Contract Sold: The PNL check logic is called here
+                    # Contract Sold: The PNL check logic is called here
                     last_action_type = get_session_data(email).get('last_action_type', CONTRACT_TYPE) 
                     check_pnl_limits(email, contract['profit'], last_action_type)
                     if 'subscription_id' in data: ws_app.send(json.dumps({"forget": data['subscription_id']}))
@@ -545,7 +538,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = contract_type + " (" + duration|string + " Ticks @ x" + martingale_multiplier|string + " Martingale Immediate, 5-Tick Analysis, Max Steps " + martingale_steps|string + ")" %}
+    {% set strategy = contract_type + " (" + duration|string + " Ticks @ x" + martingale_multiplier|string + " Martingale 0s-58s Directional, Max Steps " + martingale_steps|string + ")" %}
     
     <p class="status-running">✅ Bot is *Running*! (Auto-refreshing)</p>
     <p>Account Type: *{{ session_data.account_type.upper() }}* | Currency: *{{ session_data.currency }}*</p>
@@ -553,10 +546,9 @@ CONTROL_FORM = """
     <p>Current Stake: *{{ session_data.currency }} {{ session_data.current_stake|round(2) }}*</p>
     <p>Step: *{{ session_data.current_step }}* / {{ martingale_steps }} (Max Loss: {{ max_consecutive_losses }})</p>
     <p style="font-weight: bold; color: green;">Total Wins: *{{ session_data.total_wins }}* | Total Losses: *{{ session_data.total_losses }}*</p>
-    <p style="font-weight: bold; color: green;">Last Entry Price: {{ session_data.last_entry_price|round(5) }}</p>
     <p style="font-weight: bold; color: purple;">Last Tick Price: {{ session_data.last_valid_tick_price|round(5) }}</p>
     <p style="font-weight: bold; color: #007bff;">Current Strategy: *{{ strategy }}*</p>
-    <p style="font-weight: bold; color: #ff5733;">Last Barrier Offset: {{ session_data.last_barrier_value }}</p>
+    <p style="font-weight: bold; color: #ff5733;">Barrier: {{ session_data.last_barrier_value }} | Open Price (0s): {{ session_data.open_price|round(5) }} | Close Price (58s): {{ session_data.close_price|round(5) }}</p>
     
     <form method="POST" action="{{ url_for('stop_route') }}">
         <button type="submit" style="background-color: red; color: white;">🛑 Stop Bot</button>
@@ -685,7 +677,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {CONTRACT_TYPE} {DURATION} Ticks (x{MARTINGALE_MULTIPLIER} Martingale Immediate, {TICKS_TO_ANALYZE}-Tick Analysis, Max Steps {MARTINGALE_STEPS})', 'success')
+    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {CONTRACT_TYPE} {DURATION} Ticks (x{MARTINGALE_MULTIPLIER} Martingale 0s-58s Directional, Max Steps {MARTINGALE_STEPS})', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
