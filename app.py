@@ -10,16 +10,16 @@ from multiprocessing import Process
 from threading import Lock
 
 # ==========================================================
-# BOT CONSTANT SETTINGS 
+# BOT CONSTANT SETTINGS (التعديلات الجديدة)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
-DURATION = 5                  
+DURATION = 5                   # ⬅️ تم التعديل: 5 تيكات
 DURATION_UNIT = "t"
 
 # إعدادات المضاعفة
-MARTINGALE_STEPS = 2           
-MAX_CONSECUTIVE_LOSSES = 3     
+MARTINGALE_STEPS = 2           # ⬅️ تم التعديل: 2 خطوات
+MAX_CONSECUTIVE_LOSSES = 3     # ⬅️ تم التعديل: 3 خسارات كحد أقصى
 MARTINGALE_MULTIPLIER = 4.5    
 
 RECONNECT_DELAY = 1
@@ -34,7 +34,7 @@ BARRIER_OFFSET = "0.2"
 # ==========================================================
 
 # ==========================================================
-# GLOBAL STATE (تم تعديل قيم الرهان المبدئية)
+# GLOBAL STATE 
 # ==========================================================
 active_processes = {}
 active_ws = {}
@@ -49,7 +49,7 @@ DEFAULT_SESSION_STATE = {
     "is_running": False,
     "current_profit": 0.0,
     "current_stake_lower": 1.0,      
-    "current_stake_higher": 1.0,     # ⬅️ تعديل: مساوٍ لـ LOWER
+    "current_stake_higher": 1.0,     
     "consecutive_losses": 0,
     "current_step": 0,
     "total_wins": 0,
@@ -231,7 +231,7 @@ def apply_martingale_logic(email):
         new_stake = calculate_martingale_stake(base_stake_used, current_data['current_step'], MARTINGALE_MULTIPLIER)
         
         current_data['current_stake_lower'] = new_stake
-        current_data['current_stake_higher'] = new_stake # ⬅️ تعديل: الرهان متساوٍ
+        current_data['current_stake_higher'] = new_stake 
         
         print(f"🔄 [DOUBLE LOSS] PnL: {total_profit:.2f}. Step {current_data['current_step']}. Next Stake ({MARTINGALE_MULTIPLIER}^{current_data['current_step']}) calculated: {round(new_stake, 2):.2f}.")
         
@@ -243,7 +243,7 @@ def apply_martingale_logic(email):
         
         # إعادة تعيين الرهان إلى الرهان الأساسي
         current_data['current_stake_lower'] = base_stake_used
-        current_data['current_stake_higher'] = base_stake_used # ⬅️ تعديل: الرهان متساوٍ
+        current_data['current_stake_higher'] = base_stake_used 
         
         entry_result_tag = "WIN" if total_profit > 0 else "SPLIT/DRAW"
         print(f"✅ [ENTRY RESULT] {entry_result_tag}. Total PnL: {total_profit:.2f}. Stake reset to base: {base_stake_used:.2f}.")
@@ -288,7 +288,7 @@ def start_new_dual_trade(email):
     
     current_data = get_session_data(email)
     stake_lower = current_data['current_stake_lower']
-    stake_higher = current_data['current_stake_higher'] # ⬅️ الآن متساوٍ مع lower
+    stake_higher = current_data['current_stake_higher'] 
     currency_to_use = current_data['currency']
     
     # التحقق المزدوج من شروط الإيقاف قبل الدخول (مهم جداً)
@@ -301,7 +301,7 @@ def start_new_dual_trade(email):
     current_data['contract_profits'] = {}
     
     entry_type_tag = "BASE ENTRY" if current_data['current_step'] == 0 else f"MARTINGALE STEP {current_data['current_step']}"
-    print(f"🧠 [DUAL H/L ENTRY - CONTINUOUS] {entry_type_tag} | Stake: {round(stake_lower, 2):.2f}. Offset: +/-{BARRIER_OFFSET}")
+    print(f"🧠 [DUAL H/L ENTRY - SEC 0] {entry_type_tag} | Stake: {round(stake_lower, 2):.2f}. Offset: +/-{BARRIER_OFFSET}")
     
     # إرسال الصفقة الأولى: HIGHER (الرهان متساوٍ) مع حاجز +0.2
     if send_trade_order(email, stake_higher, currency_to_use, CONTRACT_TYPE_HIGHER, f"+{BARRIER_OFFSET}"):
@@ -335,7 +335,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         "tp_target": tp,
         "is_running": True, 
         "current_stake_lower": stake,       
-        "current_stake_higher": stake,  # ⬅️ تعديل: الرهان متساوٍ
+        "current_stake_higher": stake,  
         "stop_reason": "Running",
         "last_entry_time": 0,
         "last_entry_price": 0.0,
@@ -377,14 +377,18 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 
             if msg_type == 'tick':
                 current_price = float(data['tick']['quote'])
+                tick_epoch = data['tick']['epoch'] 
+                
+                # استخدام المنطقة الزمنية UTC للتأكد من توافق الثانية 0 عالمياً
+                current_second = datetime.fromtimestamp(tick_epoch, tz=timezone.utc).second
                 
                 current_data['last_valid_tick_price'] = current_price
                 current_data['last_tick_data'] = data['tick']
                 
                 save_session_data(email, current_data) 
                 
-                # ⬅️ 1. فحص شرط الدخول: إذا لم تكن هناك عقود مفتوحة، ادخل فوراً
-                if not is_contract_open.get(email):
+                # ⬅️ شرط الدخول الجديد: يجب أن تكون الثانية 0
+                if not is_contract_open.get(email) and current_second == 0:
                     start_new_dual_trade(email)
 
             elif msg_type == 'buy':
@@ -534,7 +538,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = "DUAL H/L " + barrier_offset + " (Continuous Entry @ x" + martingale_multiplier|string + " Martingale, Max Steps " + martingale_steps|string + ")" %}
+    {% set strategy = "DUAL H/L " + barrier_offset + " (Entry only @ second 0 - x" + martingale_multiplier|string + " Martingale, Max Steps " + martingale_steps|string + ")" %}
     
     <p class="status-running">✅ Bot is *Running*! (Auto-refreshing)</p>
     <p>Account Type: *{{ session_data.account_type.upper() }}* | Currency: *{{ session_data.currency }}*</p>
@@ -674,7 +678,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: DUAL H/L +/-{BARRIER_OFFSET} (Continuous Entry) with x{MARTINGALE_MULTIPLIER} Martingale (Max {MARTINGALE_STEPS} Steps, Max {MAX_CONSECUTIVE_LOSSES} Losses)', 'success')
+    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: DUAL H/L +/-{BARRIER_OFFSET} (Entry @ Sec 0) with x{MARTINGALE_MULTIPLIER} Martingale (Max {MARTINGALE_STEPS} Steps, Max {MAX_CONSECUTIVE_LOSSES} Losses)', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
