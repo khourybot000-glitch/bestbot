@@ -10,17 +10,17 @@ from multiprocessing import Process
 from threading import Lock
 
 # ==========================================================
-# BOT CONSTANT SETTINGS (التعديلات الجديدة)
+# BOT CONSTANT SETTINGS 
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
-SYMBOL = "R_10"
-DURATION = 5                  
+SYMBOL = "R_100"
+DURATION = 10                  
 DURATION_UNIT = "t"
 
 # إعدادات المضاعفة
-MARTINGALE_STEPS = 4           # ⬅️ تم التعديل: 4 خطوات
-MAX_CONSECUTIVE_LOSSES = 5     # ⬅️ تم التعديل: 5 خسارات كحد أقصى
-MARTINGALE_MULTIPLIER = 2.2    # ⬅️ تم التعديل: معامل المضاعفة 2.2
+MARTINGALE_STEPS = 4           
+MAX_CONSECUTIVE_LOSSES = 5     
+MARTINGALE_MULTIPLIER = 2.2    
 
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
@@ -34,7 +34,7 @@ BARRIER_OFFSET = "0.2"
 # ==========================================================
 
 # ==========================================================
-# GLOBAL STATE 
+# GLOBAL STATE (تم تعديل قيم الرهان المبدئية)
 # ==========================================================
 active_processes = {}
 active_ws = {}
@@ -49,7 +49,7 @@ DEFAULT_SESSION_STATE = {
     "is_running": False,
     "current_profit": 0.0,
     "current_stake_lower": 1.0,      
-    "current_stake_higher": 2.0,     
+    "current_stake_higher": 1.0,     # ⬅️ تعديل: مساوٍ لـ LOWER
     "consecutive_losses": 0,
     "current_step": 0,
     "total_wins": 0,
@@ -151,8 +151,6 @@ def calculate_martingale_stake(base_stake, current_step, multiplier):
     if current_step == 0: 
         return base_stake
     
-    # الرهان الجديد = الرهان الأساسي * (المعامل ^ الخطوة الحالية)
-    # يستخدم هذا المنطق للنمو المتسلسل للرهان (الخطوة 1, 2, 3, 4...)
     return base_stake * (multiplier ** current_step)
 
 
@@ -229,13 +227,13 @@ def apply_martingale_logic(email):
             stop_bot(email, clear_data=True, stop_reason=f"SL Reached: Exceeded {MARTINGALE_STEPS} Martingale steps.")
             return
         
-        # منطق المضاعفة
-        new_lower_stake = calculate_martingale_stake(base_stake_used, current_data['current_step'], MARTINGALE_MULTIPLIER)
+        # منطق المضاعفة (الرهان متساوٍ لكلا الطرفين)
+        new_stake = calculate_martingale_stake(base_stake_used, current_data['current_step'], MARTINGALE_MULTIPLIER)
         
-        current_data['current_stake_lower'] = new_lower_stake
-        current_data['current_stake_higher'] = new_lower_stake * 2.0
+        current_data['current_stake_lower'] = new_stake
+        current_data['current_stake_higher'] = new_stake # ⬅️ تعديل: الرهان متساوٍ
         
-        print(f"🔄 [DOUBLE LOSS] PnL: {total_profit:.2f}. Step {current_data['current_step']}. Next LOWER Stake ({MARTINGALE_MULTIPLIER}^{current_data['current_step']}) calculated: {round(new_lower_stake, 2):.2f}. HIGHER Stake: {round(new_lower_stake*2, 2):.2f}")
+        print(f"🔄 [DOUBLE LOSS] PnL: {total_profit:.2f}. Step {current_data['current_step']}. Next Stake ({MARTINGALE_MULTIPLIER}^{current_data['current_step']}) calculated: {round(new_stake, 2):.2f}.")
         
     # ✅ Win or Split/Draw Condition: إذا كان إجمالي الربح صفر أو إيجابي
     else: 
@@ -245,10 +243,10 @@ def apply_martingale_logic(email):
         
         # إعادة تعيين الرهان إلى الرهان الأساسي
         current_data['current_stake_lower'] = base_stake_used
-        current_data['current_stake_higher'] = base_stake_used * 2.0
+        current_data['current_stake_higher'] = base_stake_used # ⬅️ تعديل: الرهان متساوٍ
         
         entry_result_tag = "WIN" if total_profit > 0 else "SPLIT/DRAW"
-        print(f"✅ [ENTRY RESULT] {entry_result_tag}. Total PnL: {total_profit:.2f}. Stake reset to base: {base_stake_used:.2f} (LOWER) / {base_stake_used * 2.0:.2f} (HIGHER)")
+        print(f"✅ [ENTRY RESULT] {entry_result_tag}. Total PnL: {total_profit:.2f}. Stake reset to base: {base_stake_used:.2f}.")
 
     # إعادة تعيين متغيرات الدخول المزدوج
     current_data['current_entry_id'] = None
@@ -259,7 +257,7 @@ def apply_martingale_logic(email):
     is_contract_open[email] = False 
 
     currency = current_data.get('currency', 'USD')
-    print(f"[LOG {email}] PNL: {currency} {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Lower Stake: {current_data['current_stake_lower']:.2f}, Strategy: DUAL H/L +/-{BARRIER_OFFSET}")
+    print(f"[LOG {email}] PNL: {currency} {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Stake: {current_data['current_stake_lower']:.2f}, Strategy: DUAL H/L +/-{BARRIER_OFFSET}")
     
     save_session_data(email, current_data)
     
@@ -290,7 +288,7 @@ def start_new_dual_trade(email):
     
     current_data = get_session_data(email)
     stake_lower = current_data['current_stake_lower']
-    stake_higher = current_data['current_stake_higher']
+    stake_higher = current_data['current_stake_higher'] # ⬅️ الآن متساوٍ مع lower
     currency_to_use = current_data['currency']
     
     # التحقق المزدوج من شروط الإيقاف قبل الدخول (مهم جداً)
@@ -303,13 +301,13 @@ def start_new_dual_trade(email):
     current_data['contract_profits'] = {}
     
     entry_type_tag = "BASE ENTRY" if current_data['current_step'] == 0 else f"MARTINGALE STEP {current_data['current_step']}"
-    print(f"🧠 [DUAL H/L ENTRY - CONTINUOUS] {entry_type_tag} | Lower Stake: {round(stake_lower, 2):.2f}. Higher Stake: {round(stake_higher, 2):.2f}. Offset: +/-{BARRIER_OFFSET}")
+    print(f"🧠 [DUAL H/L ENTRY - CONTINUOUS] {entry_type_tag} | Stake: {round(stake_lower, 2):.2f}. Offset: +/-{BARRIER_OFFSET}")
     
-    # إرسال الصفقة الأولى: HIGHER (الرهان x2) مع حاجز +0.2
+    # إرسال الصفقة الأولى: HIGHER (الرهان متساوٍ) مع حاجز +0.2
     if send_trade_order(email, stake_higher, currency_to_use, CONTRACT_TYPE_HIGHER, f"+{BARRIER_OFFSET}"):
         pass
     
-    # إرسال الصفقة الثانية: LOWER (الرهان x1) مع حاجز -0.2
+    # إرسال الصفقة الثانية: LOWER (الرهان متساوٍ) مع حاجز -0.2
     if send_trade_order(email, stake_lower, currency_to_use, CONTRACT_TYPE_LOWER, f"-{BARRIER_OFFSET}"):
         pass
         
@@ -337,7 +335,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         "tp_target": tp,
         "is_running": True, 
         "current_stake_lower": stake,       
-        "current_stake_higher": stake * 2.0,  
+        "current_stake_higher": stake,  # ⬅️ تعديل: الرهان متساوٍ
         "stop_reason": "Running",
         "last_entry_time": 0,
         "last_entry_price": 0.0,
@@ -541,8 +539,7 @@ CONTROL_FORM = """
     <p class="status-running">✅ Bot is *Running*! (Auto-refreshing)</p>
     <p>Account Type: *{{ session_data.account_type.upper() }}* | Currency: *{{ session_data.currency }}*</p>
     <p>Net Profit: *{{ session_data.currency }} {{ session_data.current_profit|round(2) }}*</p>
-    <p>Current LOWER Stake: *{{ session_data.currency }} {{ session_data.current_stake_lower|round(2) }}*</p>
-    <p>Current HIGHER Stake (x2): *{{ session_data.currency }} {{ session_data.current_stake_higher|round(2) }}*</p>
+    <p>Current Stake (Higher/Lower): *{{ session_data.currency }} {{ session_data.current_stake_lower|round(2) }}*</p>
     <p>Step: *{{ session_data.current_step }}* / {{ martingale_steps }} (Max Loss: {{ max_consecutive_losses }})</p>
     <p style="font-weight: bold; color: green;">Total Wins: *{{ session_data.total_wins }}* | Total Losses: *{{ session_data.total_losses }}*</p>
     <p style="font-weight: bold; color: purple;">Last Tick Price: {{ session_data.last_valid_tick_price|round(5) }}</p>
@@ -565,7 +562,7 @@ CONTROL_FORM = """
         <label for="token">Deriv API Token:</label><br>
         <input type="text" id="token" name="token" required value="{{ session_data.api_token if session_data else '' }}" {% if session_data and session_data.api_token and session_data.is_running is not none %}readonly{% endif %}><br>
         
-        <label for="stake">Base LOWER Stake (USD/tUSDT):</label><br>
+        <label for="stake">Base Stake (USD/tUSDT):</label><br>
         <input type="number" id="stake" name="stake" value="{{ session_data.base_stake|round(2) if session_data else 0.35 }}" step="0.01" min="0.35" required><br>
         
         <label for="tp">TP Target (USD/tUSDT):</label><br>
@@ -668,7 +665,7 @@ def start_bot():
         if stake < 0.35: raise ValueError("Stake too low")
         tp = float(request.form['tp'])
     except ValueError:
-        flash("Invalid stake or TP value (Base LOWER Stake must be >= 0.35).", 'error')
+        flash("Invalid stake or TP value (Base Stake must be >= 0.35).", 'error')
         return redirect(url_for('index'))
         
     process = Process(target=bot_core_logic, args=(email, token, stake, tp, currency, account_type))
