@@ -13,8 +13,8 @@ from threading import Lock
 # BOT CONSTANT SETTINGS
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
-SYMBOL = "R_100"
-DURATION = 1                  
+SYMBOL = "R_10"
+DURATION = 2                  
 DURATION_UNIT = "t"
 
 # إعدادات المضاعفة
