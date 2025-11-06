@@ -13,12 +13,12 @@ from threading import Lock
 # BOT CONSTANT SETTINGS (التعديلات الجديدة)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
-SYMBOL = "R_100"
+SYMBOL = "R_10"
 DURATION = 10                   # ⬅️ تم التعديل: 5 تيكات
 DURATION_UNIT = "t"
 
 # إعدادات المضاعفة
-MARTINGALE_STEPS = 1           # ⬅️ تم التعديل: 2 خطوات
+MARTINGALE_STEPS = 2           # ⬅️ تم التعديل: 2 خطوات
 MAX_CONSECUTIVE_LOSSES = 2     # ⬅️ تم التعديل: 3 خسارات كحد أقصى
 MARTINGALE_MULTIPLIER = 49    
 
