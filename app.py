@@ -14,13 +14,13 @@ from threading import Lock
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_10"                 # R_10
-DURATION = 7                   
+DURATION = 5                   
 DURATION_UNIT = "t"
 
 # إعدادات المضاعفة
-MARTINGALE_STEPS = 2           
-MAX_CONSECUTIVE_LOSSES = 3     
-MARTINGALE_MULTIPLIER = 5    
+MARTINGALE_STEPS = 1           
+MAX_CONSECUTIVE_LOSSES = 2     
+MARTINGALE_MULTIPLIER = 29    
 
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
@@ -29,7 +29,7 @@ ACTIVE_SESSIONS_FILE = "active_sessions.json"
 # نوع العقد والحاجز (Higher/Lower)
 CONTRACT_TYPE_HIGHER = "CALL"  
 CONTRACT_TYPE_LOWER = "PUT"    
-BARRIER_OFFSET = "0.1"         
+BARRIER_OFFSET = "0.05"         
 
 # ==========================================================
 
