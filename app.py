@@ -18,9 +18,9 @@ DURATION = 7
 DURATION_UNIT = "t"
 
 # إعدادات المضاعفة
-MARTINGALE_STEPS = 1           
-MAX_CONSECUTIVE_LOSSES = 2     
-MARTINGALE_MULTIPLIER = 14    
+MARTINGALE_STEPS = 2           
+MAX_CONSECUTIVE_LOSSES = 3     
+MARTINGALE_MULTIPLIER = 5    
 
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
@@ -29,7 +29,7 @@ ACTIVE_SESSIONS_FILE = "active_sessions.json"
 # نوع العقد والحاجز (Higher/Lower)
 CONTRACT_TYPE_HIGHER = "CALL"  
 CONTRACT_TYPE_LOWER = "PUT"    
-BARRIER_OFFSET = "0.2"         
+BARRIER_OFFSET = "0.1"         
 
 # ==========================================================
 
