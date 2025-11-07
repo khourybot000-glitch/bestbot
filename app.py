@@ -24,7 +24,7 @@ MARTINGALE_MULTIPLIER = 29.0
 BARRIER_OFFSET = "0.05"        
 
 # الثواني المسموح بها للدخول
-ALLOWED_ENTRY_SECONDS = [15] 
+ALLOWED_ENTRY_SECONDS = [16] 
 LAST_ENTRY_SECOND = {} # لتجنب الدخول المتكرر عند نفس الثانية
 
 RECONNECT_DELAY = 1
