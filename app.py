@@ -21,7 +21,7 @@ DURATION_UNIT = "t"
 MARTINGALE_STEPS = 5           
 MAX_CONSECUTIVE_LOSSES = 6     
 MARTINGALE_MULTIPLIER = 2.0    
-BARRIER_OFFSET = 0.05        # 🛑 تم التعديل إلى قيمة رقمية 0.05        
+BARRIER_OFFSET = 0.05        # قيمة الإزاحة الرقمية
 
 # الثواني المسموح بها للدخول: عند الثانية 20
 ALLOWED_ENTRY_SECONDS = [20] 
@@ -71,7 +71,9 @@ DEFAULT_SESSION_STATE = {
     "current_entry_id": None,              
     "open_contract_ids": [],               
     "contract_profits": {},                
-    "last_barrier_value": BARRIER_OFFSET
+    "last_barrier_value": f"+{BARRIER_OFFSET}",
+    # لحفظ الاتجاه الأخير الذي تم الدخول به (مهم لعكس الاتجاه في المضاعفة)
+    "last_entry_direction": CONTRACT_TYPE_HIGHER 
 }
 
 # --- Persistence functions (UNCHANGED) ---
@@ -259,8 +261,8 @@ def analyze_tick_trend(ticks_list):
 
 
 def apply_martingale_logic(email):
-    """ يطبق منطق المضاعفة بناءً على نتيجة الصفقة الواحدة """
-    global is_contract_open, MARTINGALE_MULTIPLIER, MARTINGALE_STEPS, MAX_CONSECUTIVE_LOSSES, LAST_ENTRY_SECOND
+    """ يطبق منطق المضاعفة بناءً على نتيجة الصفقة الواحدة، ويسمح بالدخول الفوري بعد الخسارة """
+    global is_contract_open, MARTINGALE_MULTIPLIER, MARTINGALE_STEPS, MAX_CONSECUTIVE_LOSSES, LAST_ENTRY_SECOND, BARRIER_OFFSET
     current_data = get_session_data(email)
     
     if not current_data.get('is_running'): return
@@ -301,9 +303,11 @@ def apply_martingale_logic(email):
         current_data['current_stake_lower'] = new_stake
         current_data['current_stake_higher'] = new_stake 
         
-        entry_tag = f"WAITING @ SEC {ALLOWED_ENTRY_SECONDS}"
+        entry_tag = "IMMEDIATE ENTRY (Martingale)"
         
-        print(f"🔄 [LOSS] PnL: {total_profit:.2f}. Step {current_data['current_step']}. Next Stake calculated: {round(new_stake, 2):.2f}. **Ready for Sec {ALLOWED_ENTRY_SECONDS}.**")
+        # 🛑 لا نعيد تعيين LAST_ENTRY_SECOND هنا! (للسماح بالدخول الفوري)
+        
+        print(f"🔄 [LOSS] PnL: {total_profit:.2f}. Step {current_data['current_step']}. Next Stake calculated: {round(new_stake, 2):.2f}. **Ready for IMMEDIATE ENTRY.**")
         
     # ✅ Win or Draw Condition (ربح أو تعادل)
     else: 
@@ -314,6 +318,12 @@ def apply_martingale_logic(email):
         current_data['current_stake_lower'] = base_stake_used
         current_data['current_stake_higher'] = base_stake_used 
         
+        # 🛑 عند الربح/التعادل: ننتظر الثانية 20 ونعيد تعيين الاتجاه الافتراضي
+        LAST_ENTRY_SECOND[email] = None 
+        # يتم إعادة تعيين اتجاه البداية إلى القيمة الافتراضية
+        current_data['last_entry_direction'] = CONTRACT_TYPE_HIGHER
+        current_data['last_barrier_value'] = f"+{BARRIER_OFFSET}" 
+
         entry_result_tag = "WIN" if total_profit > 0 else "DRAW"
         entry_tag = f"WAITING @ SEC {ALLOWED_ENTRY_SECONDS}" 
         print(f"✅ [ENTRY RESULT] {entry_result_tag}. PnL: {total_profit:.2f}. Stake reset to base: {base_stake_used:.2f}. **Ready for Sec {ALLOWED_ENTRY_SECONDS}.**")
@@ -323,8 +333,7 @@ def apply_martingale_logic(email):
     current_data['open_contract_ids'] = []
     current_data['contract_profits'] = {}
     
-    LAST_ENTRY_SECOND[email] = None 
-    is_contract_open[email] = False # إزالة علامة الحظر
+    is_contract_open[email] = False # إزالة علامة الحظر (مهم للدخول الفوري)
 
     currency = current_data.get('currency', 'USD')
     print(f"[LOG {email}] PNL: {currency} {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Stake: {current_data['current_stake_lower']:.2f}, Strategy: 10-TICK Trend | Next Entry: {entry_tag}")
@@ -351,9 +360,9 @@ def handle_contract_settlement(email, contract_id, profit_loss):
         apply_martingale_logic(email)
 
 
-def start_new_single_trade(email, entry_type):
+def start_new_single_trade(email, analysis_entry_type):
     """ يرسل صفقة واحدة بالاتجاه المحدد """
-    global is_contract_open, BARRIER_OFFSET
+    global is_contract_open, BARRIER_OFFSET, CONTRACT_TYPE_HIGHER, CONTRACT_TYPE_LOWER
     
     current_data = get_session_data(email)
     
@@ -368,26 +377,39 @@ def start_new_single_trade(email, entry_type):
     current_data['open_contract_ids'] = []
     current_data['contract_profits'] = {}
     
-    entry_type_tag = "BASE ENTRY" if current_data['current_step'] == 0 else f"MARTINGALE STEP {current_data['current_step']}"
+    current_step = current_data['current_step']
+    entry_type_tag = "BASE ENTRY" if current_step == 0 else f"MARTINGALE STEP {current_step}"
     entry_timing_tag = f"@ SEC {LAST_ENTRY_SECOND.get(email, 'N/A')}" 
     
-    # 🛑 المنطق الجديد لعكس الحاجز: Higher = -0.05، Lower = +0.05
-    if entry_type == CONTRACT_TYPE_HIGHER:
-        barrier = f"-{BARRIER_OFFSET}"
+    # 1. تحديد الاتجاه والحاجز (الأساسي أو المُقلوب)
+    
+    if current_step == 0:
+        # وضع الأساس (البداية/بعد الربح): يستخدم اتجاه التحليل
+        entry_type = analysis_entry_type
     else:
-        barrier = f"+{BARRIER_OFFSET}" 
+        # وضع المضاعفة: يعكس الاتجاه الأخير
+        last_direction = current_data['last_entry_direction']
+        entry_type = CONTRACT_TYPE_LOWER if last_direction == CONTRACT_TYPE_HIGHER else CONTRACT_TYPE_HIGHER
+        
+    # 2. تعيين الحاجز بناءً على الاتجاه النهائي المطلوب (Higher = +0.05, Lower = -0.05)
+    if entry_type == CONTRACT_TYPE_HIGHER:
+        barrier_to_use = f"+{BARRIER_OFFSET}"
+    else: # CONTRACT_TYPE_LOWER
+        barrier_to_use = f"-{BARRIER_OFFSET}"
+
+    # 3. حفظ الاتجاه والحاجز النهائي للصفقة الحالية (لاستخدامه في التبديل التالي)
+    current_data['last_entry_direction'] = entry_type
+    current_data['last_barrier_value'] = barrier_to_use
     
-    current_data['last_barrier_value'] = barrier
-    
-    print(f"🧠 [SINGLE ENTRY - {entry_timing_tag}] {entry_type_tag} | Direction: {entry_type} | Stake: {round(stake, 2):.2f}. Barrier: {barrier}")
+    print(f"🧠 [SINGLE ENTRY - {entry_timing_tag}] {entry_type_tag} | Direction: {entry_type} | Stake: {round(stake, 2):.2f}. Barrier: {barrier_to_use}")
     
     # إرسال صفقة واحدة
-    if send_trade_order(email, stake, currency_to_use, entry_type, barrier):
+    if send_trade_order(email, stake, currency_to_use, entry_type, barrier_to_use):
         is_contract_open[email] = True # حظر الدخول حتى يتم البيع
     else:
         # إذا فشل الإرسال، نزيل الحظر وننتظر الدخول التالي
         is_contract_open[email] = False
-        LAST_ENTRY_SECOND[email] = None
+        if current_step == 0: LAST_ENTRY_SECOND[email] = None # ننتظر الثانية 20 مجدداً في حال الفشل بالـ Base
         
     current_data['last_entry_time'] = int(time.time())
     current_data['last_entry_price'] = current_data.get('last_valid_tick_price', 0.0)
@@ -423,7 +445,8 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         "current_entry_id": None,           
         "open_contract_ids": [],            
         "contract_profits": {},
-        "last_barrier_value": BARRIER_OFFSET
+        "last_barrier_value": f"+{BARRIER_OFFSET}", 
+        "last_entry_direction": CONTRACT_TYPE_HIGHER
     })
     save_session_data(email, session_data)
 
@@ -462,12 +485,27 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 
                 save_session_data(email, current_data) 
                 
-                # === منطق طلب التاريخ عند الثانية 20 ===
+                # === منطق طلب التاريخ ===
                 if not is_contract_open.get(email):
-                    if current_second in ALLOWED_ENTRY_SECONDS and LAST_ENTRY_SECOND.get(email) != current_second:
+                    
+                    current_step = current_data.get('current_step', 0)
+                    should_enter_now = False
+                    
+                    if current_step == 0:
+                        # 1. وضع عادي (بداية/ربح): ننتظر الثانية 20
+                        if current_second in ALLOWED_ENTRY_SECONDS and LAST_ENTRY_SECOND.get(email) != current_second:
+                            should_enter_now = True
+                            
+                    elif current_step > 0:
+                        # 2. وضع المضاعفة (بعد الخسارة): ندخل فوراً
+                        should_enter_now = True 
+                    
+                    
+                    if should_enter_now:
+                        LAST_ENTRY_SECOND[email] = current_second # وضع علامة التوقيت لمنع الدخول المتعدد في نفس الثانية
+                        entry_tag = "IMMEDIATE" if current_step > 0 else f"@ SEC {current_second}"
                         
-                        LAST_ENTRY_SECOND[email] = current_second 
-                        print(f"⌛ [ENTRY @ SEC {current_second}] Requesting last 10 Ticks history...")
+                        print(f"⌛ [ENTRY {entry_tag}] Requesting last 10 Ticks history...")
 
                         # 🌟 إرسال طلب جلب آخر 10 تيك
                         request_history = {
@@ -483,11 +521,12 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             elif msg_type == 'history':
                 # 🌟 معالجة استجابة التاريخ
                 if data.get('req_id') == TICK_HISTORY_REQUEST_ID:
-                    # التحقق من وجود البيانات
+                    # ... (التحقق من البيانات)
                     if 'history' not in data or 'prices' not in data['history']:
                         print("❌ [HISTORY ERROR] Prices data missing in history response.")
                         is_contract_open[email] = False 
-                        LAST_ENTRY_SECOND[email] = None 
+                        # نترك LAST_ENTRY_SECOND كما هي إذا كنا في المضاعفة، ونعيدها للـ None إذا كانت صفقة Base
+                        if current_data.get('current_step', 0) == 0: LAST_ENTRY_SECOND[email] = None 
                         return
                         
                     prices = data['history']['prices'] 
@@ -500,10 +539,14 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                         # يتم استخدام دالة معدلة للدخول بصفقة واحدة فقط
                         start_new_single_trade(email, entry_direction) 
                     else:
-                        print("❌ [ENTRY SKIP] Trend not clear (Open/Close analysis failed). Waiting for next entry second.")
-                        # إزالة علامة الحظر يدويًا للسماح بالدخول في الثانية 20 القادمة
+                        print("❌ [ENTRY SKIP] Trend not clear (Open/Close analysis failed).")
+                        # إزالة علامة الحظر يدويًا للسماح بالدخول في الثانية التالية المتاحة
                         is_contract_open[email] = False 
-                        LAST_ENTRY_SECOND[email] = None 
+                        if current_data.get('current_step', 0) == 0: 
+                             LAST_ENTRY_SECOND[email] = None # ننتظر الثانية 20 مجدداً
+                        else:
+                             # في المضاعفة، إذا فشل التحليل، ننتظر التيك التالي (وهو دخول فوري)
+                             pass 
 
             elif msg_type == 'buy':
                 contract_id = data['buy']['contract_id']
@@ -649,8 +692,8 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set timing_logic = "Always @ Sec " + allowed_entry_seconds|string + " (R_100)" %}
-    {% set strategy = "10-TICK Open/Close Trend (" + symbol + " - " + timing_logic + " - x" + martingale_multiplier|string + " Martingale, Max Steps " + martingale_steps|string + ")" %}
+    {% set timing_logic = "Entry @ Sec " + allowed_entry_seconds|string + " (Base/Win) | Immediate (Martingale)" %}
+    {% set strategy = "10-TICK Trend Analysis (Direction/Barrier Flip on Loss, " + symbol + " - " + timing_logic + " - x" + martingale_multiplier|string + " Martingale, Max Steps " + martingale_steps|string + ")" %}
     
     <p class="status-running">✅ Bot is *Running*! (Auto-refreshing)</p>
     <p>Account Type: *{{ session_data.account_type.upper() }}* | Currency: *{{ session_data.currency }}*</p>
@@ -661,7 +704,7 @@ CONTROL_FORM = """
     <p style="font-weight: bold; color: purple;">Last Tick Price: {{ session_data.last_valid_tick_price|round(5) }}</p>
     <p style="font-weight: bold; color: #007bff;">Current Strategy: *{{ strategy }}*</p>
     <p style="font-weight: bold; color: #ff5733;">Contracts Open: {{ session_data.open_contract_ids|length }}</p>
-    <p style="font-weight: bold; color: #cc6600;">Current Barrier: {{ session_data.last_barrier_value }}</p>
+    <p style="font-weight: bold; color: #cc6600;">Current Barrier: {{ session_data.last_barrier_value }} | Last Direction: {{ session_data.last_entry_direction }}</p>
     
     <form method="POST" action="{{ url_for('stop_route') }}">
         <button type="submit" style="background-color: red; color: white;">🛑 Stop Bot</button>
@@ -798,7 +841,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: 10-TICK Open/Close Trend Analysis ({SYMBOL} - Always @ Sec {ALLOWED_ENTRY_SECONDS}) with x{MARTINGALE_MULTIPLIER} Martingale (Max {MARTINGALE_STEPS} Steps, Max {MAX_CONSECUTIVE_LOSSES} Losses)', 'success')
+    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: 10-TICK Trend Analysis ({SYMBOL} - Entry @ Sec {ALLOWED_ENTRY_SECONDS}) with x{MARTINGALE_MULTIPLIER} Martingale (Max {MARTINGALE_STEPS} Steps, Max {MAX_CONSECUTIVE_LOSSES} Losses)', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
