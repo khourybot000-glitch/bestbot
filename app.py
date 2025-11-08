@@ -74,7 +74,7 @@ DEFAULT_SESSION_STATE = {
     "last_barrier_value": BARRIER_OFFSET
 }
 
-# --- Persistence functions ---
+# --- Persistence functions (UNCHANGED) ---
 def load_persistent_sessions():
     if not os.path.exists(ACTIVE_SESSIONS_FILE): return {}
     try:
@@ -201,27 +201,61 @@ def send_trade_order(email, stake, currency, contract_type_param, barrier_offset
 
 def analyze_tick_trend(ticks_list):
     """
-    يقارن اتجاه أول 5 تيك بآخر 5 تيك من قائمة الـ 10 تيك.
+    يحلل الاتجاه بمقارنة سعر فتح وإغلاق كل مجموعة (5 تيك) ثم يقرر الدخول.
     """
     global CONTRACT_TYPE_HIGHER, CONTRACT_TYPE_LOWER
+
     if len(ticks_list) < 10:
+        print("❌ [TREND ERROR] Insufficient tick data (less than 10).")
         return None
 
-    first_five = [float(p) for p in ticks_list[:5]]
-    last_five = [float(p) for p in ticks_list[5:]]
-    
-    # ⬆️ Up Trend (صاعد): آخر 5 > أول 5 (مقارنة بالعنصر المقابل)
-    is_up = all(last_five[i] > first_five[i] for i in range(5))
-    if is_up:
-        return CONTRACT_TYPE_HIGHER # CALL (Higher)
+    # تحويل التيكات إلى أرقام
+    prices = [float(p) for p in ticks_list]
 
-    # ⬇️ Down Trend (هابط): آخر 5 < أول 5 (مقارنة بالعنصر المقابل)
-    is_down = all(last_five[i] < first_five[i] for i in range(5))
-    if is_down:
-        return CONTRACT_TYPE_LOWER # PUT (Lower)
-        
-    print("⚠️ [TREND] No clear 5x5 trend found.")
-    return None
+    # 1. تحليل اتجاه المجموعة الأولى (التيكات 1-5)
+    open_1 = prices[0]
+    close_1 = prices[4]
+    
+    # 2. تحليل اتجاه المجموعة الثانية (التيكات 6-10)
+    open_2 = prices[5]
+    close_2 = prices[9]
+
+    # تحديد اتجاه كل مجموعة (Open to Close)
+    trend_1 = None
+    if close_1 > open_1:
+        trend_1 = CONTRACT_TYPE_HIGHER  # صاعد
+    elif close_1 < open_1:
+        trend_1 = CONTRACT_TYPE_LOWER   # هابط
+
+    trend_2 = None
+    if close_2 > open_2:
+        trend_2 = CONTRACT_TYPE_HIGHER  # صاعد
+    elif close_2 < open_2:
+        trend_2 = CONTRACT_TYPE_LOWER   # هابط
+
+    # 3. قرار الدخول
+    entry_direction = None
+
+    if trend_1 is None or trend_2 is None:
+        # إذا كانت إحدى المجموعتين متساوية (Open = Close)
+        print("⚠️ [TREND] One or both 5-tick groups closed equal to open. Deciding based on second group only.")
+        entry_direction = trend_2 # الاعتماد على المجموعة الثانية فقط في حالة الحياد
+
+    elif trend_1 == trend_2:
+        # الحالة 1: الإتجاهين متفقين (صاعد/صاعد أو هابط/هابط)
+        entry_direction = trend_2
+        print(f"✅ [TREND] Confirmed trend: Group 1 ({trend_1}) matched Group 2 ({trend_2}). Entry: {entry_direction}")
+
+    elif trend_1 != trend_2:
+        # الحالة 2: الإتجاهين متعاكسين
+        entry_direction = trend_2
+        print(f"🔄 [TREND] Conflicting trends: Group 1 ({trend_1}) vs Group 2 ({trend_2}). Entering based on Group 2: {entry_direction}")
+    
+    
+    if entry_direction is None:
+        print("❌ [TREND] No clear entry direction based on Open/Close analysis.")
+
+    return entry_direction
 
 
 def apply_martingale_logic(email):
@@ -445,8 +479,6 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             elif msg_type == 'history':
                 # 🌟 معالجة استجابة التاريخ
                 if data.get('req_id') == TICK_HISTORY_REQUEST_ID:
-                    print("✅ [HISTORY RESPONSE] Received 10 ticks history.")
-                    
                     # التحقق من وجود البيانات
                     if 'history' not in data or 'prices' not in data['history']:
                         print("❌ [HISTORY ERROR] Prices data missing in history response.")
@@ -456,7 +488,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                         
                     prices = data['history']['prices'] 
                     
-                    # تحديد الاتجاه
+                    # تحديد الاتجاه باستخدام المنطق الجديد (Open/Close)
                     entry_direction = analyze_tick_trend(prices)
                     
                     # إذا كان هناك اتجاه واضح، ندخل الصفقة
@@ -464,7 +496,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                         # يتم استخدام دالة معدلة للدخول بصفقة واحدة فقط
                         start_new_single_trade(email, entry_direction) 
                     else:
-                        print("❌ [ENTRY SKIP] Trend not clear (No 5x5 match). Waiting for next entry second.")
+                        print("❌ [ENTRY SKIP] Trend not clear (Open/Close analysis failed). Waiting for next entry second.")
                         # إزالة علامة الحظر يدويًا للسماح بالدخول في الثانية 20 القادمة
                         is_contract_open[email] = False 
                         LAST_ENTRY_SECOND[email] = None 
@@ -614,7 +646,7 @@ CONTROL_FORM = """
 
 {% if session_data and session_data.is_running %}
     {% set timing_logic = "Always @ Sec " + allowed_entry_seconds|string + " (R_100)" %}
-    {% set strategy = "10-TICK Trend Analysis (" + symbol + " - " + timing_logic + " - x" + martingale_multiplier|string + " Martingale, Max Steps " + martingale_steps|string + ")" %}
+    {% set strategy = "10-TICK Open/Close Trend (" + symbol + " - " + timing_logic + " - x" + martingale_multiplier|string + " Martingale, Max Steps " + martingale_steps|string + ")" %}
     
     <p class="status-running">✅ Bot is *Running*! (Auto-refreshing)</p>
     <p>Account Type: *{{ session_data.account_type.upper() }}* | Currency: *{{ session_data.currency }}*</p>
@@ -761,7 +793,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: 10-TICK Trend Analysis ({SYMBOL} - Always @ Sec {ALLOWED_ENTRY_SECONDS}) with x{MARTINGALE_MULTIPLIER} Martingale (Max {MARTINGALE_STEPS} Steps, Max {MAX_CONSECUTIVE_LOSSES} Losses)', 'success')
+    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: 10-TICK Open/Close Trend Analysis ({SYMBOL} - Always @ Sec {ALLOWED_ENTRY_SECONDS}) with x{MARTINGALE_MULTIPLIER} Martingale (Max {MARTINGALE_STEPS} Steps, Max {MAX_CONSECUTIVE_LOSSES} Losses)', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
