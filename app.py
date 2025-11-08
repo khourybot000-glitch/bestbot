@@ -21,7 +21,7 @@ DURATION_UNIT = "t"
 MARTINGALE_STEPS = 5           
 MAX_CONSECUTIVE_LOSSES = 6     
 MARTINGALE_MULTIPLIER = 2.0    
-BARRIER_OFFSET = "0.05"        
+BARRIER_OFFSET = 0.05        # 🛑 تم التعديل إلى قيمة رقمية 0.05        
 
 # الثواني المسموح بها للدخول: عند الثانية 20
 ALLOWED_ENTRY_SECONDS = [20] 
@@ -371,9 +371,13 @@ def start_new_single_trade(email, entry_type):
     entry_type_tag = "BASE ENTRY" if current_data['current_step'] == 0 else f"MARTINGALE STEP {current_data['current_step']}"
     entry_timing_tag = f"@ SEC {LAST_ENTRY_SECOND.get(email, 'N/A')}" 
     
-    # تحديد الحاجز بناءً على اتجاه الدخول
-    barrier_sign = "+" if entry_type == CONTRACT_TYPE_HIGHER else "-"
-    barrier = f"{barrier_sign}{BARRIER_OFFSET}"
+    # 🛑 المنطق الجديد لعكس الحاجز: Higher = -0.05، Lower = +0.05
+    if entry_type == CONTRACT_TYPE_HIGHER:
+        barrier = f"-{BARRIER_OFFSET}"
+    else:
+        barrier = f"+{BARRIER_OFFSET}" 
+    
+    current_data['last_barrier_value'] = barrier
     
     print(f"🧠 [SINGLE ENTRY - {entry_timing_tag}] {entry_type_tag} | Direction: {entry_type} | Stake: {round(stake, 2):.2f}. Barrier: {barrier}")
     
@@ -657,6 +661,7 @@ CONTROL_FORM = """
     <p style="font-weight: bold; color: purple;">Last Tick Price: {{ session_data.last_valid_tick_price|round(5) }}</p>
     <p style="font-weight: bold; color: #007bff;">Current Strategy: *{{ strategy }}*</p>
     <p style="font-weight: bold; color: #ff5733;">Contracts Open: {{ session_data.open_contract_ids|length }}</p>
+    <p style="font-weight: bold; color: #cc6600;">Current Barrier: {{ session_data.last_barrier_value }}</p>
     
     <form method="POST" action="{{ url_for('stop_route') }}">
         <button type="submit" style="background-color: red; color: white;">🛑 Stop Bot</button>
