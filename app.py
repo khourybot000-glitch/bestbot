@@ -10,7 +10,7 @@ from multiprocessing import Process
 from threading import Lock
 
 # ==========================================================
-# BOT CONSTANT SETTINGS (R_25 | x5 | دخول فوري بعد النتيجة)
+# BOT CONSTANT SETTINGS (R_25 | x5 | ربح ينتظر الثانية 0، خسارة تدخل فوراً)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
@@ -20,7 +20,7 @@ DURATION_UNIT = "t"
 # إعدادات المضاعفة
 MARTINGALE_STEPS = 2
 MAX_CONSECUTIVE_LOSSES = 3
-MARTINGALE_MULTIPLIER = 5.0
+MARTINGALE_MULTIPLIER = 6.0
 BARRIER_OFFSET = "0.1"
 
 RECONNECT_DELAY = 1
@@ -189,7 +189,7 @@ def send_trade_order(email, stake, currency, contract_type_param, barrier_offset
 
 
 def apply_martingale_logic(email):
-    """ يطبق منطق المضاعفة بناءً على نتائج الصفقتين المزدوجتين ويدخل فورا """
+    """ يطبق منطق المضاعفة ويدخل فوراً فقط عند الخسارة المزدوجة """
     global is_contract_open, MARTINGALE_MULTIPLIER, MARTINGALE_STEPS, MAX_CONSECUTIVE_LOSSES
     current_data = get_session_data(email)
     
@@ -210,6 +210,11 @@ def apply_martingale_logic(email):
         return
     
     base_stake_used = current_data['base_stake']
+    
+    # إعادة تعيين متغيرات العقد المفتوح
+    current_data['current_entry_id'] = None
+    current_data['open_contract_ids'] = []
+    current_data['contract_profits'] = {}
     
     # ❌ Double Loss Condition
     if total_profit < 0:
@@ -236,6 +241,13 @@ def apply_martingale_logic(email):
         
         print(f"🔄 [DOUBLE LOSS] PnL: {total_profit:.2f}. Step {current_data['current_step']}. Next Stake ({MARTINGALE_MULTIPLIER}^{current_data['current_step']}) calculated: {round(new_stake, 2):.2f}. *Immediate Entry.*")
         
+        # ⬅ الدخول الفوري بعد الخسارة
+        is_contract_open[email] = False # السماح للدخول
+        save_session_data(email, current_data)
+        time.sleep(1) # تأخير لضمان استقرار السوق
+        start_new_dual_trade(email)
+        return
+        
     # ✅ Win or Split/Draw Condition
     else: 
         current_data['total_wins'] += 1 if total_profit > 0 else 0 
@@ -246,29 +258,16 @@ def apply_martingale_logic(email):
         current_data['current_stake_higher'] = base_stake_used 
         
         entry_result_tag = "WIN" if total_profit > 0 else "SPLIT/DRAW"
-        entry_tag = "IMMEDIATE ENTRY (Base Stake)"
-        print(f"✅ [ENTRY RESULT] {entry_result_tag}. Total PnL: {total_profit:.2f}. Stake reset to base: {base_stake_used:.2f}. *Immediate Entry.*")
+        entry_tag = "WAITING @ SEC 0 (Base Stake)"
+        print(f"✅ [ENTRY RESULT] {entry_result_tag}. Total PnL: {total_profit:.2f}. Stake reset to base: {base_stake_used:.2f}. *Waiting for Sec 0.*")
 
-    # إعادة تعيين متغيرات الدخول المزدوج
-    current_data['current_entry_id'] = None
-    current_data['open_contract_ids'] = []
-    current_data['contract_profits'] = {}
+        # ⬅ انتظار الثانية 0 بعد الربح
+        is_contract_open[email] = False # إزالة علامة العقد المفتوح للسماح بالدخول في on_message_wrapper
+        currency = current_data.get('currency', 'USD')
+        print(f"[LOG {email}] PNL: {currency} {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Stake: {current_data['current_stake_lower']:.2f}, Strategy: DUAL NOTOUCH +/-{BARRIER_OFFSET} | Next Entry: {entry_tag}")
+        save_session_data(email, current_data)
+        return
     
-    # ⬅ النقطة الأهم: تم السماح بالدخول
-    is_contract_open[email] = False 
-
-    currency = current_data.get('currency', 'USD')
-    print(f"[LOG {email}] PNL: {currency} {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Stake: {current_data['current_stake_lower']:.2f}, Strategy: DUAL NOTOUCH +/-{BARRIER_OFFSET} | Next Entry: {entry_tag}")
-    
-    save_session_data(email, current_data)
-
-    # === منطق الدخول الفوري للمضاعفة ===
-    if current_data.get('is_running') and current_data['current_step'] <= MARTINGALE_STEPS and current_data['consecutive_losses'] <= MAX_CONSECUTIVE_LOSSES:
-        # تأخير بسيط لضمان تحديث حالة السوق (اختياري، لكن يُفضل)
-        time.sleep(1) 
-        start_new_dual_trade(email)
-    # ===================================
-
     
 def handle_contract_settlement(email, contract_id, profit_loss):
     """ معالجة نتيجة عقد واحد وتجميعها مع العقد الآخر """
@@ -284,7 +283,7 @@ def handle_contract_settlement(email, contract_id, profit_loss):
         
     save_session_data(email, current_data)
     
-    # عندما لا يكون هناك أي عقود مفتوحة، يتم تطبيق منطق المضاعفة والدخول الفوري
+    # عندما لا يكون هناك أي عقود مفتوحة، يتم تطبيق منطق المضاعفة والدخول
     if not current_data['open_contract_ids']:
         apply_martingale_logic(email)
 
@@ -307,8 +306,15 @@ def start_new_dual_trade(email):
     current_data['contract_profits'] = {}
     
     entry_type_tag = "BASE ENTRY" if current_data['current_step'] == 0 else f"MARTINGALE STEP {current_data['current_step']}"
-    entry_timing_tag = "@ IMMEDIATE" 
     
+    # تحديد توقيت الدخول المستخدم في الـ LOG فقط
+    if current_data['last_entry_time'] == 0:
+        entry_timing_tag = "@ SEC 0 (First Entry)"
+    elif current_data['current_step'] > 0:
+        entry_timing_tag = "@ IMMEDIATE (Martingale)"
+    else:
+        entry_timing_tag = "@ SEC 0 (After Win/Draw)"
+        
     print(f"🧠 [DUAL NOTOUCH ENTRY - {entry_timing_tag}] {entry_type_tag} | Stake: {round(stake_lower, 2):.2f}. Offset: +/-{BARRIER_OFFSET}")
     
     # إرسال صفقة NOTOUCH بحاجز علوي
@@ -344,7 +350,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         "current_stake_lower": stake, 
         "current_stake_higher": stake, 
         "stop_reason": "Running",
-        "last_entry_time": 0, # <--- يستخدم لتحديد الدخول الأساسي الأول
+        "last_entry_time": 0,
         "last_entry_price": 0.0,
         "last_tick_data": None,
         "currency": currency,
@@ -386,19 +392,20 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 current_price = float(data['tick']['quote'])
                 tick_epoch = data['tick']['epoch'] 
                 
-                #current_second = datetime.fromtimestamp(tick_epoch, tz=timezone.utc).second # لم تعد تستخدم
+                current_second = datetime.fromtimestamp(tick_epoch, tz=timezone.utc).second # تم تفعيل قراءة الثانية
                 
                 current_data['last_valid_tick_price'] = current_price
                 current_data['last_tick_data'] = data['tick']
                 
                 save_session_data(email, current_data) 
                 
-                # === منطق الدخول الجديد: الدخول عند أول تيك فقط ===
+                # === منطق الدخول الأساسي: ينتظر الثانية 0 عند الربح أو التشغيل ===
                 if not is_contract_open.get(email):
-                    # هذا الشرط يضمن دخول أول صفقة فوراً عند أول تيك بعد التشغيل
-                    # جميع الصفقات اللاحقة يتم التحكم بها بواسطة apply_martingale_logic
-                    if current_data['last_entry_time'] == 0:
-                        start_new_dual_trade(email)
+                    # هذا الشرط يحقق:
+                    # 1. الدخول الأساسي الأول عند التشغيل (last_entry_time = 0)
+                    # 2. الدخول بعد الربح أو التعادل (حيث تم إزالة علامة is_contract_open = False في apply_martingale_logic)
+                    if current_second == 0:
+                        start_new_dual_trade(email) 
                 # === نهاية منطق الدخول ===
 
             elif msg_type == 'buy':
@@ -416,7 +423,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 if current_data['current_entry_id'] is not None and is_contract_open.get(email):
                     time.sleep(1) 
                     if not current_data['open_contract_ids']: 
-                        # في حالة وجود خطأ API، يتم تطبيق منطق المضاعفة للمحاولة مجدداً
+                        # في حالة وجود خطأ API، يتم تطبيق منطق المضاعفة للمحاولة مجدداً (سواء بانتظار 0 أو فوري)
                         apply_martingale_logic(email)
                     else: 
                         print("⚠ [TRADE FAILURE] Waiting for the other contract's result...")
@@ -549,7 +556,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set timing_logic = "IMMEDIATE ENTRY" %}
+    {% set timing_logic = "Win @ Sec 0 / Loss Immediate" %}
     {% set strategy = "DUAL " + contract_type_higher + " " + barrier_offset + " (" + symbol + " - " + timing_logic + " - x" + martingale_multiplier|string + " Martingale, Max Steps " + martingale_steps|string + ")" %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
@@ -692,7 +699,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: DUAL {CONTRACT_TYPE_HIGHER} +/-{BARRIER_OFFSET} ({SYMBOL} - Immediate Entry) with x{MARTINGALE_MULTIPLIER} Martingale (Max {MARTINGALE_STEPS} Steps, Max {MAX_CONSECUTIVE_LOSSES} Losses)', 'success')
+    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: DUAL {CONTRACT_TYPE_HIGHER} +/-{BARRIER_OFFSET} ({SYMBOL} - Win @ Sec 0 / Loss Immediate) with x{MARTINGALE_MULTIPLIER} Martingale (Max {MARTINGALE_STEPS} Steps, Max {MAX_CONSECUTIVE_LOSSES} Losses)', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
