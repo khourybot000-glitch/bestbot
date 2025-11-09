@@ -72,7 +72,7 @@ DEFAULT_SESSION_STATE = {
     "open_contract_ids": [],               
     "contract_profits": {},                
     "last_barrier_value": f"+{BARRIER_OFFSET}",
-    # لحفظ الاتجاه الأخير الذي تم الدخول به (مهم في المضاعفة بنفس الاتجاه)
+    # لحفظ الاتجاه الأخير الذي تم الدخول به (مهم في المضاعفة لكي يتم عكسه)
     "last_entry_direction": CONTRACT_TYPE_HIGHER 
 }
 
@@ -208,7 +208,7 @@ def analyze_tick_trend(ticks_list):
     global CONTRACT_TYPE_HIGHER, CONTRACT_TYPE_LOWER
 
     if len(ticks_list) < 10:
-        print("❌ [TREND ERROR] Insufficient tick data (less than 10).")
+        # print("❌ [TREND ERROR] Insufficient tick data (less than 10).")
         return None
 
     # تحويل التيكات إلى أرقام
@@ -268,7 +268,7 @@ def analyze_tick_trend(ticks_list):
 
 def apply_martingale_logic(email):
     """ يطبق منطق المضاعفة بناءً على نتيجة الصفقة الواحدة، ويسمح بالدخول الفوري بعد الخسارة """
-    global is_contract_open, MARTINGALE_MULTIPLIER, MARTINGALE_STEPS, MAX_CONSECUTIVE_LOSSES, LAST_ENTRY_SECOND, BARRIER_OFFSET
+    global is_contract_open, MARTINGALE_MULTIPLIER, MARTINGALE_STEPS, MAX_CONSECUTIVE_LOSSES, LAST_ENTRY_SECOND, BARRIER_OFFSET, CONTRACT_TYPE_HIGHER, CONTRACT_TYPE_LOWER
     current_data = get_session_data(email)
     
     if not current_data.get('is_running'): return
@@ -309,11 +309,23 @@ def apply_martingale_logic(email):
         current_data['current_stake_lower'] = new_stake
         current_data['current_stake_higher'] = new_stake 
         
+        # 🛑 منطق عكس الاتجاه والحاجز للخسارة:
+        last_dir = current_data['last_entry_direction']
+        
+        if last_dir == CONTRACT_TYPE_HIGHER:
+            next_dir = CONTRACT_TYPE_LOWER
+            next_barrier = f"-{BARRIER_OFFSET}"
+        else:
+            next_dir = CONTRACT_TYPE_HIGHER
+            next_barrier = f"+{BARRIER_OFFSET}"
+
+        # حفظ الاتجاه والحاجز الجديدين (المعاكسين) لاستخدامهما في الدخول الفوري
+        current_data['last_entry_direction'] = next_dir
+        current_data['last_barrier_value'] = next_barrier
+        
         entry_tag = "IMMEDIATE ENTRY (Martingale)"
         
-        # 🛑 لا نعيد تعيين LAST_ENTRY_SECOND هنا! (للسماح بالدخول الفوري)
-        
-        print(f"🔄 [LOSS] PnL: {total_profit:.2f}. Step {current_data['current_step']}. Next Stake calculated: {round(new_stake, 2):.2f}. **Ready for IMMEDIATE ENTRY (Same Direction).**")
+        print(f"🔄 [LOSS] PnL: {total_profit:.2f}. Step {current_data['current_step']}. Next Stake calculated: {round(new_stake, 2):.2f}. **Ready for IMMEDIATE ENTRY (Reversed Direction: {next_dir}).**")
         
     # ✅ Win or Draw Condition (ربح أو تعادل)
     else: 
@@ -326,7 +338,7 @@ def apply_martingale_logic(email):
         
         # 🛑 عند الربح/التعادل: ننتظر الثانية 20 ونطلب تحليل جديد
         LAST_ENTRY_SECOND[email] = None 
-        # يتم إعادة تعيين اتجاه البداية إلى القيمة الافتراضية للحماية (CALL) لكنه سيتغير بالتحليل
+        # يتم إعادة تعيين اتجاه البداية للقيمة الافتراضية
         current_data['last_entry_direction'] = CONTRACT_TYPE_HIGHER
         current_data['last_barrier_value'] = f"+{BARRIER_OFFSET}" 
 
@@ -342,7 +354,7 @@ def apply_martingale_logic(email):
     is_contract_open[email] = False # إزالة علامة الحظر (مهم للدخول الفوري)
 
     currency = current_data.get('currency', 'USD')
-    print(f"[LOG {email}] PNL: {currency} {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Stake: {current_data['current_stake_lower']:.2f}, Strategy: 10-TICK Trend Base | Martingale: Same Direction | Next Entry: {entry_tag}")
+    print(f"[LOG {email}] PNL: {currency} {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Stake: {current_data['current_stake_lower']:.2f}, Strategy: 10-TICK Trend Base | Martingale: Reversed Direction | Next Entry: {entry_tag}")
     
     save_session_data(email, current_data)
 
@@ -368,7 +380,7 @@ def handle_contract_settlement(email, contract_id, profit_loss):
 
 def start_new_single_trade(email, analysis_entry_type=None):
     """ 
-    يرسل صفقة واحدة: يستخدم تحليل الـ 10 تيكات في الخطوة 0، ويستخدم الاتجاه الأخير في الخطوات 1+
+    يرسل صفقة واحدة: يستخدم تحليل الـ 10 تيكات في الخطوة 0، ويستخدم الاتجاه الأخير (المعاكس) في الخطوات 1+
     """
     global is_contract_open, BARRIER_OFFSET, CONTRACT_TYPE_HIGHER, CONTRACT_TYPE_LOWER
     
@@ -388,30 +400,32 @@ def start_new_single_trade(email, analysis_entry_type=None):
     current_step = current_data['current_step']
     entry_timing_tag = f"@ SEC {LAST_ENTRY_SECOND.get(email, 'N/A')}" 
     
-    # 1. تحديد الاتجاه والحاجز (بناءً على التحليل أو الاتجاه السابق)
+    # 1. تحديد الاتجاه والحاجز (بناءً على التحليل أو الاتجاه السابق المعكوس)
     
     if current_step == 0:
         # وضع الأساس (البداية/بعد الربح): يستخدم اتجاه التحليل
         entry_type = analysis_entry_type
         entry_type_tag = "BASE ENTRY (10-TICK Analysis)"
-    else:
-        # وضع المضاعفة: يستخدم نفس الاتجاه الأخير (بدون تشقلب)
-        entry_type = current_data['last_entry_direction']
-        entry_type_tag = f"MARTINGALE STEP {current_step} (Same Direction)"
-
-    # 2. تعيين الحاجز بناءً على الاتجاه النهائي المطلوب (Higher = +0.05, Lower = -0.05)
-    if entry_type == CONTRACT_TYPE_HIGHER:
-        barrier_to_use = f"+{BARRIER_OFFSET}"
-    elif entry_type == CONTRACT_TYPE_LOWER:
-        barrier_to_use = f"-{BARRIER_OFFSET}"
-    else:
-        # في حال لم يتم تحديد الاتجاه بالتحليل في الخطوة 0
-        print("❌ [ENTRY FAIL] Entry type is None. Skipping trade.")
-        is_contract_open[email] = False
-        if current_step == 0: LAST_ENTRY_SECOND[email] = None 
-        return
         
-    # 3. حفظ الاتجاه والحاجز النهائي للصفقة الحالية (لاستخدامه في المضاعفة التالية)
+        # تعيين الحاجز بناءً على اتجاه التحليل (Call = +0.05, Put = -0.05)
+        if entry_type == CONTRACT_TYPE_HIGHER:
+            barrier_to_use = f"+{BARRIER_OFFSET}"
+        elif entry_type == CONTRACT_TYPE_LOWER:
+            barrier_to_use = f"-{BARRIER_OFFSET}"
+        else:
+             print("❌ [ENTRY FAIL] Entry type is None. Skipping trade.")
+             is_contract_open[email] = False
+             LAST_ENTRY_SECOND[email] = None 
+             return
+             
+    else:
+        # وضع المضاعفة: يستخدم الاتجاه والحاجز المعاكسين المحفوظين من منطق apply_martingale_logic
+        entry_type = current_data['last_entry_direction']
+        barrier_to_use = current_data['last_barrier_value']
+        entry_type_tag = f"MARTINGALE STEP {current_step} (Reversed Direction)"
+
+    
+    # 3. حفظ الاتجاه والحاجز النهائي للصفقة الحالية (لاستخدامه في منطق العكس في المضاعفة التالية)
     current_data['last_entry_direction'] = entry_type
     current_data['last_barrier_value'] = barrier_to_use
     
@@ -512,7 +526,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                             should_request_history = True
                             
                     elif current_step > 0:
-                        # 2. وضع المضاعفة (بعد الخسارة): ندخل فوراً بنفس الاتجاه
+                        # 2. وضع المضاعفة (بعد الخسارة): ندخل فوراً بالاتجاه المعكوس (الذي تم حسابه في apply_martingale_logic)
                         should_enter_now_martingale = True 
                     
                     
@@ -533,9 +547,9 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                         ws_app.send(json.dumps(request_history))
                     
                     elif should_enter_now_martingale:
-                        # في المضاعفة: ندخل مباشرة بنفس الاتجاه السابق
-                        entry_tag = f"IMMEDIATE (Martingale {current_step} - Same Direction: {current_data['last_entry_direction']})"
-                        print(f"🧠 [SINGLE ENTRY - IMMEDIATE] Martingale Step {current_step}: Entering with Same Direction.")
+                        # في المضاعفة: ندخل مباشرة بالاتجاه المعكوس
+                        entry_tag = f"IMMEDIATE (Martingale {current_step} - Reversed Direction: {current_data['last_entry_direction']})"
+                        print(f"🧠 [SINGLE ENTRY - IMMEDIATE] Martingale Step {current_step}: Entering with Reversed Direction.")
                         start_new_single_trade(email, analysis_entry_type=None) # analysis_entry_type يتجاهل في المضاعفة
 
                 # === نهاية منطق الطلب/الدخول ===
@@ -714,7 +728,7 @@ CONTROL_FORM = """
 
 {% if session_data and session_data.is_running %}
     {% set timing_logic = "Entry @ Sec " + allowed_entry_seconds|string + " (Base/Win) | Immediate (Loss)" %}
-    {% set strategy = "10-TICK Trend Analysis Base Entry | Same Direction Martingale (x" + martingale_multiplier|string + " - Max Steps " + martingale_steps|string + ")" %}
+    {% set strategy = "10-TICK Trend Analysis Base Entry | Reversed Direction Martingale (x" + martingale_multiplier|string + " - Max Steps " + martingale_steps|string + ")" %}
     
     <p class="status-running">✅ Bot is *Running*! (Auto-refreshing)</p>
     <p>Account Type: *{{ session_data.account_type.upper() }}* | Currency: *{{ session_data.currency }}*</p>
@@ -862,7 +876,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: 10-TICK Trend Base Entry ({SYMBOL} - Entry @ Sec {ALLOWED_ENTRY_SECONDS}) with Same Direction Martingale (x{MARTINGALE_MULTIPLIER} - Max {MARTINGALE_STEPS} Steps, Max {MAX_CONSECUTIVE_LOSSES} Losses)', 'success')
+    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: 10-TICK Trend Base Entry ({SYMBOL} - Entry @ Sec {ALLOWED_ENTRY_SECONDS}) with Reversed Direction Martingale (x{MARTINGALE_MULTIPLIER} - Max {MARTINGALE_STEPS} Steps, Max {MAX_CONSECUTIVE_LOSSES} Losses)', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
