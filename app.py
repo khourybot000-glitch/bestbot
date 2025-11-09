@@ -21,7 +21,7 @@ DURATION_UNIT = "t"
 MARTINGALE_STEPS = 2           # الحد الأقصى لخطوات المضاعفة بعد الصفقة الأساسية (Step 0, Step 1, Step 2)
 MAX_CONSECUTIVE_LOSSES = 3     # الحد الأقصى للخسائر المتتالية
 MARTINGALE_MULTIPLIER = 4.5    # معامل المضاعفة
-BARRIER_OFFSET = 0.0           # إزالة الحاجز (سعر إغلاق=سعر فتح)
+BARRIER_OFFSET = 0.05           # إزالة الحاجز (سعر إغلاق=سعر فتح)
 
 # الثواني المسموح بها للدخول: عند الثانية 30
 ALLOWED_ENTRY_SECONDS = [30] 
