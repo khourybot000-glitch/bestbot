@@ -438,7 +438,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
 
 # --- (FLASK APP SETUP AND ROUTES - UNCHANGED) ---
 
-app = Flask(_name_)
+app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
 app.config['SESSION_PERMANENT'] = False
 
@@ -692,7 +692,7 @@ def logout():
     return redirect(url_for('auth_page'))
 
 
-if _name_ == '_main_':
+if __name__ == '__main__':
     all_sessions = load_persistent_sessions()
     for email in list(all_sessions.keys()):
         stop_bot(email, clear_data=False, stop_reason="Disconnected (Auto-Retry)")
