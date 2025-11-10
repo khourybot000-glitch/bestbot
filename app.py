@@ -19,8 +19,8 @@ DURATION = 5
 DURATION_UNIT = "t"
 
 # إعدادات المضاعفة
-MARTINGALE_STEPS = 5  # تم رفع الخطوات لتناسب المضاعفة المتتالية
-MAX_CONSECUTIVE_LOSSES = 5 # تم رفع حد الخسارة لتناسب المضاعفة المتتالية
+MARTINGALE_STEPS = 1  # تم رفع الخطوات لتناسب المضاعفة المتتالية
+MAX_CONSECUTIVE_LOSSES = 2 # تم رفع حد الخسارة لتناسب المضاعفة المتتالية
 MARTINGALE_MULTIPLIER = 29.0  
 BARRIER_OFFSET = "0.7" 
 
