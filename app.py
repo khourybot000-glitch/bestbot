@@ -13,14 +13,14 @@ from threading import Lock
 # BOT CONSTANT SETTINGS (R_25 | x5 | جميع الصفقات عند الثانية 0)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
-SYMBOL = "R_25"
+SYMBOL = "R_100"
 DURATION = 5
 DURATION_UNIT = "t"
 
 # إعدادات المضاعفة
 MARTINGALE_STEPS = 2
 MAX_CONSECUTIVE_LOSSES = 3
-MARTINGALE_MULTIPLIER = 5.0
+MARTINGALE_MULTIPLIER = 6.0
 BARRIER_OFFSET = "0.1"
 
 RECONNECT_DELAY = 1
@@ -388,7 +388,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 
                 # === منطق الدخول الموحد (ينتظر الثانية 0 دائماً) ===
                 if not is_contract_open.get(email):
-                    if current_second == 0:    # <--- تم التعديل: الدخول عند الثانية 0
+                    if current_second == 58:    # <--- تم التعديل: الدخول عند الثانية 0
                         start_new_dual_trade(email)
                 # === نهاية منطق الدخول ===
 
