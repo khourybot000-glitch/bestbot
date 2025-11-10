@@ -24,7 +24,7 @@ MAX_CONSECUTIVE_LOSSES = 2
 MARTINGALE_MULTIPLIER = 39.0 
 BARRIER_OFFSET = "0.7" 
 
-CONTRACT_TYPE = "NOTOUCH" 
+CONTRACT_TYPE_BASE = "HL_CONTRARIAN" # للاستدلال في الواجهة
 
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
@@ -172,7 +172,7 @@ def send_trade_order(email, stake, currency, contract_type_param, barrier_sign):
         "parameters": {
             "amount": round(stake, 2), 
             "basis": "stake",
-            "contract_type": contract_type_param, 
+            "contract_type": contract_type_param, # CALL أو PUT
             "currency": currency, 
             "duration": DURATION, 
             "duration_unit": DURATION_UNIT, 
@@ -262,7 +262,7 @@ def apply_martingale_logic(email):
     save_session_data(email, current_data) 
 
     currency = current_data.get('currency', 'USD')
-    print(f"[LOG {email}] PNL: {currency} {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Stake: {current_data['current_stake']:.2f}, Strategy: NOTOUCH +/-\{BARRIER_OFFSET} | Next Entry: {entry_tag}")
+    print(f"[LOG {email}] PNL: {currency} {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Stake: {current_data['current_stake']:.2f}, Strategy: {CONTRACT_TYPE_BASE} +/-{BARRIER_OFFSET} | Next Entry: {entry_tag}")
     
     
 
@@ -286,9 +286,9 @@ def handle_contract_settlement(email, contract_id, profit_loss):
         apply_martingale_logic(email)
 
 
-def start_new_single_trade(email, barrier_sign):
-    """ يرسل صفقة واحدة NOTOUCH بناءً على إشارة الحاجز والرهان الحالي """
-    global is_contract_open, BARRIER_OFFSET, CONTRACT_TYPE, MARTINGALE_STEPS
+def start_new_single_trade(email, contract_type_param, barrier_sign):
+    """ يرسل صفقة واحدة CALL/PUT بناءً على الإشارة ونوع العقد والرهان الحالي """
+    global is_contract_open, BARRIER_OFFSET, MARTINGALE_STEPS
     
     current_data = get_session_data(email)
     stake = current_data['current_stake'] # الرهان الحالي (أساسي أو مضاعف)
@@ -301,10 +301,10 @@ def start_new_single_trade(email, barrier_sign):
     entry_type_tag = "BASE ENTRY" if current_data['current_step'] == 0 else f"MARTINGALE STEP {current_data['current_step']}"
     entry_timing_tag = "@ SEC 0 or 30"
     
-    print(f"🧠 [SINGLE NOTOUCH ENTRY - {entry_timing_tag}] {entry_type_tag} | Stake: {round(stake, 2):.2f}. Barrier: {barrier_sign}{BARRIER_OFFSET}")
+    print(f"🧠 [SINGLE HL ENTRY - {entry_timing_tag}] {entry_type_tag} | Contract: {contract_type_param} | Stake: {round(stake, 2):.2f}. Barrier: {barrier_sign}{BARRIER_OFFSET}")
     
     
-    if send_trade_order(email, stake, currency_to_use, CONTRACT_TYPE, barrier_sign):
+    if send_trade_order(email, stake, currency_to_use, contract_type_param, barrier_sign):
         is_contract_open[email] = True 
     else:
         is_contract_open[email] = False 
@@ -332,28 +332,30 @@ def analyze_trend(email):
     close_price = float(last_tick['quote'])
     
     if close_price > open_price:
-        return "UP" # اتجاه صاعد (الحاجز السفلي -0.7)
+        return "UP" # اتجاه صاعد
     elif close_price < open_price:
-        return "DOWN" # اتجاه هابط (الحاجز العلوي +0.7)
+        return "DOWN" # اتجاه هابط
     else:
         return "FLAT"
 
 
 def determine_barrier_sign(email):
-    """ (تم التعديل) يحدد إشارة الحاجز بناءً على الترند في جميع الخطوات (أساسي ومضاعف) """
+    """ 🌟 (التعديل المطلوب) يحدد نوع العقد (CALL/PUT) وإشارة الحاجز (+/-) بناءً على الترند بعكس الاتجاه. """
     
-    # 🌟 يتم التحليل دائمًا
     trend = analyze_trend(email)
     
     if trend == "UP":
-        # اتجاه صاعد -> نستخدم الحاجز السفلي (-) للدخول NOTOUCH
-        return "-", "UP"
+        # 🌟 المطلوب: السعر صاعد (UP)، ندخل Lower (PUT) مع حاجز موجب (+0.7)
+        # هذا يعني أننا نتوقع انعكاساً للسعر (السعر لن يصل إلى أعلى بكثير من +0.7)
+        return "PUT", "+", "UP_CONTRARIAN"
+        
     elif trend == "DOWN":
-        # اتجاه هابط -> نستخدم الحاجز العلوي (+) للدخول NOTOUCH
-        return "+", "DOWN"
+        # 🌟 المطلوب: السعر هابط (DOWN)، ندخل Higher (CALL) مع حاجز سالب (-0.7)
+        # هذا يعني أننا نتوقع انعكاساً للسعر (السعر لن يصل إلى أدنى بكثير من -0.7)
+        return "CALL", "-", "DOWN_CONTRARIAN"
+        
     else:
-        # ترند مسطح
-        return None, "FLAT"
+        return None, None, "FLAT"
 
 
 def bot_core_logic(email, token, stake, tp, currency, account_type):
@@ -431,10 +433,10 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 # === منطق الدخول (لكلتا الحالتين 0 و > 0) عند الثانية 0 أو 30 فقط ===
                 if not is_contract_open.get(email) and current_second in [0, 30]:
                     
-                    barrier_sign, trend_type = determine_barrier_sign(email)
+                    contract_type_param, barrier_sign, trend_type = determine_barrier_sign(email)
                     
-                    if barrier_sign is not None:
-                        start_new_single_trade(email, barrier_sign=barrier_sign)
+                    if contract_type_param is not None:
+                        start_new_single_trade(email, contract_type_param=contract_type_param, barrier_sign=barrier_sign)
                     elif trend_type == "FLAT":
                         print(f"⏳ [WAIT] Flat trend for entry. Waiting for next SEC 0 or 30.")
                 # === نهاية منطق الدخول ===
@@ -587,7 +589,7 @@ CONTROL_FORM = """
 
 {% if session_data and session_data.is_running %}
     {% set timing_logic = "All Entries @ Sec 0 & 30 (Martingale Analytical)" %}
-    {% set strategy = contract_type + " +/-" + barrier_offset + " (" + symbol + " - " + timing_logic + " - x" + martingale_multiplier|string + " Martingale, Max Steps " + martingale_steps|string + ", Max Loss " + max_consecutive_losses|string + ")" %}
+    {% set strategy = CONTRACT_TYPE_BASE + " (Contrarian) +/-" + barrier_offset + " (" + symbol + " - " + timing_logic + " - x" + martingale_multiplier|string + " Martingale, Max Steps " + martingale_steps|string + ", Max Loss " + max_consecutive_losses|string + ")" %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
@@ -678,7 +680,7 @@ def index():
         duration=DURATION,
         barrier_offset=BARRIER_OFFSET,
         symbol=SYMBOL,
-        contract_type=CONTRACT_TYPE
+        CONTRACT_TYPE_BASE=CONTRACT_TYPE_BASE # تمرير النوع الجديد للواجهة
     )
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -729,7 +731,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {CONTRACT_TYPE} +/-{BARRIER_OFFSET} ({SYMBOL} - All Entries @ Sec 0 & 30, Martingale Analytical) with x{MARTINGALE_MULTIPLIER} Martingale (Max {MARTINGALE_STEPS} Step, Max {MAX_CONSECUTIVE_LOSSES} Losses)', 'success')
+    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {CONTRACT_TYPE_BASE} (Contrarian) +/-{BARRIER_OFFSET} ({SYMBOL} - All Entries @ Sec 0 & 30) with x{MARTINGALE_MULTIPLIER} Martingale (Max {MARTINGALE_STEPS} Step, Max {MAX_CONSECUTIVE_LOSSES} Losses)', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
