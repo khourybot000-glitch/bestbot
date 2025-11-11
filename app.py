@@ -108,11 +108,15 @@ def delete_session_data(email):
         except: pass
 
 def load_allowed_users():
+    """Reads authorized users from a file, returning a set of stripped, lowercase emails."""
     if not os.path.exists(USER_IDS_FILE): return set()
     try:
         with open(USER_IDS_FILE, 'r', encoding='utf-8') as f:
-            return {line.strip().lower() for line.strip() for line in f if line.strip()}
-    except: return set()
+            # تم تصحيح صياغة Set Comprehension
+            return {line.strip().lower() for line in f if line.strip()} 
+    except Exception as e: 
+        print(f"❌ [USER LOAD ERROR] Failed to load allowed users: {e}")
+        return set()
     
 def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
     global is_contract_open, active_processes
@@ -438,7 +442,6 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             
             # الحاجز الرئيسي: لا تدخل إذا كان هناك عقد مفتوح (ويجب معالجة نتيجته)
             if is_contract_open.get(email):
-                # إذا كانت مفتوحة، ننتظر فقط رسائل الـ Buy و الـ POC
                 pass
             
             if msg_type == 'tick':
@@ -484,22 +487,14 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                                     
                                 current_data['should_analyze_new_trend'] = False
                                 save_session_data(email, current_data)
-                                    
-                            # else:
-                                # print(f"⏳ [WAIT] Trend is FLAT. Waiting for next tick for analysis.")
-                        # else:
-                            # print(f"⏳ [WAITING] Collecting ticks ({len(last_five_ticks[email])}/5) for initial analysis.")
 
             elif msg_type == 'buy':
-                # **هنا تم الشراء بنجاح**
                 contract_id = data['buy']['contract_id']
                 print(f"✅ [BUY SUCCESS] Contract ID: {contract_id}. Starting subscription...")
                 
-                # **الحل 1: تسجيل الـ contract_id فوراً**
                 current_data['open_contract_ids'].append(contract_id)
                 save_session_data(email, current_data)
                 
-                # **الحل 2: إرسال طلب الاشتراك في المتابعة**
                 ws_app.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
             
             elif msg_type == 'proposal_open_contract':
@@ -510,7 +505,6 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     print(f"💰 [SALE RECEIVED] Contract ID: {contract_id}. Profit: {contract.get('profit')}")
                     handle_contract_settlement(email, contract_id, contract.get('profit', 0.0))
                     
-                    # **الحل 3: إلغاء الاشتراك في المتابعة (تنظيف)**
                     if 'subscription_id' in data: 
                         ws_app.send(json.dumps({"forget": data['subscription_id']}))
             
