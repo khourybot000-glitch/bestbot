@@ -19,14 +19,14 @@ DURATION = 30
 DURATION_UNIT = "s"         
 
 # إعدادات المضاعفة
-MARTINGALE_STEPS = 5        
-MAX_CONSECUTIVE_LOSSES = 5  
-MARTINGALE_MULTIPLIER = 29.0 # معامل المضاعفة الضخم (يظل كما هو)
+MARTINGALE_STEPS = 1        
+MAX_CONSECUTIVE_LOSSES = 2  
+MARTINGALE_MULTIPLIER = 29.0 # معامل المضاعفة الضخم
 
 # إعدادات الاستراتيجية الجديدة
 BASE_BARRIER = "0.1"        # حاجز الدخول الأساسي
 MARTINGALE_BARRIER = "0.7"  # حاجز الدخول عند المضاعفة
-CONTRACT_TYPE_BASE = "5_TICK_SAME_CONTRACT_REVERSED_BARRIER_INSTANT_x29" # للاستدلال في الواجهة
+CONTRACT_TYPE_BASE = "5_TICK_SAME_CONTRACT_REVERSED_BARRIER_INSTANT_x29_FIXED" # للاستدلال في الواجهة
 
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
@@ -65,7 +65,8 @@ DEFAULT_SESSION_STATE = {
     "current_entry_id": None,
     "open_contract_ids": [], 
     "contract_profits": {},
-    "last_base_contract_type": None
+    "last_base_contract_type": None,
+    "waiting_for_history": False # <--- المتغير الجديد
 }
 
 # --- Persistence and Control functions (UNCHANGED) ---
@@ -260,7 +261,7 @@ def apply_martingale_logic(email):
         current_data['consecutive_losses'] = 0
         current_data['current_stake'] = current_data['base_stake']
         current_data['last_base_contract_type'] = None # إعادة تعيين نوع العقد الأساسي
-        current_data['last_base_barrier_sign'] = None # إعادة تعيين إشارة الحاجز الأساسي
+        current_data['waiting_for_history'] = False # إعادة تعيين علم الانتظار
         
         entry_result_tag = "WIN" if total_profit > 0 else "DRAW"
         print(f"✅ [ENTRY RESULT] {entry_result_tag}. Total PnL: {total_profit:.2f}. Stake reset to base. *Waiting for Sec 0.*")
@@ -288,7 +289,6 @@ def apply_martingale_logic(email):
         
         # ------------------ الدخول الفوري في صفقة المضاعفة ------------------
         
-        # نستخدم نوع العقد السابق (PUT/CALL) للدخول
         martingale_contract_type = current_data['last_base_contract_type']
         
         if martingale_contract_type is None:
@@ -296,7 +296,6 @@ def apply_martingale_logic(email):
             is_contract_open[email] = False
             
         else:
-            # يتم تمرير الاتجاه كنوع العقد لتستخدمه دالة start_new_single_trade
             trend_for_martingale = "uptrend" if martingale_contract_type == "CALL" else "downtrend"
             
             if current_data['current_profit'] >= current_data['tp_target']:
@@ -308,7 +307,8 @@ def apply_martingale_logic(email):
             current_data['current_entry_id'] = None
             current_data['open_contract_ids'] = []
             current_data['contract_profits'] = {}
-            save_session_data(email, current_data) # حفظ الحالة المحدثة للرهان والخطوة
+            current_data['waiting_for_history'] = False # يجب إيقاف علم الانتظار إذا كان مرفوعاً
+            save_session_data(email, current_data) 
 
             # إرسال صفقة المضاعفة الفورية (Insta-Martingale)
             start_new_single_trade(email, trend=trend_for_martingale, is_martingale=True)
@@ -363,9 +363,7 @@ def start_new_single_trade(email, trend, is_martingale=False):
         barrier_offset = MARTINGALE_BARRIER # 0.7
         entry_tag = f"MARTINGALE STEP {current_data['current_step']} (INSTANT SAME CONTRACT)"
         
-        # **المنطق الجديد لعكس إشارة الحاجز:**
-        # الصفقة الأصلية: CALL (+0.1) أو PUT (-0.1)
-        # المضاعفة:      CALL (-0.7) أو PUT (+0.7)
+        # **المنطق لعكس إشارة الحاجز:**
         if contract_type_param == "CALL":
             barrier_sign = "-" # عكس +0.1 إلى -0.7
         else: # PUT
@@ -411,7 +409,7 @@ def start_new_single_trade(email, trend, is_martingale=False):
 
 
 def bot_core_logic(email, token, base_stake, tp, currency, account_type):
-    """ Core bot logic (UNCHANGED except for function calls) """
+    """ Core bot logic - Modified to fix timing issue """
     
     global is_contract_open, active_ws, WS_LOCK
 
@@ -436,7 +434,8 @@ def bot_core_logic(email, token, base_stake, tp, currency, account_type):
         "current_entry_id": None, 
         "open_contract_ids": [], 
         "contract_profits": {},
-        "last_base_contract_type": None
+        "last_base_contract_type": None,
+        "waiting_for_history": False # <--- المتغير الجديد
     })
     save_session_data(email, session_data)
 
@@ -471,24 +470,24 @@ def bot_core_logic(email, token, base_stake, tp, currency, account_type):
                     current_price = float(tick_data['quote'])
                     tick_epoch = tick_data['epoch']
                     
-                    # نستخدم التوقيت العالمي (UTC) لتجنب مشاكل التوقيت المحلي
                     current_second = datetime.fromtimestamp(tick_epoch, tz=timezone.utc).second
                     
                     current_data['last_valid_tick_price'] = current_price
                     current_data['last_tick_data'] = tick_data
                     
-                    save_session_data(email, current_data) 
-                    
-                    # =========================================================================
                     # === منطق الدخول الأساسي (عند الثانية 0) ===
                     if not is_contract_open.get(email) and current_data['current_step'] == 0 and current_second == 0:
                         
-                        # 1. طلب بيانات الـ Tick History (لـ 5 تيك)
+                        # 1. طلب بيانات الـ Tick History
                         if send_tick_history_request(email, count=5):
+                            current_data['waiting_for_history'] = True # رفع العلم
                             print("⏱ [ENTRY WAIT] Sent 5-tick history request at Sec 0. Waiting for response...")
                         else:
                             print("❌ [ENTRY ERROR] Failed to send history request. Cannot enter trade without analysis.")
                             is_contract_open[email] = False
+                            current_data['waiting_for_history'] = False
+                            
+                    save_session_data(email, current_data) # حفظ حالة انتظار التاريخ
 
                 
                 elif msg_type == 'history':
@@ -498,31 +497,37 @@ def bot_core_logic(email, token, base_stake, tp, currency, account_type):
                         tick_quotes = data['history']['prices']
                         tick_times = data['history']['times']
                         
-                        if len(tick_quotes) < 2:
-                            print("⚠ [HISTORY] Not enough tick history received. Ignoring entry.")
-                            return
-
-                        # تجميع البيانات
-                        tick_list_for_analysis = [
-                            {'quote': tick_quotes[i], 'epoch': tick_times[i]} 
-                            for i in range(len(tick_quotes))
-                        ]
-                        
-                        # 3. تحليل الاتجاه (لـ 5 تيك)
-                        determined_trend = analyze_ticks_trend(tick_list_for_analysis)
-                        
-                        # 4. تنفيذ الصفقة الأساسية (فقط إذا كان الـ Step هو 0)
-                        if not is_contract_open.get(email) and current_data['current_step'] == 0:
+                        # 3. تنفيذ الصفقة الأساسية (فقط إذا كان الـ Step هو 0 وكنا ننتظر الرد)
+                        if current_data['waiting_for_history'] and not is_contract_open.get(email) and current_data['current_step'] == 0:
+                            
+                            current_data['waiting_for_history'] = False # خفض العلم قبل التحليل
+                            save_session_data(email, current_data) 
+                            
+                            if len(tick_quotes) < 2:
+                                print("⚠ [HISTORY] Not enough tick history received. Ignoring entry.")
+                                return
+                            
+                            tick_list_for_analysis = [
+                                {'quote': tick_quotes[i], 'epoch': tick_times[i]} 
+                                for i in range(len(tick_quotes))
+                            ]
+                            
+                            determined_trend = analyze_ticks_trend(tick_list_for_analysis)
                             
                             if determined_trend in ["downtrend", "uptrend"]:
                                 print(f"✅ [HISTORY SUCCESS] Trend: {determined_trend.upper()}. Executing Base Entry.")
-                                # يتم تحديد نوع العقد (+/-) داخل هذه الدالة بناءً على الاتجاه
                                 start_new_single_trade(email, trend=determined_trend, is_martingale=False) 
                             else:
-                                print(f"❌ [ENTRY IGNORED] Trend analysis failed. Waiting for next Sec 0.")
+                                print(f"❌ [ENTRY IGNORED] Trend analysis failed.")
                                 is_contract_open[email] = False 
-                        else:
+                        
+                        elif current_data['waiting_for_history']:
+                            # في حال وصلنا رد التاريخ ولكن كانت هناك مشكلة في شروط الدخول (مثلاً، صفقة فتحت بسرعة)
+                            current_data['waiting_for_history'] = False 
+                            save_session_data(email, current_data)
                             print("⚠ [HISTORY] Received history response but trade conditions not met (Step != 0 or contract open). Ignoring analysis.")
+                            
+                        # في حالة وصول رسالة history لا تتعلق بدخولنا، لا نفعل شيئاً
 
                 
                 elif msg_type == 'buy':
@@ -530,7 +535,6 @@ def bot_core_logic(email, token, base_stake, tp, currency, account_type):
                     current_data['open_contract_ids'].append(contract_id)
                     save_session_data(email, current_data)
                     
-                    # فتح اشتراك لمتابعة العقد
                     ws_app.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
                 
                 elif 'error' in data:
@@ -541,7 +545,6 @@ def bot_core_logic(email, token, base_stake, tp, currency, account_type):
                     if current_data['current_entry_id'] is not None and is_contract_open.get(email):
                         time.sleep(1) 
                         if not current_data['open_contract_ids']: 
-                            # إذا فشل شراء الصفقة الواحدة، يتم تطبيق المضاعفة
                             apply_martingale_logic(email) 
                         else: 
                             print("⚠ [TRADE FAILURE] Contract may be open. Waiting for contract's result...")
@@ -552,7 +555,6 @@ def bot_core_logic(email, token, base_stake, tp, currency, account_type):
                         contract_id = contract['contract_id']
                         handle_contract_settlement(email, contract_id, contract['profit'])
                         
-                        # إيقاف الاشتراك بعد البيع
                         if 'subscription_id' in data: ws_app.send(json.dumps({"forget": data['subscription_id']}))
 
         def on_close_wrapper(ws_app, code, msg):
@@ -566,7 +568,6 @@ def bot_core_logic(email, token, base_stake, tp, currency, account_type):
                 on_close=on_close_wrapper
             )
             active_ws[email] = ws
-            # إضافة ping_interval و ping_timeout لضمان بقاء الاتصال
             ws.run_forever(ping_interval=10, ping_timeout=5)
             
         except Exception as e:
@@ -689,6 +690,7 @@ CONTROL_FORM = """
     <p style="font-weight: bold; color: purple;">Last Tick Price: {{ session_data.last_valid_tick_price|round(5) }}</p>
     <p style="font-weight: bold; color: #007bff;">Current Strategy: {{ strategy }}</p>
     <p style="font-weight: bold; color: #ff5733;">Contracts Open: {{ session_data.open_contract_ids|length }}</p>
+    <p style="font-weight: bold; color: blue;">Waiting for History: {{ 'Yes' if session_data.waiting_for_history else 'No' }}</p>
     
     <form method="POST" action="{{ url_for('stop_route') }}">
         <button type="submit" style="background-color: red; color: white;">🛑 Stop Bot</button>
