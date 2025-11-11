@@ -15,13 +15,13 @@ from collections import deque
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100" 
-DURATION = 30               
-DURATION_UNIT = "s"         
+DURATION = 1               
+DURATION_UNIT = "m"         
 
 # إعدادات المضاعفة
-MARTINGALE_STEPS = 1        
-MAX_CONSECUTIVE_LOSSES = 2  
-MARTINGALE_MULTIPLIER = 10.0 
+MARTINGALE_STEPS = 2        
+MAX_CONSECUTIVE_LOSSES = 3  
+MARTINGALE_MULTIPLIER = 5.0 
 
 # حواجز الصفقتين (الثابتة)
 BARRIER_LOWER_OFFSET = "0.1" # الصفقة ذات الـ Stake الأكبر (الضعف)
