@@ -23,11 +23,11 @@ MARTINGALE_STEPS = 1
 MAX_CONSECUTIVE_LOSSES = 2 
 MARTINGALE_MULTIPLIER = 29.0  
 
-# الثوابت الجديدة للحاجز (تم فصلها)
-BASE_ENTRY_OFFSET = "0.1"   # الحاجز للدخول الأساسي (Trend Following)
-MARTINGALE_OFFSET = "0.7"   # الحاجز للمضاعفة المعكوسة (Reversed)
+# الثوابت الجديدة للحاجز (تم توحيدها إلى 0.05)
+BASE_ENTRY_OFFSET = "0.05"  # الحاجز للدخول الأساسي 
+MARTINGALE_OFFSET = "0.05"  # الحاجز للمضاعفة 
 
-CONTRACT_TYPE_BASE = "HL_TREND_FOLLOWING" # تم تغيير التسمية لغرض التوثيق
+CONTRACT_TYPE_BASE = "HL_TREND_REVERSAL_MARTINGALE" # تم تغيير التسمية لغرض التوثيق
 
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
@@ -66,7 +66,7 @@ DEFAULT_SESSION_STATE = {
     "current_entry_id": None,
     "open_contract_ids": [],
     "contract_profits": {},
-    "last_barrier_value": BASE_ENTRY_OFFSET, # تم تحديث القيمة الابتدائية
+    "last_barrier_value": BASE_ENTRY_OFFSET, 
     "last_entry_barrier_sign": "", 
     "last_contract_type": "", 
 }
@@ -361,11 +361,11 @@ def determine_barrier_sign_for_base_entry(email):
     trend = analyze_trend(email)
     
     if trend == "UP":
-        # صاعد (UP)، ندخل Higher (CALL) مع حاجز موجب (+0.1)
+        # صاعد (UP)، ندخل Higher (CALL) مع حاجز موجب (+0.05 الآن)
         return "CALL", "+", BASE_ENTRY_OFFSET, "UP_TREND"
         
     elif trend == "DOWN":
-        # هابط (DOWN)، ندخل Lower (PUT) مع حاجز سالب (-0.1)
+        # هابط (DOWN)، ندخل Lower (PUT) مع حاجز سالب (-0.05 الآن)
         return "PUT", "-", BASE_ENTRY_OFFSET, "DOWN_TREND"
         
     else:
@@ -373,27 +373,27 @@ def determine_barrier_sign_for_base_entry(email):
         
         
 def determine_reversed_martingale_entry(email):
-    """ يحدد نوع العقد وإشارة الحاجز للمضاعفة الفورية (عكس الصفقة الخاسرة باستخدام حاجز كبير) """
+    """ يحدد نوع العقد وإشارة الحاجز للمضاعفة الفورية (عكس الصفقة الخاسرة باستخدام حاجز المضاعفة) """
     global MARTINGALE_OFFSET
 
     current_data = get_session_data(email)
     
-    prev_contract = current_data.get('last_contract_type')
-    prev_barrier_sign = current_data.get('last_entry_barrier_sign')
+    prev_contract = current_data.get('last_contract_type')       # (مثال: CALL)
+    prev_barrier_sign = current_data.get('last_entry_barrier_sign') # (مثال: +)
     
-    if not prev_contract or not prev_barrier_sign:
+    if not prev_contract:
         # يجب أن يكون هناك بيانات صفقة سابقة خاسرة
         return None, None, None
         
-   # 1. تثبيت نوع العقد (CALL -> CALL, PUT -> PUT)
-    new_contract = prev_contract
+    # 1. عكس نوع العقد (CALL -> PUT, PUT -> CALL)
+    new_contract = "PUT" if prev_contract == "CALL" else "CALL"
     
-    # 2. عكس إشارة الحاجز (+ -> -, - -> +) لزيادة هامش الأمان في المضاعفة:
+    # 2. عكس إشارة الحاجز (+ -> -, - -> +)
     if prev_barrier_sign == "+":
-        # إذا كانت الإشارة السابقة موجبة (+0.1)، تصبح الإشارة الآن سالبة (-0.7)
+        # إذا كانت الإشارة السابقة موجبة (+0.05)، تصبح الإشارة الآن سالبة (-0.05)
         new_barrier_sign = "-" 
     else: # prev_barrier_sign == "-"
-        # إذا كانت الإشارة السابقة سالبة (-0.1)، تصبح الإشارة الآن موجبة (+0.7)
+        # إذا كانت الإشارة السابقة سالبة (-0.05)، تصبح الإشارة الآن موجبة (+0.05)
         new_barrier_sign = "+"
     
     # 3. استخدام حاجز المضاعفة (MARTINGALE_OFFSET)
@@ -645,7 +645,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set timing_logic = "Fully Instant Trading (Base @ Trend Following +/-" + base_entry_offset + " | Martingale @ Reversed +/-" + martingale_offset + ")" %}
+    {% set timing_logic = "Fully Instant Trading (Base @ Trend Following: +/-0.05 | Martingale @ Full Reverse +/-0.05)" %}
     {% set strategy = CONTRACT_TYPE_BASE + " (HL) (" + symbol + " - " + timing_logic + " - x" + martingale_multiplier|string + " Martingale, Max Steps " + martingale_steps|string + ", Max Loss " + max_consecutive_losses|string + ")" %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
@@ -789,7 +789,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {CONTRACT_TYPE_BASE} (Base +/-{BASE_ENTRY_OFFSET} / Martingale +/-{MARTINGALE_OFFSET}, x{MARTINGALE_MULTIPLIER})', 'success')
+    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {CONTRACT_TYPE_BASE} (Base: +/-{BASE_ENTRY_OFFSET} | Martingale: Reverse)', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
