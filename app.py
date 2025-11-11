@@ -385,11 +385,16 @@ def determine_reversed_martingale_entry(email):
         # يجب أن يكون هناك بيانات صفقة سابقة خاسرة
         return None, None, None
         
-    # 1. عكس نوع العقد (CALL -> PUT, PUT -> CALL)
-    new_contract = "CALL" if prev_contract == "CALL" else "PUT"
+   # 1. تثبيت نوع العقد (CALL -> CALL, PUT -> PUT)
+    new_contract = prev_contract
     
-    # 2. عكس إشارة الحاجز (+ -> -, - -> +) <--- هذا هو الجزء الذي سيتغير
-    new_barrier_sign = "-" if prev_barrier_sign == "+" else "+"
+    # 2. عكس إشارة الحاجز (+ -> -, - -> +) لزيادة هامش الأمان في المضاعفة:
+    if prev_barrier_sign == "+":
+        # إذا كانت الإشارة السابقة موجبة (+0.1)، تصبح الإشارة الآن سالبة (-0.7)
+        new_barrier_sign = "-" 
+    else: # prev_barrier_sign == "-"
+        # إذا كانت الإشارة السابقة سالبة (-0.1)، تصبح الإشارة الآن موجبة (+0.7)
+        new_barrier_sign = "+"
     
     # 3. استخدام حاجز المضاعفة (MARTINGALE_OFFSET)
     return new_contract, new_barrier_sign, MARTINGALE_OFFSET
