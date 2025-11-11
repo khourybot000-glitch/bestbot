@@ -19,13 +19,13 @@ DURATION = 5
 DURATION_UNIT = "t"
 
 # إعدادات المضاعفة
-MARTINGALE_STEPS = 4                 # الحد الأقصى لخطوات المضاعفة (M1, M2, M3, M4)
-MAX_CONSECUTIVE_LOSSES = 5           # الحد الأقصى للخسائر المتتالية قبل التوقف (يتم التوقف بعد الخسارة الخامسة)
-MARTINGALE_MULTIPLIER = 2.5          # معامل المضاعفة (2.5)
+MARTINGALE_STEPS = 1                 # الحد الأقصى لخطوات المضاعفة (M1, M2, M3, M4)
+MAX_CONSECUTIVE_LOSSES = 2           # الحد الأقصى للخسائر المتتالية قبل التوقف (يتم التوقف بعد الخسارة الخامسة)
+MARTINGALE_MULTIPLIER = 29          # معامل المضاعفة (2.5)
 
 # إعدادات الحاجز (0.05)
-BASE_ENTRY_OFFSET = "0.05"  # الحاجز للدخول الأساسي (يستخدم الآن للمضاعفة أيضاً)
-MARTINGALE_OFFSET = "0.05"  # يمكن إبقاؤها كقيمة افتراضية ولكنها لم تعد تُستخدم لمنطق العكس
+BASE_ENTRY_OFFSET = "0.7"  # الحاجز للدخول الأساسي (يستخدم الآن للمضاعفة أيضاً)
+MARTINGALE_OFFSET = "0.7"  # يمكن إبقاؤها كقيمة افتراضية ولكنها لم تعد تُستخدم لمنطق العكس
 
 CONTRACT_TYPE_BASE = "HL_CONTRARIAN_MARTINGALE" 
 
@@ -366,11 +366,11 @@ def determine_barrier_sign_for_base_entry(email):
     
     if trend == "UP":
         # اتجاه صاعد (UP)، ندخل Higher (CALL) مع حاجز موجب (+0.05)
-        return "CALL", "+", BASE_ENTRY_OFFSET, "TREND_FOLLOWING_FAVORABLE_ENTRY" # ⬅️ CALL وحاجز موجب
+        return "CALL", "-", BASE_ENTRY_OFFSET, "TREND_FOLLOWING_FAVORABLE_ENTRY" # ⬅️ CALL وحاجز موجب
         
     elif trend == "DOWN":
         # اتجاه هابط (DOWN)، ندخل Lower (PUT) مع حاجز سالب (-0.05)
-        return "PUT", "-", BASE_ENTRY_OFFSET, "TREND_FOLLOWING_FAVORABLE_ENTRY" # ⬅️ PUT وحاجز سالب
+        return "PUT", "+", BASE_ENTRY_OFFSET, "TREND_FOLLOWING_FAVORABLE_ENTRY" # ⬅️ PUT وحاجز سالب
         
     else:
         return None, None, None, "FLAT"
