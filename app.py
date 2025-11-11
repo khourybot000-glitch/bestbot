@@ -355,19 +355,22 @@ def analyze_trend(email):
         return "FLAT"
 
 
+# ==========================================================
+# ✅ الكود المُعدَّل: منطق Trend Following + الحاجز الإيجابي
+# ==========================================================
 def determine_barrier_sign_for_base_entry(email):
-    """ يحدد نوع العقد وإشارة الحاجز للدخول (Contrarian) - يستخدم لكل من الدخول الأساسي والمضاعفة الآن """
+    """ يحدد نوع العقد وإشارة الحاجز للدخول (Trend Following مع حاجز إيجابي) """
     global BASE_ENTRY_OFFSET
 
     trend = analyze_trend(email)
     
     if trend == "UP":
-        # صاعد (UP)، ندخل Lower (PUT) مع حاجز موجب (+0.05 الآن)
-        return "PUT", "+", BASE_ENTRY_OFFSET, "CONTRARIAN_ENTRY"
+        # اتجاه صاعد (UP)، ندخل Higher (CALL) مع حاجز موجب (+0.05)
+        return "CALL", "+", BASE_ENTRY_OFFSET, "TREND_FOLLOWING_FAVORABLE_ENTRY" # ⬅️ CALL وحاجز موجب
         
     elif trend == "DOWN":
-        # هابط (DOWN)، ندخل Higher (CALL) مع حاجز سالب (-0.05 الآن)
-        return "CALL", "-", BASE_ENTRY_OFFSET, "CONTRARIAN_ENTRY"
+        # اتجاه هابط (DOWN)، ندخل Lower (PUT) مع حاجز سالب (-0.05)
+        return "PUT", "-", BASE_ENTRY_OFFSET, "TREND_FOLLOWING_FAVORABLE_ENTRY" # ⬅️ PUT وحاجز سالب
         
     else:
         return None, None, None, "FLAT"
