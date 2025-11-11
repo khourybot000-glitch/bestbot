@@ -111,7 +111,7 @@ def load_allowed_users():
     if not os.path.exists(USER_IDS_FILE): return set()
     try:
         with open(USER_IDS_FILE, 'r', encoding='utf-8') as f:
-            return {line.strip().lower() for line in f if line.strip()}
+            return {line.strip().lower() for line.strip() for line in f if line.strip()}
     except: return set()
     
 def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
@@ -283,7 +283,7 @@ def handle_contract_settlement(email, contract_id, profit_loss):
     global is_contract_open
     
     if contract_id not in current_data['open_contract_ids']:
-        return
+        return # ربما تمت معالجته بالفعل أو كان هناك خطأ
 
     current_data['contract_profits'][contract_id] = profit_loss
     
@@ -293,7 +293,6 @@ def handle_contract_settlement(email, contract_id, profit_loss):
     save_session_data(email, current_data)
     
     if not current_data['open_contract_ids']:
-        # **النقطة الحساسة: نغلق حالة is_contract_open هنا بعد التأكد من إغلاق كل العقود**
         is_contract_open[email] = False 
         apply_martingale_logic(email)
 
@@ -307,7 +306,7 @@ def start_new_single_trade(email, contract_type_param, barrier_sign, barrier_off
     currency_to_use = current_data['currency']
         
     current_data['current_entry_id'] = time.time()
-    current_data['open_contract_ids'] = []
+    current_data['open_contract_ids'] = [] # إفراغ القائمة قبل الدخول الجديد
     current_data['contract_profits'] = {}
     
     entry_type_tag = f"MARTINGALE STEP {current_data['current_step']}" if current_data['current_step'] > 0 else "BASE ENTRY"
@@ -319,7 +318,6 @@ def start_new_single_trade(email, contract_type_param, barrier_sign, barrier_off
     if send_trade_order(email, stake, currency_to_use, contract_type_param, barrier_sign, barrier_offset_value):
         is_contract_open[email] = True 
     else:
-        # إذا فشل الإرسال، نعتبر العقد مغلقاً ونعيد إطلاق الدخول في الدورة التالية
         is_contract_open[email] = False 
         print(f"❌ [TRADE FAILED] Trade order failed to send for {email}. Resetting status.")
         
@@ -376,7 +374,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
     
     global is_contract_open, active_ws, last_five_ticks, BASE_ENTRY_OFFSET
 
-    is_contract_open[email] = False  # **تعديل 1: إعادة تعيين الحالة الأولية**
+    is_contract_open[email] = False 
     active_ws = {email: None}
     last_five_ticks[email] = deque(maxlen=5) 
     should_analyze_new_trend[email] = True 
@@ -431,17 +429,18 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             current_data = get_session_data(email)
             if not current_data.get('is_running'): return
 
-            # **تعديل 2: فحص شامل لحالة الدخول قبل أي إجراء**
-            # إذا كانت is_contract_open مفعّلة ولكن open_contract_ids فارغة (أي حدث فشل أو خطأ)، فقم بإعادة الضبط القسري
+            # فحص إجباري لإعادة الضبط في حالة عدم تزامن الحالات
             if is_contract_open.get(email) and not current_data.get('open_contract_ids'):
+                print(f"⚠ [STATE RESET] is_contract_open was True but no open contracts found. Resetting state.")
                 is_contract_open[email] = False
-                current_data['should_enter_immediately'] = True # لضمان عدم تفويت الصفقة المضاعفة
+                current_data['should_enter_immediately'] = True 
                 save_session_data(email, current_data)
             
-            # الحاجز الرئيسي: لا تدخل إذا كان هناك عقد مفتوح
+            # الحاجز الرئيسي: لا تدخل إذا كان هناك عقد مفتوح (ويجب معالجة نتيجته)
             if is_contract_open.get(email):
-                return
-                
+                # إذا كانت مفتوحة، ننتظر فقط رسائل الـ Buy و الـ POC
+                pass
+            
             if msg_type == 'tick':
                 tick_data = data['tick']
                 current_price = float(tick_data['quote'])
@@ -452,69 +451,75 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 current_data['last_tick_data'] = tick_data
                 save_session_data(email, current_data) 
                 
-                # ******* منطق الدخول الخالي من التوقيت *******
-                
-                should_enter_immediately = current_data.get('should_enter_immediately', False)
-                should_analyze_new_trend_state = current_data.get('should_analyze_new_trend', False)
-                    
-                if should_enter_immediately:
-                    # 1. المضاعفة الفورية (Re-Bet)
-                    contract_type_param = current_data['last_contract_type']
-                    barrier_sign = current_data['last_entry_barrier_sign']
-                    barrier_offset_value = current_data['last_barrier_value'] 
+                # منطق الدخول يشتغل فقط إذا لم يكن هناك عقد مفتوح
+                if not is_contract_open.get(email):
+                    should_enter_immediately = current_data.get('should_enter_immediately', False)
+                    should_analyze_new_trend_state = current_data.get('should_analyze_new_trend', False)
                         
-                    start_new_single_trade(email, 
-                        contract_type_param=contract_type_param, 
-                        barrier_sign=barrier_sign, 
-                        barrier_offset_value=barrier_offset_value) 
-                        
-                    current_data['should_enter_immediately'] = False
-                    current_data['should_analyze_new_trend'] = False
-                    save_session_data(email, current_data)
-                        
-                elif should_analyze_new_trend_state:
-                    # 2. الدخول الأساسي أو بعد الربح (New Analysis)
-                    if len(last_five_ticks[email]) >= 5:
-                        contract_type_param, barrier_sign, barrier_offset_value, trend_type = determine_barrier_sign_for_base_entry(email)
+                    if should_enter_immediately:
+                        # 1. المضاعفة الفورية (Re-Bet)
+                        contract_type_param = current_data['last_contract_type']
+                        barrier_sign = current_data['last_entry_barrier_sign']
+                        barrier_offset_value = current_data['last_barrier_value'] 
                             
-                        if trend_type not in ["FLAT", None]:
-                            start_new_single_trade(email, 
-                                contract_type_param=contract_type_param, 
-                                barrier_sign=barrier_sign, 
-                                barrier_offset_value=BASE_ENTRY_OFFSET) 
+                        start_new_single_trade(email, 
+                            contract_type_param=contract_type_param, 
+                            barrier_sign=barrier_sign, 
+                            barrier_offset_value=barrier_offset_value) 
+                            
+                        current_data['should_enter_immediately'] = False
+                        current_data['should_analyze_new_trend'] = False
+                        save_session_data(email, current_data)
+                            
+                    elif should_analyze_new_trend_state:
+                        # 2. الدخول الأساسي أو بعد الربح (New Analysis)
+                        if len(last_five_ticks[email]) >= 5:
+                            contract_type_param, barrier_sign, barrier_offset_value, trend_type = determine_barrier_sign_for_base_entry(email)
                                 
-                            current_data['should_analyze_new_trend'] = False
-                            save_session_data(email, current_data)
-                                
-                        else:
-                            print(f"⏳ [WAIT] Trend is FLAT. Waiting for next tick for analysis.")
-                    else:
-                        print(f"⏳ [WAITING] Collecting ticks ({len(last_five_ticks[email])}/5) for initial analysis.")
-                # ******* نهاية منطق الدخول الخالي من التوقيت *******
+                            if trend_type not in ["FLAT", None]:
+                                start_new_single_trade(email, 
+                                    contract_type_param=contract_type_param, 
+                                    barrier_sign=barrier_sign, 
+                                    barrier_offset_value=BASE_ENTRY_OFFSET) 
+                                    
+                                current_data['should_analyze_new_trend'] = False
+                                save_session_data(email, current_data)
+                                    
+                            # else:
+                                # print(f"⏳ [WAIT] Trend is FLAT. Waiting for next tick for analysis.")
+                        # else:
+                            # print(f"⏳ [WAITING] Collecting ticks ({len(last_five_ticks[email])}/5) for initial analysis.")
 
             elif msg_type == 'buy':
+                # **هنا تم الشراء بنجاح**
                 contract_id = data['buy']['contract_id']
+                print(f"✅ [BUY SUCCESS] Contract ID: {contract_id}. Starting subscription...")
+                
+                # **الحل 1: تسجيل الـ contract_id فوراً**
                 current_data['open_contract_ids'].append(contract_id)
                 save_session_data(email, current_data)
                 
+                # **الحل 2: إرسال طلب الاشتراك في المتابعة**
                 ws_app.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
             
             elif msg_type == 'proposal_open_contract':
                 contract = data['proposal_open_contract']
-                if contract.get('is_sold') == 1:
-                    contract_id = contract['contract_id']
-                    handle_contract_settlement(email, contract_id, contract['profit'])
+                contract_id = contract.get('contract_id')
+                
+                if contract.get('is_sold') == 1 and contract_id:
+                    print(f"💰 [SALE RECEIVED] Contract ID: {contract_id}. Profit: {contract.get('profit')}")
+                    handle_contract_settlement(email, contract_id, contract.get('profit', 0.0))
                     
-                    if 'subscription_id' in data: ws_app.send(json.dumps({"forget": data['subscription_id']}))
+                    # **الحل 3: إلغاء الاشتراك في المتابعة (تنظيف)**
+                    if 'subscription_id' in data: 
+                        ws_app.send(json.dumps({"forget": data['subscription_id']}))
             
             elif 'error' in data:
                 error_code = data['error'].get('code', 'N/A')
                 error_message = data['error'].get('message', 'Unknown Error')
                 print(f"❌❌ [API ERROR] Code: {error_code}, Message: {error_message}. *Trade may be disrupted.*")
                 
-                # إذا حدث خطأ في عملية الـ Buy ولم يفتح عقد
                 if current_data['current_entry_id'] is not None and not current_data['open_contract_ids']:
-                    # نطلق منطق المضاعفة (الذي سيجهز should_enter_immediately) ونعيد فتح الباب للدخول
                     is_contract_open[email] = False 
                     apply_martingale_logic(email) 
                     
