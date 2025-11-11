@@ -19,9 +19,9 @@ DURATION = 5
 DURATION_UNIT = "t"
 
 # إعدادات المضاعفة
-MARTINGALE_STEPS = 1 
-MAX_CONSECUTIVE_LOSSES = 2 
-MARTINGALE_MULTIPLIER = 29.0  
+MARTINGALE_STEPS = 5 
+MAX_CONSECUTIVE_LOSSES = 6 
+MARTINGALE_MULTIPLIER = 2.0  
 
 # الثوابت الجديدة للحاجز (تم توحيدها إلى 0.05)
 BASE_ENTRY_OFFSET = "0.05"  # الحاجز للدخول الأساسي 
