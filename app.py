@@ -10,8 +10,6 @@ from multiprocessing import Process
 from threading import Lock
 from collections import deque
 import math
-
-# نحتاج لاستيراد 'session' من Flask للاستخدام داخل دالة stop_bot
 from flask import session as flask_session 
 
 # ==========================================================
@@ -23,9 +21,9 @@ DURATION = 5
 DURATION_UNIT = "t"
 
 # إعدادات المضاعفة والمخاطر المطلوبة
-MARTINGALE_STEPS = 5                 # الحد الأقصى لخطوات المضاعفة 
-MAX_CONSECUTIVE_LOSSES = 6           # الحد الأقصى للخسائر المتتالية قبل التوقف
-MARTINGALE_MULTIPLIER = 2.0          # معامل المضاعفة (x2)
+MARTINGALE_STEPS = 5                 
+MAX_CONSECUTIVE_LOSSES = 6           
+MARTINGALE_MULTIPLIER = 2.0          
 
 # إعدادات الحاجز (0.05)
 BASE_ENTRY_OFFSET = "0.05"           
@@ -399,9 +397,21 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         "is_running": True, 
         "current_stake": stake, 
         "stop_reason": "Running",
-        # ... (بقية تهيئة البيانات)
+        "last_entry_time": 0,
+        "last_entry_price": 0.0,
+        "last_tick_data": None,
+        "currency": currency,
+        "account_type": account_type,
+        "last_valid_tick_price": 0.0,
+        
+        "current_entry_id": None, 
+        "open_contract_ids": [], 
+        "contract_profits": {},
+        "last_barrier_value": BASE_ENTRY_OFFSET, 
+        "last_entry_barrier_sign": "",
+        "last_contract_type": "",
         "should_enter_immediately": False,
-        "should_analyze_new_trend": True # البدء بتحليل جديد
+        "should_analyze_new_trend": True 
     })
     save_session_data(email, session_data)
 
@@ -447,12 +457,15 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     should_analyze_new_trend_state = current_data.get('should_analyze_new_trend', False)
                     
                     if should_enter_immediately:
-                        # 1. المضاعفة الفورية (Re-Bet)
+                        # 1. المضاعفة الفورية (Re-Bet) - **تم التعديل هنا لتثبيت منطق الحاجز **
                         contract_type_param = current_data['last_contract_type']
                         barrier_sign = current_data['last_entry_barrier_sign']
-                        barrier_offset_value = current_data['last_barrier_value']
+                        barrier_offset_value = current_data['last_barrier_value'] 
                         
-                        start_new_single_trade(email, contract_type_param=contract_type_param, barrier_sign=barrier_sign, barrier_offset_value=BASE_ENTRY_OFFSET)
+                        start_new_single_trade(email, 
+                            contract_type_param=contract_type_param, 
+                            barrier_sign=barrier_sign, 
+                            barrier_offset_value=barrier_offset_value) 
                         
                         # إلغاء علامة الدخول الفوري
                         current_data['should_enter_immediately'] = False
@@ -466,7 +479,10 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                             
                             if trend_type not in ["FLAT", None]:
                                 # 🎯 تنفيذ الصفقة الأساسية
-                                start_new_single_trade(email, contract_type_param=contract_type_param, barrier_sign=barrier_sign, barrier_offset_value=BASE_ENTRY_OFFSET)
+                                start_new_single_trade(email, 
+                                    contract_type_param=contract_type_param, 
+                                    barrier_sign=barrier_sign, 
+                                    barrier_offset_value=BASE_ENTRY_OFFSET) # هنا نستخدم الثابت BASE_ENTRY_OFFSET
                                 
                                 # إلغاء علامة التحليل
                                 current_data['should_analyze_new_trend'] = False
@@ -528,7 +544,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
 
     print(f"🛑 [PROCESS] Bot process loop ended for {email}.")
 
-# --- (FLASK APP SETUP AND ROUTES) ---
+# --- (FLASK APP SETUP AND ROUTES - UNCHANGED) ---
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
@@ -704,7 +720,6 @@ def index():
             
     # إذا كانت البيانات غير موجودة، هذا يعني أنها مسحت بالكامل
     if not session_data.get('is_running') and 'base_stake' not in session_data:
-        # نحتاج لـ default session data لإظهار الـ inputs فارغة
         session_data = DEFAULT_SESSION_STATE.copy()
 
 
