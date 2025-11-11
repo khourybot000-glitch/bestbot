@@ -2,7 +2,6 @@ import time
 import json
 import websocket
 import os
-import sys
 from flask import Flask, request, render_template_string, redirect, url_for, session, flash
 from datetime import timedelta
 from multiprocessing import Process
@@ -111,7 +110,7 @@ def load_allowed_users():
     if not os.path.exists(USER_IDS_FILE): return set()
     try:
         with open(USER_IDS_FILE, 'r', encoding='utf-8') as f:
-            # تم تصحيح صياغة Set Comprehension
+            # تم حل خطأ الصياغة هنا
             return {line.strip().lower() for line in f if line.strip()} 
     except Exception as e: 
         print(f"❌ [USER LOAD ERROR] Failed to load allowed users: {e}")
@@ -169,7 +168,7 @@ def calculate_martingale_stake(base_stake, current_step, multiplier):
 
 def send_trade_order(email, stake, currency, contract_type_param, barrier_sign, barrier_offset_value):
     """ إرسال طلب شراء واحد مع حاجز الإزاحة (+/-) """
-    global active_ws, DURATION, DURATION_UNIT, SYMBOL
+    global active_ws, DURATION, DURATION_UNIT, SYMBOL, CONTRACT_TYPE_BASE
     
     if email not in active_ws or active_ws[email] is None: 
         print(f"❌ [TRADE ERROR] Cannot send trade: WebSocket connection is inactive.")
@@ -183,13 +182,16 @@ def send_trade_order(email, stake, currency, contract_type_param, barrier_sign, 
         "parameters": {
             "amount": round(stake, 2), 
             "basis": "stake",
-            "contract_type": contract_type_param, 
+            # نستخدم نوع العقد الثابت الذي يدعم الـ Re-Bet
+            "contract_type": CONTRACT_TYPE_BASE, 
             "currency": currency, 
             "duration": DURATION, 
             "duration_unit": DURATION_UNIT, 
             "symbol": SYMBOL,
+            # الإشارة والحاجز هما ما يحددان ما إذا كان CALL أو PUT بالنسبة لعقد HL_TREND_FOLLOWING_REBET
             "barrier": f"{barrier_sign}{barrier_offset_value}" 
-        }
+        },
+        "req_id": int(time.time() * 1000) # إضافة req_id لتتبع الأخطاء
     }
     
     try:
@@ -198,6 +200,27 @@ def send_trade_order(email, stake, currency, contract_type_param, barrier_sign, 
     except Exception as e:
         print(f"❌ [TRADE ERROR] Could not send trade order: {e}")
         return False
+
+
+def send_immediate_buy_request(email):
+    """
+    يرسل طلب للحصول على تيك واحد فوراً بعد نهاية الصفقة.
+    هذا يضمن أن منطق الدخول سيعاد فحصه بناءً على التيك التالي دون انتظار التيك الدوري.
+    """
+    global active_ws, SYMBOL
+    if email not in active_ws or active_ws[email] is None: 
+        return
+        
+    ws_app = active_ws[email]
+    
+    # نرسل طلب تيك لمرة واحدة فقط (للتنشيط)
+    tick_request = {"ticks": SYMBOL, "subscribe": 0, "passthrough": { "immediate_recheck": 1 }} 
+    
+    try:
+        ws_app.send(json.dumps(tick_request))
+        print(f"🔄 [RECHECK SIGNAL] Sent one-time tick request to re-evaluate entry logic for {email}.")
+    except Exception as e:
+        print(f"❌ [RECHECK ERROR] Could not send tick recheck request: {e}")
 
 
 def apply_martingale_logic(email):
@@ -276,8 +299,7 @@ def apply_martingale_logic(email):
     
     save_session_data(email, current_data) 
     
-    # **الإصلاح** بعد ضبط حالة المضاعفة: نطلب تيك جديد لضمان تفعيل `on_message_wrapper`
-    # هذا يضمن أن يتم فحص should_enter_immediately أو should_analyze_new_trend فوراً.
+    # **الإصلاح (2): نطلب تيك جديد لضمان تفعيل `on_message_wrapper` فوراً**
     if current_data.get('is_running'):
         send_immediate_buy_request(email)
 
@@ -292,7 +314,7 @@ def handle_contract_settlement(email, contract_id, profit_loss):
     global is_contract_open
     
     if contract_id not in current_data['open_contract_ids']:
-        return # ربما تمت معالجته بالفعل أو كان هناك خطأ
+        return 
 
     current_data['contract_profits'][contract_id] = profit_loss
     
@@ -315,7 +337,7 @@ def start_new_single_trade(email, contract_type_param, barrier_sign, barrier_off
     currency_to_use = current_data['currency']
         
     current_data['current_entry_id'] = time.time()
-    current_data['open_contract_ids'] = [] # إفراغ القائمة قبل الدخول الجديد
+    current_data['open_contract_ids'] = [] 
     current_data['contract_profits'] = {}
     
     entry_type_tag = f"MARTINGALE STEP {current_data['current_step']}" if current_data['current_step'] > 0 else "BASE ENTRY"
@@ -334,7 +356,7 @@ def start_new_single_trade(email, contract_type_param, barrier_sign, barrier_off
     current_data['last_entry_time'] = int(time.time())
     current_data['last_entry_price'] = current_data.get('last_valid_tick_price', 0.0)
     current_data['last_entry_barrier_sign'] = barrier_sign 
-    current_data['last_contract_type'] = contract_type_param 
+    current_data['last_contract_type'] = contract_type_param # **الإصلاح (3): تأكيد حفظ نوع العقد CALL/PUT**
     current_data['last_barrier_value'] = barrier_offset_value 
     
     save_session_data(email, current_data)
@@ -368,35 +390,17 @@ def determine_barrier_sign_for_base_entry(email):
     trend = analyze_trend(email)
     
     if trend == "UP":
+        # عند التحليل للأعلى، نختار CALL ونستخدم حاجز (+)
         return "CALL", "+", BASE_ENTRY_OFFSET, "TREND_FOLLOWING_FAVORABLE_ENTRY"
         
     elif trend == "DOWN":
+        # عند التحليل للأسفل، نختار PUT ونستخدم حاجز (-)
         return "PUT", "-", BASE_ENTRY_OFFSET, "TREND_FOLLOWING_FAVORABLE_ENTRY"
         
     else:
         return None, None, None, "FLAT"
-
-
-def send_immediate_buy_request(email):
-    """
-    يرسل طلب للحصول على تيك واحد فوراً بعد نهاية الصفقة.
-    هذا يضمن أن منطق الدخول سيعاد فحصه بناءً على التيك التالي دون انتظار التيك الدوري.
-    """
-    global active_ws, SYMBOL
-    if email not in active_ws or active_ws[email] is None: 
-        return
         
-    ws_app = active_ws[email]
     
-    # نرسل طلب تيك لمرة واحدة فقط (passthrough: { "immediate_recheck": 1 }) 
-    # يتم استخدام passthrough هنا لتحديد أن هذا الطلب هو لتنشيط الدخول الفوري فقط.
-    tick_request = {"ticks": SYMBOL, "subscribe": 0, "passthrough": { "immediate_recheck": 1 }} 
-    
-    try:
-        ws_app.send(json.dumps(tick_request))
-        print(f"🔄 [RECHECK SIGNAL] Sent one-time tick request to re-evaluate entry logic for {email}.")
-    except Exception as e:
-        print(f"❌ [RECHECK ERROR] Could not send tick recheck request: {e}")
     
 def bot_core_logic(email, token, stake, tp, currency, account_type):
     """ Core bot logic """
@@ -444,10 +448,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         def on_open_wrapper(ws_app):
             current_data = get_session_data(email) 
             ws_app.send(json.dumps({"authorize": current_data['api_token']}))
-            
-            # الاشتراك الأولي في التيكات (للتشغيل العادي)
             ws_app.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
-            
             running_data = get_session_data(email)
             running_data['is_running'] = True
             save_session_data(email, running_data)
@@ -461,18 +462,25 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             current_data = get_session_data(email)
             if not current_data.get('is_running'): return
 
+            # فحص إجباري لإعادة الضبط في حالة عدم تزامن الحالات
+            if is_contract_open.get(email) and not current_data.get('open_contract_ids'):
+                print(f"⚠ [STATE RESET] is_contract_open was True but no open contracts found. Resetting state.")
+                is_contract_open[email] = False
+                current_data['should_enter_immediately'] = True 
+                save_session_data(email, current_data)
+            
+            # الحاجز الرئيسي: لا تدخل إذا كان هناك عقد مفتوح
             if is_contract_open.get(email):
-                # إذا كانت الصفقة مفتوحة، ننتظر فقط نتيجة الصفقة
                 pass
             
             if msg_type == 'tick':
                 tick_data = data['tick']
                 current_price = float(tick_data['quote'])
                 
-                # فحص ما إذا كان التيك وصل نتيجة لـ "إعادة الفحص الفوري" (Immediate Recheck)
+                # فحص ما إذا كان التيك وصل نتيجة لـ "إعادة الفحص الفوري"
                 is_recheck_tick = data.get('passthrough', {}).get('immediate_recheck') == 1
                 
-                # تحديث بيانات التيك (يتم فقط إذا لم يكن الصفقة مفتوحة)
+                # تحديث بيانات التيك
                 if not is_contract_open.get(email):
                     last_five_ticks[email].append(tick_data)
                     current_data['last_valid_tick_price'] = current_price
@@ -485,11 +493,12 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     should_analyze_new_trend_state = current_data.get('should_analyze_new_trend', False)
                         
                     if should_enter_immediately:
-                        # 1. المضاعفة الفورية (Re-Bet) - يتم تشغيلها فوراً عند أول تيك بعد الخسارة
+                        # 1. المضاعفة الفورية (Re-Bet)
                         contract_type_param = current_data['last_contract_type']
                         barrier_sign = current_data['last_entry_barrier_sign']
                         barrier_offset_value = current_data['last_barrier_value'] 
                             
+                        # الدخول الفوري يجب أن يحدث على أي تيك، بما في ذلك تيك إعادة الفحص
                         start_new_single_trade(email, 
                             contract_type_param=contract_type_param, 
                             barrier_sign=barrier_sign, 
@@ -500,7 +509,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                         save_session_data(email, current_data)
                             
                     elif should_analyze_new_trend_state:
-                        # 2. الدخول الأساسي أو بعد الربح (New Analysis) - يتطلب 5 تيكات جديدة
+                        # 2. الدخول الأساسي أو بعد الربح (New Analysis)
                         if len(last_five_ticks[email]) >= 5:
                             contract_type_param, barrier_sign, barrier_offset_value, trend_type = determine_barrier_sign_for_base_entry(email)
                                 
@@ -531,7 +540,6 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     handle_contract_settlement(email, contract_id, contract.get('profit', 0.0))
                     
                     if 'subscription_id' in data: 
-                        # إلغاء اشتراك POC
                         ws_app.send(json.dumps({"forget": data['subscription_id']}))
             
             elif 'error' in data:
@@ -539,11 +547,19 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 error_message = data['error'].get('message', 'Unknown Error')
                 print(f"❌❌ [API ERROR] Code: {error_code}, Message: {error_message}. *Trade may be disrupted.*")
                 
-                # إذا حدث خطأ بعد محاولة الشراء مباشرة ولم يفتح عقد
-                if current_data['current_entry_id'] is not None and not current_data['open_contract_ids']:
+                # **الإصلاح (4): معالجة خطأ API عبر إغلاق الـ WS وإعادة الاتصال**
+                if data.get('req_id') and current_data['current_entry_id'] is not None and not current_data['open_contract_ids']:
                     is_contract_open[email] = False 
-                    # نطلق منطق المضاعفة هنا لمعالجة الخطأ كخسارة
-                    apply_martingale_logic(email) 
+                    
+                    # محاكاة خسارة الرهان الحالي (للانتقال للمضاعفة)
+                    current_data['contract_profits'][f"ERROR_{time.time()}"] = -current_data['current_stake'] 
+                    save_session_data(email, current_data)
+                    
+                    apply_martingale_logic(email)
+                    
+                    print(f"💤 [API RECOVERY] API Buy Error received. Closing connection to delay and retry...")
+                    ws_app.close() # إغلاق الاتصال سيؤدي إلى إعادة الاتصال في حلقة while True
+                    return 
                     
         def on_close_wrapper(ws_app, code, msg):
             print(f"⚠ [PROCESS] WS closed for {email}. *RECONNECTING IMMEDIATELY.*")
