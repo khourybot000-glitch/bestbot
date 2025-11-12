@@ -10,11 +10,11 @@ from multiprocessing import Process
 from threading import Lock
 
 # ==========================================================
-# BOT CONSTANT SETTINGS (R_10 | x29 | دخول عند الثانية 40)
+# BOT CONSTANT SETTINGS (R_100 | 5 Ticks | x29 | دخول عند الثانية 40)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
-SYMBOL = "R_100"
-DURATION = 5
+SYMBOL = "R_100"  # **[تعديل: زوج التداول إلى R_100]**
+DURATION = 5      # **[تعديل: مدة الصفقة إلى 5 تِكات]**
 DURATION_UNIT = "t"
 
 # إعدادات المضاعفة
@@ -22,7 +22,7 @@ MARTINGALE_STEPS = 1
 MAX_CONSECUTIVE_LOSSES = 2
 MARTINGALE_MULTIPLIER = 29.0
 
-# **[تعديل: قيمة الحاجز لتناسب استراتيجية تحليل الاتجاه]**
+# قيمة الحاجز لصفقات (Higher/Lower)
 BARRIER_OFFSET_MAGNITUDE = "0.7"
 
 RECONNECT_DELAY = 1
@@ -66,13 +66,12 @@ DEFAULT_SESSION_STATE = {
     "current_entry_id": None,
     "open_contract_ids": [],
     "contract_profits": {},
-    # **[إضافات للاستراتيجية الجديدة]**
     "last_trade_type": None,
     "tick_history": [],
     "analysis_result": "Waiting"
 }
 
-# --- Persistence functions (UNCHANGED) ---
+# --- Persistence functions (لم يتم تعديلها) ---
 def load_persistent_sessions():
     if not os.path.exists(ACTIVE_SESSIONS_FILE): return {}
     try:
@@ -179,27 +178,40 @@ def request_tick_history(email):
 
 
 def analyze_ticks_for_trend(ticks_data):
-    """ يحلل آخر 20 تِك لتحديد الاتجاه (صاعد أو هابط) """
+    """ **[تعديل: تحديد الاتجاه بناءً على مقارنة سعر أول وآخر تِك فقط]** """
+    
+    # التحقق من كفاية البيانات
     if not ticks_data or len(ticks_data) < 20:
+        print(f"❌ [ANALYSIS FAILED] Insufficient data. Received: {len(ticks_data) if ticks_data else 0} ticks.")
         return "WAITING"
 
-    # أسعار الإغلاق (القيمة)
+    # تحويل الأسعار إلى أرقام عشرية
     prices = [float(p) for p in ticks_data]
 
-    # المتوسط المتحرك البسيط لآخر 5 تِك مقابل أول 5 تِك (للزخم القريب)
-    avg_start = sum(prices[:5]) / 5
-    avg_end = sum(prices[-5:]) / 5
+    # سعر أول تِك في القائمة
+    first_tick_price = prices[0]
+    
+    # سعر آخر تِك في القائمة
+    last_tick_price = prices[-1] 
 
-    # الفرق بين بداية ونهاية الـ 20 تِك (للاتجاه العام)
-    price_diff = prices[-1] - prices[0]
+    trend = "SIDEWAYS" # القيمة الافتراضية
 
-    # معيار تحديد الاتجاه (يحتاج إلى اتجاه عام و زخم قريب)
-    if price_diff > 0 and avg_end > avg_start:
-        return "HIGHER" # اتجاه صاعد
-    elif price_diff < 0 and avg_end < avg_start:
-        return "LOWER" # اتجاه هابط
+    # ⬆️ الشرط الأول: صاعد (HIGHER) - إذا كان السعر الأخير أكبر من الأول
+    if last_tick_price > first_tick_price:
+        trend = "HIGHER"
+        
+    # ⬇️ الشرط الثاني: هابط (LOWER) - إذا كان السعر الأخير أصغر من الأول
+    elif last_tick_price < first_tick_price:
+        trend = "LOWER"
+        
+    # الشرط الثالث: متساوي (SIDEWAYS) - إذا كان السعر متساوياً
     else:
-        return "SIDEWAYS" # اتجاه عرضي أو غير واضح
+        trend = "SIDEWAYS"
+        
+    # طباعة نتائج التحليل
+    print(f"📊 [ANALYSIS] First Tick: {first_tick_price:.5f}, Last Tick: {last_tick_price:.5f} -> Result: {trend}")
+    
+    return trend
 
 
 def send_trade_order(email, stake, currency, contract_type_param, barrier_offset):
@@ -300,7 +312,7 @@ def apply_martingale_logic(email):
     is_contract_open[email] = False
 
     currency = current_data.get('currency', 'USD')
-    print(f"[LOG {email}] PNL: {currency} {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Stake: {current_data['current_stake_lower']:.2f}, Strategy: Trend H/L (Offset {BARRIER_OFFSET_MAGNITUDE}) | Next Entry: {entry_tag}")
+    print(f"[LOG {email}] PNL: {currency} {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Stake: {current_data['current_stake_lower']:.2f}, Strategy: Trend H/L (Offset {BARRIER_OFFSET_MAGNITUDE}, 20-Tick Analysis) | Next Entry: {entry_tag}")
 
     save_session_data(email, current_data)
 
@@ -346,10 +358,10 @@ def start_new_single_trade(email, trend):
     # تحديد نوع العقد والحاجز
     if trend == "HIGHER": # اتجاه صاعد
         contract_type = CONTRACT_TYPE_HIGHER # CALL
-        barrier_offset = f"-{BARRIER_OFFSET_MAGNITUDE}" # Higher مع حاجز سالب
+        barrier_offset = f"-{BARRIER_OFFSET_MAGNITUDE}" # Higher مع حاجز سالب (-0.7)
     elif trend == "LOWER": # اتجاه هابط
         contract_type = CONTRACT_TYPE_LOWER # PUT
-        barrier_offset = f"+{BARRIER_OFFSET_MAGNITUDE}" # Lower مع حاجز موجب
+        barrier_offset = f"+{BARRIER_OFFSET_MAGNITUDE}" # Lower مع حاجز موجب (+0.7)
     else: # SIDEWAYS
         print(f"⚠ [ENTRY] Trend is SIDEWAYS. Skipping trade for this cycle.")
         is_contract_open[email] = False
@@ -430,6 +442,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 current_price = float(data['tick']['quote'])
                 tick_epoch = data['tick']['epoch']
 
+                # يتم جلب الثانية من وقت التيك (مهم جداً)
                 current_second = datetime.fromtimestamp(tick_epoch, tz=timezone.utc).second
 
                 current_data['last_valid_tick_price'] = current_price
@@ -437,6 +450,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
 
                 # طلب التاريخ عند الثانية 39 استعداداً للدخول
                 if not is_contract_open.get(email) and current_second == 39:
+                    print(f"🕒 [TICK] Second 39 detected. Requesting 20 ticks history...")
                     request_tick_history(email)
 
                 # === منطق الدخول (ينتظر الثانية 40) ===
@@ -455,7 +469,13 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 # استقبال وحفظ بيانات آخر 20 تِك
                 if 'prices' in data['history']:
                     current_data['tick_history'] = data['history']['prices']
-                    print(f"📈 [HISTORY] Received {len(current_data['tick_history'])} ticks.")
+                    
+                    received_count = len(current_data['tick_history'])
+                    if received_count >= 20:
+                        print(f"✅ [HISTORY] Successfully received {received_count} ticks. Price 1: {current_data['tick_history'][0]}, Price 20: {current_data['tick_history'][-1]}")
+                    else:
+                        print(f"⚠️ [HISTORY] Received only {received_count} ticks.")
+                        
                     save_session_data(email, current_data)
 
             elif msg_type == 'buy':
@@ -509,7 +529,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
 
     print(f"🛑 [PROCESS] Bot process loop ended for {email}.")
 
-# --- (FLASK APP SETUP AND ROUTES - كما كانت) ---
+# --- (FLASK APP SETUP AND ROUTES - لم يتم تعديلها جوهرياً) ---
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
@@ -606,8 +626,10 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set timing_logic = "Always @ Sec 40 (R_10)" %}
-    {% set strategy = "TREND H/L " + barrier_offset_magnitude + " (Last 20 Ticks Analysis - " + timing_logic + " - x" + martingale_multiplier|string + " Martingale, Max Steps " + martingale_steps|string + ")" %}
+    {% set timing_logic = "Always @ Sec 40" %}
+    {% set symbol = SYMBOL %}
+    {% set duration = DURATION %}
+    {% set strategy = symbol + " (" + duration|string + " Ticks) | TREND H/L " + barrier_offset_magnitude + " (First/Last Tick Analysis - " + timing_logic + " - x" + martingale_multiplier|string + " Martingale, Max Steps " + martingale_steps|string + ")" %}
 
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
@@ -688,7 +710,7 @@ def index():
 
         session_data['stop_reason'] = "Displayed"
         save_session_data(email, session_data)
-        delete_session_data(email) # يتم حذفه إذا لم تكن الأسباب أعلاه
+        delete_session_data(email)
 
     return render_template_string(CONTROL_FORM,
         email=email,
@@ -696,9 +718,9 @@ def index():
         martingale_steps=MARTINGALE_STEPS,
         max_consecutive_losses=MAX_CONSECUTIVE_LOSSES,
         martingale_multiplier=MARTINGALE_MULTIPLIER,
-        duration=DURATION,
-        barrier_offset_magnitude=BARRIER_OFFSET_MAGNITUDE, # تم تغيير اسم الثابت في القالب
-        symbol=SYMBOL
+        DURATION=DURATION,
+        BARRIER_OFFSET_MAGNITUDE=BARRIER_OFFSET_MAGNITUDE,
+        SYMBOL=SYMBOL
     )
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -749,7 +771,7 @@ def start_bot():
 
     with PROCESS_LOCK: active_processes[email] = process
 
-    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: TREND H/L (Offset {BARRIER_OFFSET_MAGNITUDE}, 20-Tick Analysis) with x{MARTINGALE_MULTIPLIER} Martingale (Max {MARTINGALE_STEPS} Steps, Max {MAX_CONSECUTIVE_LOSSES} Losses)', 'success')
+    flash(f'Bot started successfully. Symbol: {SYMBOL}. Duration: {DURATION} Ticks. Strategy: TREND H/L (Offset {BARRIER_OFFSET_MAGNITUDE}, First/Last Tick Analysis) with x{MARTINGALE_MULTIPLIER} Martingale (Max {MARTINGALE_STEPS} Steps, Max {MAX_CONSECUTIVE_LOSSES} Losses)', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
