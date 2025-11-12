@@ -20,9 +20,9 @@ DURATION_UNIT = "t"
 
 # إعدادات التوقيت والتحليل
 ENTRY_SECONDS_LIST = [0, 30]  # 🎯 قائمة الثواني المحددة للدخول
-TICK_ANALYSIS_COUNT = 10     # 🎯 عدد التيكات المطلوبة للتحليل
+TICK_ANALYSIS_COUNT = 5     # 🎯 عدد التيكات المطلوبة للتحليل
 # إعدادات المضاعفة
-MARTINGALE_STEPS = 1 
+MARTINGALE_STEPS = 1
 MAX_CONSECUTIVE_LOSSES = 1
 MARTINGALE_MULTIPLIER = 1.0  
 BARRIER_OFFSET = "0.9"       
@@ -56,6 +56,7 @@ DEFAULT_SESSION_STATE = {
 # --- Persistence and Control functions ---
 
 def load_persistent_sessions():
+    """تحميل الجلسات مع معالجة الأخطاء."""
     if not os.path.exists(ACTIVE_SESSIONS_FILE): return {}
     try:
         with open(ACTIVE_SESSIONS_FILE, 'r') as f:
@@ -64,6 +65,7 @@ def load_persistent_sessions():
     except: return {}
 
 def save_session_data(email, session_data):
+    """حفظ بيانات الجلسة تحت القفل لضمان سلامة الملف."""
     with TRADE_LOCK: 
         all_sessions = load_persistent_sessions()
         all_sessions[email] = session_data
@@ -72,6 +74,7 @@ def save_session_data(email, session_data):
             except: pass
 
 def get_session_data(email):
+    """جلب بيانات الجلسة مع تطبيق القيم الافتراضية إذا كانت مفقودة."""
     with TRADE_LOCK: 
         all_sessions = load_persistent_sessions()
         if email in all_sessions:
@@ -84,6 +87,7 @@ def get_session_data(email):
         return DEFAULT_SESSION_STATE.copy()
 
 def delete_session_data(email):
+    """حذف بيانات الجلسة بالكامل من قاعدة البيانات."""
     with TRADE_LOCK: 
         all_sessions = load_persistent_sessions()
         if email in all_sessions: del all_sessions[email]
@@ -92,6 +96,7 @@ def delete_session_data(email):
             except: pass
 
 def load_allowed_users():
+    """تحميل قائمة المستخدمين المسموح لهم."""
     if not os.path.exists(USER_IDS_FILE): return set()
     try:
         with open(USER_IDS_FILE, 'r', encoding='utf-8') as f:
@@ -102,23 +107,27 @@ def load_allowed_users():
 
 def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
     """
-    🚨 (الإصدار المُعزز) إيقاف قسري للعملية لضمان عدم التعليق.
+    🚨 دالة الإيقاف المُعززة: تقتل العملية الفرعية وتُجري التنظيف المطلوب.
     """
     global is_contract_open, active_processes, active_ws
     
+    # 🎯 أسباب التوقف التي تتطلب حذف البيانات بشكل دائم (حسب طلب المستخدم)
     permanent_clear_reasons = ["TP Reached", f"SL Reached: {MAX_CONSECUTIVE_LOSSES} consecutive losses.", f"SL Reached: Exceeded {MARTINGALE_STEPS} Martingale steps.", "Stopped Manually", "Auto-Cleaned by Flask"]
-    permanent_clear = clear_data and any(reason in stop_reason for reason in permanent_clear_reasons)
+    
+    # يتم الحذف إذا تم طلب clear_data=True أو إذا كان سبب التوقف نهائيًا
+    permanent_clear = clear_data or any(reason in stop_reason for reason in permanent_clear_reasons)
 
-    # 🚨 1. القتل أولاً (Kill First) 🚨
-    # نقتل العملية الفرعية (البوت) أولاً لتحرير أي أقفال على الملف
+    # 🚨 1. القتل أولاً (Anti-Hanging Fix) 🚨
     with PROCESS_LOCK:
         if email in active_processes:
             process = active_processes[email]
             try:
                 if process.is_alive():
-                    print(f"🛑 [INFO] Forcing KILL on process for {email} to prevent deadlock...")
-                    process.kill() # استخدام SIGKILL فوراً لضمان الموت
-                    process.join(timeout=0.5) # محاولة تنظيف العملية
+                    print(f"🛑 [INFO] Forcing KILL on process for {email} to prevent deadlock/hanging...")
+                    process.kill() # القتل القسري لضمان تحرير القفل
+                    process.join(timeout=0.5) 
+                    # تأخير بسيط لضمان تفريغ موارد النظام
+                    time.sleep(0.01) 
                 else:
                     print(f"🛑 [INFO] Process for {email} was already dead.")
             except Exception as e:
@@ -136,19 +145,19 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
             del active_ws[email]
     if email in is_contract_open: is_contract_open[email] = False
 
-    # 3. الآن بعد أن مات البوت، يمكننا الكتابة والحذف بأمان
+    # 3. حفظ حالة الإيقاف المؤقتة (إذا لم يكن مطلوباً الحذف الدائم)
     with TRADE_LOCK:
-        current_data = get_session_data(email) # الحصول على البيانات الحالية
+        current_data = get_session_data(email) 
         if current_data.get("is_running") is True:
             current_data["is_running"] = False
             current_data["stop_reason"] = stop_reason
-            save_session_data(email, current_data) # حفظ حالة "متوقف"
+            save_session_data(email, current_data) 
             
-            if permanent_clear and stop_reason != "Stopped Manually":
-                if 'email' in flask_session:
-                    flask_session['last_stop_reason'] = stop_reason
+            # حفظ سبب التوقف النهائي للعرض قبل الحذف إذا كان الإيقاف آلياً
+            if stop_reason in permanent_clear_reasons and 'email' in flask_session:
+                flask_session['last_stop_reason'] = stop_reason
 
-    # 4. الحذف النهائي
+    # 4. الحذف النهائي لبيانات الجلسة من قاعدة البيانات
     if permanent_clear:
         delete_session_data(email) 
         print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}). Session data PERMANENTLY CLEARED.")
@@ -224,6 +233,7 @@ def apply_martingale_logic(email, total_profit):
         current_data['consecutive_losses'] += 1
         current_data['current_step'] += 1 
         
+        # 🚨 SL Check: Consecutive Losses
         if current_data['consecutive_losses'] > MAX_CONSECUTIVE_LOSSES:
             stop_reason_sl = f"SL Reached: {MAX_CONSECUTIVE_LOSSES} consecutive losses."
             current_data['is_running'] = False 
@@ -231,6 +241,7 @@ def apply_martingale_logic(email, total_profit):
             stop_bot(email, clear_data=True, stop_reason=stop_reason_sl) 
             return
             
+        # 🚨 SL Check: Martingale Steps
         if current_data['current_step'] > MARTINGALE_STEPS: 
             stop_reason_step = f"SL Reached: Exceeded {MARTINGALE_STEPS} Martingale steps."
             current_data['is_running'] = False 
@@ -259,7 +270,7 @@ def apply_martingale_logic(email, total_profit):
         stop_reason_tp = "TP Reached"
         current_data['is_running'] = False 
         save_session_data(email, current_data) 
-        stop_bot(email, clear_data=True, stop_reason=stop_reason_tp) 
+        stop_bot(email, clear_data=True, stop_reason=stop_reason_tp) # 🚨 حذف دائم
         return
         
     last_ten_ticks[email].clear() 
@@ -517,7 +528,6 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
              break
         
         print(f"💤 [PROCESS] Immediate Retrying connection for {email}...")
-        # 💡 تم إزالة time.sleep(0.5) لضمان الإنهاء السريع
 
     print(f"🛑 [PROCESS] Bot process loop ended for {email}.")
 
@@ -717,17 +727,18 @@ def index():
         if reason.startswith("SL Reached"): flash(f"🛑 STOP: Max loss reached! ({reason.split(': ')[1]})", 'error')
         elif reason == "TP Reached": flash(f"✅ GOAL: Profit target ({session_data.get('tp_target', 0.0)} {session_data.get('currency', 'USD')}) reached successfully! (TP Reached)", 'success')
         
+        # 💡 نستخدم clear_data=True هنا لضمان حذف البيانات بعد عرض رسالة النجاح/الفشل
         stop_bot(email, clear_data=True, stop_reason="Auto-Cleaned by Flask") 
         
         return redirect(url_for('index'))
             
     # معالجة البيانات المفقودة أو أسباب التوقف الأخرى
-    if not session_data.get('is_running') and "stop_reason" in session_data and session_data["stop_reason"] not in ["Stopped Manually", "Running", "Disconnected (Auto-Retry)", "Auto-Cleaned by Flask"]:
+    if not session_data.get('is_running') and "stop_reason" in session_data and session_data["stop_reason"] not in ["Stopped Manually", "Running", "Disconnected (Auto-Retry)", "Auto-Cleaned by Flask", "Displayed"]:
         
         if session_data["stop_reason"].startswith("API Buy Error") or session_data["stop_reason"].startswith("API Error"): 
              flash(f"❌ API Error: {session_data['stop_reason']}. Please check token.", 'error')
         
-        session_data['stop_reason'] = "Displayed"
+        session_data['stop_reason'] = "Displayed" # علامة لمنع الرسالة من الظهور مرة أخرى
         save_session_data(email, session_data)
 
     if not session_data.get('is_running') and 'base_stake' not in session_data:
@@ -791,7 +802,10 @@ def start_bot():
         flash("Invalid stake or TP value (Base Stake must be >= 0.35).", 'error')
         return redirect(url_for('index'))
         
+    # 💡 خطوة التنظيف المسبق: إنهاء أي عملية قديمة وضمان تحرير الأقفال
     stop_bot(email, clear_data=False, stop_reason="Re-Starting (Process Cleanup)")
+    
+    # 🚨 تم إزالة: time.sleep(0.5) لضمان عدم تعليق Start Bot
     
     process = Process(target=bot_core_logic, args=(email, token, stake, tp, currency, account_type))
     process.daemon = True
@@ -807,7 +821,7 @@ def stop_route():
     if 'email' not in session: return redirect(url_for('auth_page'))
     email_to_stop = session['email']
     
-    # 💡 يتم استدعاء stop_bot دائماً بـ clear_data=True لضمان الحذف الفوري
+    # 🚨 يتم استدعاء stop_bot بـ clear_data=True لضمان الحذف الفوري والدائم (حسب طلبك)
     stop_bot(email_to_stop, clear_data=True, stop_reason="Stopped Manually") 
     
     flash('Bot stopped and session data cleared.', 'success')
@@ -823,6 +837,8 @@ def logout():
 if __name__ == '__main__':
     all_sessions = load_persistent_sessions()
     for email in list(all_sessions.keys()):
+        # عند إيقاف تشغيل الخادم، نقوم بتنظيف العمليات لكن نحافظ على البيانات 
+        # في حال أراد المستخدم استئنافها يدوياً لاحقاً.
         stop_bot(email, clear_data=False, stop_reason="Disconnected (Auto-Retry)")
         
     port = int(os.environ.get("PORT", 5000))
