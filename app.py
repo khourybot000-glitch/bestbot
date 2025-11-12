@@ -13,8 +13,8 @@ from threading import Lock
 # BOT CONSTANT SETTINGS (R_100 | 5 Ticks | x29 | دخول عند الثانية 40)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
-SYMBOL = "R_100"  # **[تعديل: زوج التداول إلى R_100]**
-DURATION = 5      # **[تعديل: مدة الصفقة إلى 5 تِكات]**
+SYMBOL = "R_100"  # زوج التداول: R_100
+DURATION = 5      # مدة الصفقة: 5 تِكات
 DURATION_UNIT = "t"
 
 # إعدادات المضاعفة
@@ -178,33 +178,29 @@ def request_tick_history(email):
 
 
 def analyze_ticks_for_trend(ticks_data):
-    """ **[تعديل: تحديد الاتجاه بناءً على مقارنة سعر أول وآخر تِك فقط]** """
+    """ **تحديد الاتجاه: مقارنة سعر أول وآخر تِك من 20 تِك.** """
     
     # التحقق من كفاية البيانات
     if not ticks_data or len(ticks_data) < 20:
         print(f"❌ [ANALYSIS FAILED] Insufficient data. Received: {len(ticks_data) if ticks_data else 0} ticks.")
         return "WAITING"
 
-    # تحويل الأسعار إلى أرقام عشرية
     prices = [float(p) for p in ticks_data]
 
-    # سعر أول تِك في القائمة
     first_tick_price = prices[0]
-    
-    # سعر آخر تِك في القائمة
     last_tick_price = prices[-1] 
 
     trend = "SIDEWAYS" # القيمة الافتراضية
 
-    # ⬆️ الشرط الأول: صاعد (HIGHER) - إذا كان السعر الأخير أكبر من الأول
+    # ⬆️ الشرط الأول: صاعد (HIGHER) 
     if last_tick_price > first_tick_price:
         trend = "HIGHER"
         
-    # ⬇️ الشرط الثاني: هابط (LOWER) - إذا كان السعر الأخير أصغر من الأول
+    # ⬇️ الشرط الثاني: هابط (LOWER)
     elif last_tick_price < first_tick_price:
         trend = "LOWER"
         
-    # الشرط الثالث: متساوي (SIDEWAYS) - إذا كان السعر متساوياً
+    # الشرط الثالث: متساوي (SIDEWAYS)
     else:
         trend = "SIDEWAYS"
         
@@ -529,7 +525,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
 
     print(f"🛑 [PROCESS] Bot process loop ended for {email}.")
 
-# --- (FLASK APP SETUP AND ROUTES - لم يتم تعديلها جوهرياً) ---
+# --- (FLASK APP SETUP AND ROUTES) ---
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
@@ -712,6 +708,7 @@ def index():
         save_session_data(email, session_data)
         delete_session_data(email)
 
+    # **[تم تصحيح هذا القسم لتمرير المتغير barrier_offset_magnitude]**
     return render_template_string(CONTROL_FORM,
         email=email,
         session_data=session_data,
@@ -719,7 +716,7 @@ def index():
         max_consecutive_losses=MAX_CONSECUTIVE_LOSSES,
         martingale_multiplier=MARTINGALE_MULTIPLIER,
         DURATION=DURATION,
-        BARRIER_OFFSET_MAGNITUDE=BARRIER_OFFSET_MAGNITUDE,
+        barrier_offset_magnitude=BARRIER_OFFSET_MAGNITUDE, # **المتغير الذي كان مفقوداً**
         SYMBOL=SYMBOL
     )
 
