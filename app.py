@@ -11,14 +11,14 @@ import math
 from flask import session as flask_session 
 
 # ==========================================================
-# BOT CONSTANT SETTINGS (HL Contrarian | Martingale x29 | Timed Entry)
+# BOT CONSTANT SETTINGS (NEW STRATEGY: Higher -0.6 / Lower +0.6)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_10" 
 DURATION = 5
 DURATION_UNIT = "t"
 
-# إعدادات التوقيت والتحليل الجديدة
+# إعدادات التوقيت والتحليل
 ENTRY_SECOND = 40      # 🎯 الثانية المحددة للدخول (40)
 TICK_ANALYSIS_COUNT = 10 # 🎯 عدد التيكات المطلوبة للتحليل (10)
 
@@ -26,23 +26,24 @@ TICK_ANALYSIS_COUNT = 10 # 🎯 عدد التيكات المطلوبة للتح�
 MARTINGALE_STEPS = 1 
 MAX_CONSECUTIVE_LOSSES = 1
 MARTINGALE_MULTIPLIER = 29.0  
-BARRIER_OFFSET = "0.6" 
+BARRIER_OFFSET = "0.6"       # 🎯 تم تغيير الحاجز إلى 0.6
 
-CONTRACT_TYPE_BASE = "HL_CONTRARIAN" 
+# 🎯 نوع العقد الأساسي تم تغييره للتعامل مع CALL/PUT مباشرةً
+CONTRACT_TYPE_BASE = "BARRIER_CONTRARIAN" # اسم تعريفي جديد
 
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 
 # ==========================================================
-# GLOBAL STATE 
+# GLOBAL STATE (NO CHANGE) 
 # ==========================================================
 active_processes = {}
 active_ws = {}
 is_contract_open = {}
 PROCESS_LOCK = Lock()
 TRADE_LOCK = Lock()
-last_ten_ticks = {} # تم تغيير الاسم ليناسب الـ 10 تيكات
+last_ten_ticks = {} 
 
 DEFAULT_SESSION_STATE = {
     "api_token": "",
@@ -74,6 +75,7 @@ DEFAULT_SESSION_STATE = {
 
 # --- Persistence and Control functions ---
 
+# (load_persistent_sessions, save_session_data, get_session_data, delete_session_data, load_allowed_users - UNCHANGED)
 def load_persistent_sessions():
     if not os.path.exists(ACTIVE_SESSIONS_FILE): return {}
     try:
@@ -115,23 +117,29 @@ def load_allowed_users():
     except Exception as e: 
         print(f"❌ [USER LOAD ERROR] Failed to load allowed users: {e}")
         return set()
-    
+
 def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
+    """
+    توقف عملية البوت بشكل كامل وإيقاف العملية، مع حذف البيانات إذا كان الإيقاف نهائياً (SL/TP/Manual).
+    """
     global is_contract_open, active_processes
     current_data = get_session_data(email)
     
+    # تعريف الحالات التي تتطلب حذف البيانات بشكل دائم
     permanent_clear_reasons = ["TP Reached", f"SL Reached: {MAX_CONSECUTIVE_LOSSES} consecutive losses.", f"SL Reached: Exceeded {MARTINGALE_STEPS} Martingale steps.", "Stopped Manually"]
     permanent_clear = clear_data and stop_reason in permanent_clear_reasons
 
+    # 1. إيقاف حالة الجريان وحفظ السبب
     if current_data.get("is_running") is True:
         current_data["is_running"] = False
         current_data["stop_reason"] = stop_reason
-        save_session_data(email, current_data)
+        save_session_data(email, current_data) 
         
         if permanent_clear and stop_reason != "Stopped Manually":
             if 'email' in flask_session:
                  flask_session['last_stop_reason'] = stop_reason
 
+    # 2. إنهاء عملية المعالجة (Process)
     with PROCESS_LOCK:
         if email in active_processes:
             process = active_processes[email]
@@ -140,6 +148,7 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
                 process.terminate() 
             del active_processes[email]
     
+    # 3. إغلاق اتصال الـ WebSocket
     with PROCESS_LOCK:
         if email in active_ws and active_ws[email]:
             try: active_ws[email].close() 
@@ -148,6 +157,7 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
 
     if email in is_contract_open: is_contract_open[email] = False
 
+    # 4. الحذف النهائي لبيانات الجلسة من قاعدة البيانات
     if permanent_clear:
         delete_session_data(email)
         print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}). Session data PERMANENTLY CLEARED.")
@@ -178,18 +188,29 @@ def send_trade_order(email, stake, currency, contract_type_param, barrier_sign):
         
     ws_app = active_ws[email]
     
+    # تحديد نوع العقد: CALL إذا كان الحاجز سالب (Higher -X)، PUT إذا كان الحاجز موجب (Lower +X)
+    final_contract_type = ""
+    if contract_type_param == "CALL":
+        final_contract_type = "CALL" 
+    elif contract_type_param == "PUT":
+        final_contract_type = "PUT"
+    else:
+        # هذه الحالة لا ينبغي أن تحدث مع المنطق الجديد، ولكن كإجراء احترازي
+        print(f"❌ [TRADE ERROR] Invalid contract type received: {contract_type_param}")
+        return None
+        
     trade_request = {
         "buy": 1,
         "price": round(stake, 2), 
         "parameters": {
             "amount": round(stake, 2), 
             "basis": "stake",
-            "contract_type": contract_type_param, 
+            "contract_type": final_contract_type, # استخدام CALL/PUT
             "currency": currency, 
             "duration": DURATION, 
             "duration_unit": DURATION_UNIT, 
             "symbol": SYMBOL,
-            "barrier": f"{barrier_sign}{BARRIER_OFFSET}" 
+            "barrier": f"{barrier_sign}{BARRIER_OFFSET}" # الحاجز مع الإشارة
         },
         "req_id": int(time.time() * 1000) 
     }
@@ -225,14 +246,18 @@ def apply_martingale_logic(email, total_profit):
         current_data['consecutive_losses'] += 1
         current_data['current_step'] += 1 
         
+        # 🛑 التحقق من حد الخسارة: تجاوز عدد الخسائر المتتالية
         if current_data['consecutive_losses'] > MAX_CONSECUTIVE_LOSSES:
-            save_session_data(email, current_data)
-            stop_bot(email, clear_data=True, stop_reason=f"SL Reached: {MAX_CONSECUTIVE_LOSSES} consecutive losses.") 
+            stop_reason_sl = f"SL Reached: {MAX_CONSECUTIVE_LOSSES} consecutive losses."
+            save_session_data(email, current_data) 
+            stop_bot(email, clear_data=True, stop_reason=stop_reason_sl) 
             return
             
+        # 🛑 التحقق من حد الخسارة: تجاوز خطوات المضاعفة
         if current_data['current_step'] > MARTINGALE_STEPS: 
-            save_session_data(email, current_data)
-            stop_bot(email, clear_data=True, stop_reason=f"SL Reached: Exceeded {MARTINGALE_STEPS} Martingale steps.") 
+            stop_reason_step = f"SL Reached: Exceeded {MARTINGALE_STEPS} Martingale steps."
+            save_session_data(email, current_data) 
+            stop_bot(email, clear_data=True, stop_reason=stop_reason_step) 
             return
         
         # حساب الرهان الجديد للمضاعفة
@@ -253,11 +278,12 @@ def apply_martingale_logic(email, total_profit):
         entry_tag = f"READY FOR BASE ENTRY (Stake reset to base: {base_stake_used:.2f})"
         print(f"✅ [ENTRY RESULT] {entry_result_tag}. Total PnL: {total_profit:.2f}. {entry_tag}")
     
-    # تحديث الربح الكلي
+    # تحديث الربح الكلي والتحقق من هدف الربح (TP)
     current_data['current_profit'] += total_profit
     if current_data['current_profit'] >= current_data['tp_target']:
-        save_session_data(email, current_data)
-        stop_bot(email, clear_data=True, stop_reason="TP Reached") 
+        stop_reason_tp = "TP Reached"
+        save_session_data(email, current_data) 
+        stop_bot(email, clear_data=True, stop_reason=stop_reason_tp) 
         return
         
     # مسح التيكات وبدء التجميع للدخول الموقوت التالي
@@ -286,7 +312,6 @@ def handle_contract_settlement(email, contract_id, profit_loss):
     save_session_data(email, current_data)
     
     if not current_data['open_contract_ids']:
-        # يتم تطبيق منطق المضاعفة الذي يقوم بتحديث حالة الربح/الخسارة وإعادة التهيؤ
         apply_martingale_logic(email, profit_loss)
 
 
@@ -304,7 +329,7 @@ def start_new_single_trade(email, contract_type_param, barrier_sign):
     
     entry_type_tag = "BASE ENTRY" if current_data['current_step'] == 0 else f"MARTINGALE STEP {current_data['current_step']}"
     
-    print(f"🧠 [TIMED HL ENTRY] {entry_type_tag} | Contract: {contract_type_param} | Stake: {round(stake, 2):.2f}. Barrier: {barrier_sign}{BARRIER_OFFSET}")
+    print(f"🧠 [TIMED BARRIER ENTRY] {entry_type_tag} | Contract: {contract_type_param}{barrier_sign}{BARRIER_OFFSET} | Stake: {round(stake, 2):.2f}")
     
     
     current_data['last_entry_time'] = int(time.time())
@@ -348,24 +373,26 @@ def analyze_trend(email):
 
 
 def determine_barrier_sign_for_entry(email):
-    """ يحدد نوع العقد وإشارة الحاجز للدخول (Contrarian) """
+    """ 🎯 يحدد نوع العقد وإشارة الحاجز للدخول (المنطق الجديد) """
     
     trend = analyze_trend(email)
     
     if trend == "UP":
-        # صاعد (UP)، ندخل Lower (PUT) مع حاجز موجب
-        return "PUT", "+", "UP_CONTRARIAN"
+        # صاعد (UP)، ندخل Higher (-0.6)
+        # Higher = CALL
+        return "CALL", "-", "UP_TREND"
         
     elif trend == "DOWN":
-        # هابط (DOWN)، ندخل Higher (CALL) مع حاجز سالب
-        return "CALL", "-", "DOWN_CONTRARIAN"
+        # هابط (DOWN)، ندخل Lower (+0.6)
+        # Lower = PUT
+        return "PUT", "+", "DOWN_TREND"
         
     else:
         return None, None, "FLAT"
         
     
 def bot_core_logic(email, token, stake, tp, currency, account_type):
-    """ Core bot logic """
+    """ Core bot logic (UNCHANGED) """
     
     global is_contract_open, active_ws, last_ten_ticks
 
@@ -418,17 +445,14 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 current_price = float(tick_data['quote'])
                 tick_epoch = tick_data['epoch']
                 
-                # استخدام توقيت التيك المستلم لتحديد ثانية التنفيذ
                 tick_datetime = datetime.fromtimestamp(tick_epoch, tz=timezone.utc)
                 current_second = tick_datetime.second
                 
-                # حساب الفرق بالثواني بين الثانية الحالية وثانية الدخول
                 seconds_after_entry = current_second - ENTRY_SECOND
                 
                 current_data['last_valid_tick_price'] = current_price
                 current_data['last_tick_data'] = tick_data
                 
-                # إضافة التيك فقط إذا لم تكن هناك صفقة مفتوحة وجاهزون للتحليل
                 if not is_contract_open.get(email):
                     last_ten_ticks[email].append(tick_data)
                     print(f"📈 [TICK] Price: {current_price:.5f}. Ticks Received: {len(last_ten_ticks[email])}/{TICK_ANALYSIS_COUNT} | Second: {current_second}") 
@@ -436,21 +460,18 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 
                 # =========================================================================
                 # === منطق الدخول الموقوت (عند الثانية 40) ===
-                # الشرط: ليست هناك صفقة مفتوحة AND وصلنا لثانية التنفيذ أو بعدها بقليل (40, 41, 42...)
-                if not is_contract_open.get(email) and seconds_after_entry >= 0 and seconds_after_entry <= 5 : # نمنح سماحية 5 ثواني
+                if not is_contract_open.get(email) and seconds_after_entry >= 0 and seconds_after_entry <= 5 : 
                     
-                    # نتحقق أيضاً أننا لم ندخل بعد في هذه الدقيقة (لتجنب الدخول المتعدد)
                     last_entry_minute = datetime.fromtimestamp(current_data['last_entry_time']).minute if current_data['last_entry_time'] else -1
                     current_minute = tick_datetime.minute
                     
-                    if current_minute != last_entry_minute: # نضمن الدخول مرة واحدة فقط في الدقيقة
+                    if current_minute != last_entry_minute: 
                     
                         if len(last_ten_ticks[email]) >= TICK_ANALYSIS_COUNT:
                             
                             contract_type_param, barrier_sign, trend_type = determine_barrier_sign_for_entry(email)
                             
                             if trend_type != "FLAT":
-                                # 🎯 تنفيذ الصفقة فوراً (Base or Martingale)
                                 start_new_single_trade(email, contract_type_param=contract_type_param, barrier_sign=barrier_sign)
                                 
                             else:
@@ -462,14 +483,14 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 
                 # =========================================================================
 
-                save_session_data(email, current_data) # حفظ بيانات التيك الأخيرة
+                save_session_data(email, current_data) 
                 
             elif msg_type == 'buy':
                 contract_id = data['buy']['contract_id']
                 print(f"✅ [BUY SUCCESS] Contract ID: {contract_id}. Starting subscription...")
                 
                 current_data['open_contract_ids'].append(contract_id)
-                current_data['waiting_for_entry'] = False # لم نعد ننتظر
+                current_data['waiting_for_entry'] = False 
                 save_session_data(email, current_data)
                 
                 ws_app.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
@@ -535,7 +556,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
 
     print(f"🛑 [PROCESS] Bot process loop ended for {email}.")
 
-# --- (FLASK APP SETUP AND ROUTES - UNCHANGED) ---
+# --- (FLASK APP SETUP AND ROUTES - MINIMAL CHANGE) ---
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
@@ -625,7 +646,7 @@ CONTROL_FORM = """
             <p style="color:{{ 'green' if category == 'success' else ('blue' if category == 'info' else 'red') }};">{{ message }}</p>
         {% endfor %}
         
-        {% if session_data and session_data.stop_reason and session_data.stop_reason != "Running" %}
+        {% if session_data and session_data.stop_reason and session_data.stop_reason != "Running" and session_data.stop_reason != "Displayed" %}
             <p style="color:red; font-weight:bold;">Last Reason: {{ session_data.stop_reason }}</p>
         {% endif %}
     {% endif %}
@@ -633,8 +654,8 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set timing_logic = "Timed Entry @ :" + entry_second|string + "s (Contrarian " + tick_analysis_count|string + " Ticks)" %}
-    {% set strategy = CONTRACT_TYPE_BASE + " (HL) +/-" + barrier_offset + " (" + symbol + " - " + timing_logic + " - x" + martingale_multiplier|string + " Martingale, Max Steps " + martingale_steps|string + ", Max Loss " + max_consecutive_losses|string + ")" %}
+    {% set timing_logic = "Timed Entry @ :" + entry_second|string + "s (Trend-Following " + tick_analysis_count|string + " Ticks)" %}
+    {% set strategy = "UP->Higher-" + barrier_offset + " | DOWN->Lower+" + barrier_offset + " (" + symbol + " - " + timing_logic + " - x" + martingale_multiplier|string + " Martingale, Max Steps " + martingale_steps|string + ", Max Loss " + max_consecutive_losses|string + ")" %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
@@ -781,13 +802,13 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    flash(f'Bot started successfully. Strategy: Timed Entry @ :{ENTRY_SECOND}s (Contrarian {TICK_ANALYSIS_COUNT} Ticks, x{MARTINGALE_MULTIPLIER})', 'success')
+    flash(f'Bot started successfully. Strategy: UP->Higher-{BARRIER_OFFSET} / DOWN->Lower+{BARRIER_OFFSET} @ :{ENTRY_SECOND}s (x{MARTINGALE_MULTIPLIER})', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
 def stop_route():
     if 'email' not in session: return redirect(url_for('auth_page'))
-    stop_bot(session['email'], clear_data=True, stop_reason="Stopped Manually")
+    stop_bot(session['email'], clear_data=True, stop_reason="Stopped Manually") 
     flash('Bot stopped and session data cleared.', 'success')
     return redirect(url_for('index'))
 
