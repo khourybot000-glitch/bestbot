@@ -14,7 +14,7 @@ from flask import session as flask_session
 # BOT CONSTANT SETTINGS (HL Contrarian | Martingale x29 | Timed Entry)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
-SYMBOL = "R_100" 
+SYMBOL = "R_10" 
 DURATION = 5
 DURATION_UNIT = "t"
 
@@ -24,9 +24,9 @@ TICK_ANALYSIS_COUNT = 10 # 🎯 عدد التيكات المطلوبة للتح�
 
 # إعدادات المضاعفة
 MARTINGALE_STEPS = 1 
-MAX_CONSECUTIVE_LOSSES = 2
+MAX_CONSECUTIVE_LOSSES = 1
 MARTINGALE_MULTIPLIER = 29.0  
-BARRIER_OFFSET = "0.7" 
+BARRIER_OFFSET = "0.6" 
 
 CONTRACT_TYPE_BASE = "HL_CONTRARIAN" 
 
