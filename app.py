@@ -15,14 +15,14 @@ from collections import deque
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100" 
-DURATION = 5
+DURATION = 7
 DURATION_UNIT = "t"
 
 # إعدادات المضاعفة
 MARTINGALE_STEPS = 1  # تم رفع الخطوات لتناسب المضاعفة المتتالية
 MAX_CONSECUTIVE_LOSSES = 1 # تم رفع حد الخسارة لتناسب المضاعفة المتتالية
 MARTINGALE_MULTIPLIER = 1.0  
-BARRIER_OFFSET = "1" 
+BARRIER_OFFSET = "1.2" 
 
 CONTRACT_TYPE_BASE = "HL_CONTRARIAN" 
 
@@ -356,11 +356,11 @@ def determine_barrier_sign_for_base_entry(email):
     
     if trend == "UP":
         # صاعد (UP)، ندخل Lower (PUT) مع حاجز موجب (+0.7)
-        return "PUT", "+", "UP_CONTRARIAN"
+        return "CALL", "-", "UP_CONTRARIAN"
         
     elif trend == "DOWN":
         # هابط (DOWN)، ندخل Higher (CALL) مع حاجز سالب (-0.7)
-        return "CALL", "-", "DOWN_CONTRARIAN"
+        return "PUT", "+", "DOWN_CONTRARIAN"
         
     else:
         return None, None, "FLAT"
