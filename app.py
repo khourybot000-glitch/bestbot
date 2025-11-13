@@ -413,7 +413,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 
                 # === منطق الدخول الموحد (ينتظر الثانية 6) ===
                 if not is_contract_open.get(email):
-                    if current_second == 6:
+                    if current_second != 0:
                         start_new_dual_trade(email)
                 # === نهاية منطق الدخول ===
 
