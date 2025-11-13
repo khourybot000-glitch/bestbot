@@ -267,7 +267,7 @@ def apply_martingale_logic(email):
         current_data['consecutive_losses'] += 1
         current_data['current_step'] += 1 
         
-        # 🚨 التعديل الذي يضمن التوقف النهائي عند تجاوز الخسائر المتتالية
+        # 🚨 التوقف النهائي عند تجاوز الخسائر المتتالية
         if current_data['consecutive_losses'] > MAX_CONSECUTIVE_LOSSES:
             # التوقف ومسح البيانات
             save_session_data(email, current_data)
@@ -523,7 +523,9 @@ CONTROL_FORM = """
 <html>
 <head>
     <title>Trading Bot Control</title>
-    <meta http-equiv="refresh" content="5">
+    {% if session_data.get('is_running') %}
+    <meta http-equiv="refresh" content="2">
+    {% endif %}
     <style>
         body { font-family: Arial, sans-serif; background-color: #1a1a2e; color: #e0e0e0; padding: 20px; }
         .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 2px solid #3b4252; padding-bottom: 10px; }
