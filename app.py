@@ -14,15 +14,15 @@ from collections import deque
 # BOT CONSTANT SETTINGS (Separate 2-Tick Candle Reversal | R_25 | Martingale x2.4)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
-SYMBOL = "R_100"
+SYMBOL = "R_25"
 DURATION = 5
 DURATION_UNIT = "t"
 
 # إعدادات المضاعفة
-MARTINGALE_STEPS = 5                 
-MAX_CONSECUTIVE_LOSSES = 6           
-MARTINGALE_MULTIPLIER = 2.1          
-BARRIER_OFFSET_VALUE = "0.03"        
+MARTINGALE_STEPS = 3                 
+MAX_CONSECUTIVE_LOSSES = 4           
+MARTINGALE_MULTIPLIER = 2.4          
+BARRIER_OFFSET_VALUE = "0.04"        
 TICK_ANALYSIS_COUNT = 4              # عدد التكات اللازمة للتحليل (T0, T1, T2, T3)
 
 RECONNECT_DELAY = 1
@@ -35,7 +35,7 @@ CONTRACT_TYPE_LOWER = "PUT"
 # ==========================================================
 
 # ==========================================================
-# GLOBAL STATE (UPDATED)
+# GLOBAL STATE 
 # ==========================================================
 active_processes = {}
 active_ws = {}
@@ -67,10 +67,10 @@ DEFAULT_SESSION_STATE = {
     "current_contract_type": CONTRACT_TYPE_HIGHER,
     "current_barrier_offset": f"+{BARRIER_OFFSET_VALUE}",
     
-    "recent_ticks": deque(maxlen=TICK_ANALYSIS_COUNT)
+    "recent_ticks": deque(maxlen=TICK_ANALYSIS_COUNT) # سيتم تحويلها عند الحفظ
 }
 
-# --- Persistence functions (UNCHANGED) ---
+# --- Persistence functions (التصحيح هنا) ---
 def load_persistent_sessions():
     if not os.path.exists(ACTIVE_SESSIONS_FILE): return {}
     try:
@@ -79,23 +79,37 @@ def load_persistent_sessions():
             return json.loads(content) if content else {}
     except: return {}
 
+# 🚨 (تعديل) التأكد من تحويل deque إلى list قبل الحفظ
 def save_session_data(email, session_data):
     all_sessions = load_persistent_sessions()
-    all_sessions[email] = session_data
+    
+    # 🚨 معالجة: تحويل deque إلى قائمة عادية للحفظ في JSON
+    data_to_save = session_data.copy()
+    if isinstance(data_to_save.get("recent_ticks"), deque):
+        data_to_save["recent_ticks"] = list(data_to_save["recent_ticks"])
+        
+    all_sessions[email] = data_to_save
+    
     with open(ACTIVE_SESSIONS_FILE, 'w') as f:
         try: json.dump(all_sessions, f, indent=4)
         except: pass
 
+# 🚨 (تعديل) التأكد من تحويل القائمة المخزنة إلى deque عند التحميل
 def get_session_data(email):
     all_sessions = load_persistent_sessions()
-    if email in all_sessions:
-        data = all_sessions[email]
-        for key, default_val in DEFAULT_SESSION_STATE.items():
-            if key not in data: data[key] = default_val
-        if not isinstance(data.get("recent_ticks"), deque):
-            data["recent_ticks"] = deque(data.get("recent_ticks", []), maxlen=TICK_ANALYSIS_COUNT)
-        return data
-    return DEFAULT_SESSION_STATE.copy()
+    data = all_sessions.get(email, DEFAULT_SESSION_STATE.copy())
+    
+    # التأكد من ملء الحقول الافتراضية إذا كانت مفقودة
+    for key, default_val in DEFAULT_SESSION_STATE.items():
+        if key not in data: data[key] = default_val
+        
+    # 🚨 معالجة: تحويل القائمة المخزنة إلى deque قبل الاستخدام
+    if not isinstance(data.get("recent_ticks"), deque):
+        # التحقق من أن القيمة ليست None ثم تحويلها
+        tick_data = data.get("recent_ticks", []) or [] 
+        data["recent_ticks"] = deque(tick_data, maxlen=TICK_ANALYSIS_COUNT)
+        
+    return data
 
 def delete_session_data(email):
     all_sessions = load_persistent_sessions()
@@ -117,8 +131,8 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
     if current_data.get("is_running") is True:
         current_data["is_running"] = False
         current_data["stop_reason"] = stop_reason
-        current_data["recent_ticks"] = list(current_data["recent_ticks"])
-        save_session_data(email, current_data)
+        # 🚨 لم يعد ضرورياً التحويل هنا لأن save_session_data تقوم به
+        save_session_data(email, current_data) 
 
     with PROCESS_LOCK:
         if email in active_processes:
@@ -167,11 +181,14 @@ def send_trade_order(email, stake, currency, contract_type_param, barrier_offset
         
     ws_app = active_ws[email]
     
+    # التأكد من تقريب الرهان لرقمين عشريين
+    stake_rounded = round(stake, 2)
+    
     trade_request = {
         "buy": 1,
-        "price": round(stake, 2),
+        "price": stake_rounded,
         "parameters": {
-            "amount": round(stake, 2),
+            "amount": stake_rounded,
             "basis": "stake",
             "contract_type": contract_type_param,
             "currency": currency,
@@ -194,6 +211,7 @@ def analyze_and_set_trade(email):
     global TICK_ANALYSIS_COUNT, BARRIER_OFFSET_VALUE, CONTRACT_TYPE_HIGHER, CONTRACT_TYPE_LOWER
     current_data = get_session_data(email)
     
+    # يتم تحويل القائمة المخزنة في الجلسة إلى deque في دالة get_session_data
     ticks = list(current_data['recent_ticks'])
     
     # يجب أن يكون لدينا 4 تكات: T0, T1, T2, T3
@@ -201,38 +219,32 @@ def analyze_and_set_trade(email):
         return False 
     
     # التكات المخزنة هي T0 (الأقدم), T1, T2, T3 (الأحدث)
-    # Candle 1: Open=T0, Close=T1
-    # Candle 2: Open=T2, Close=T3
-    
     T0 = ticks[0] # فتح الشمعة 1
     T1 = ticks[1] # إغلاق الشمعة 1
     T2 = ticks[2] # فتح الشمعة 2
     T3 = ticks[3] # إغلاق الشمعة 2
     
     # تحليل الشمعة الأولى (T0 vs T1)
-    is_candle1_up = (T0 < T1) # صعود: الإغلاق (T1) أكبر من الفتح (T0)
-    is_candle1_down = (T0 > T1) # هبوط: الإغلاق (T1) أصغر من الفتح (T0)
+    is_candle1_up = (T0 < T1) 
+    is_candle1_down = (T0 > T1) 
     
     # تحليل الشمعة الثانية (T2 vs T3)
-    is_candle2_up = (T2 < T3) # صعود: الإغلاق (T3) أكبر من الفتح (T2)
-    is_candle2_down = (T2 > T3) # هبوط: الإغلاق (T3) أصغر من الفتح (T2)
-    
+    is_candle2_up = (T2 < T3) 
+    is_candle2_down = (T2 > T3) 
     
     trade_signal = None
     
     # 1. سيناريو الهبوط (Lower): الشمعة 1 صعود ثم الشمعة 2 هبوط (انعكاس)
-    # T0 < T1 (صعود) و T2 > T3 (هبوط)
     if is_candle1_up and is_candle2_down:
         current_data['current_contract_type'] = CONTRACT_TYPE_LOWER
         current_data['current_barrier_offset'] = f"-{BARRIER_OFFSET_VALUE}" 
-        trade_signal = "C1: Up (T0<T1), C2: Down (T2>T3) - Lower"
+        trade_signal = "C1: Up, C2: Down - Lower"
         
     # 2. سيناريو الصعود (Higher): الشمعة 1 هبوط ثم الشمعة 2 صعود (انعكاس)
-    # T0 > T1 (هبوط) و T2 < T3 (صعود)
     elif is_candle1_down and is_candle2_up:
         current_data['current_contract_type'] = CONTRACT_TYPE_HIGHER
         current_data['current_barrier_offset'] = f"+{BARRIER_OFFSET_VALUE}" 
-        trade_signal = "C1: Down (T0>T1), C2: Up (T2<T3) - Higher"
+        trade_signal = "C1: Down, C2: Up - Higher"
         
     else:
         # لا يوجد نمط الانعكاس المطلوب
@@ -310,8 +322,7 @@ def apply_martingale_logic(email):
     currency = current_data.get('currency', 'USD')
     print(f"[LOG {email}] PNL: {currency} {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Stake: {current_data['current_stake']:.2f} | Strategy: Separate 2-Tick Candle Reversal.")
     
-    # تحويل deque إلى list قبل الحفظ
-    current_data["recent_ticks"] = list(current_data["recent_ticks"])
+    # 🚨 لم يعد ضرورياً التحويل هنا لأن save_session_data تقوم به
     save_session_data(email, current_data)
     
     
@@ -327,8 +338,7 @@ def handle_contract_settlement(email, contract_id, profit_loss):
     if contract_id in current_data['open_contract_ids']:
         current_data['open_contract_ids'].remove(contract_id)
         
-    # تحويل deque إلى list قبل الحفظ
-    current_data["recent_ticks"] = list(current_data["recent_ticks"])
+    # 🚨 لم يعد ضرورياً التحويل هنا لأن save_session_data تقوم به
     save_session_data(email, current_data)
     
     # بما أنها صفقة واحدة، ننفذ منطق المضاعفة فوراً
@@ -369,8 +379,7 @@ def start_new_trade(email):
     current_data['last_entry_time'] = int(time.time())
     current_data['last_entry_price'] = current_data.get('last_valid_tick_price', 0.0)
 
-    # تحويل deque إلى list قبل الحفظ
-    current_data["recent_ticks"] = list(current_data["recent_ticks"])
+    # 🚨 لم يعد ضرورياً التحويل هنا لأن save_session_data تقوم به
     save_session_data(email, current_data)
 
 
@@ -399,10 +408,9 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         
         "current_contract_type": CONTRACT_TYPE_HIGHER,
         "current_barrier_offset": initial_barrier,
-        "recent_ticks": deque(maxlen=TICK_ANALYSIS_COUNT)
+        "recent_ticks": deque(maxlen=TICK_ANALYSIS_COUNT) # هنا يجب أن تكون deque للاستخدام الفوري
     })
-    # تحويل deque إلى list قبل الحفظ
-    session_data["recent_ticks"] = list(session_data["recent_ticks"])
+    # 🚨 لم يعد ضرورياً التحويل هنا لأن save_session_data تقوم به
     save_session_data(email, session_data)
 
     while True:
@@ -433,9 +441,8 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 current_price = float(data['tick']['quote'])
                 
                 # تحديث التكات وتحويل القائمة المخزنة إلى deque
-                recent_ticks_deque = deque(current_data.get("recent_ticks", []), maxlen=TICK_ANALYSIS_COUNT)
+                recent_ticks_deque = current_data['recent_ticks'] # القيمة هنا هي deque بفضل get_session_data
                 recent_ticks_deque.append(current_price)
-                current_data['recent_ticks'] = list(recent_ticks_deque)
                 
                 current_data['last_valid_tick_price'] = current_price
                 
@@ -450,7 +457,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             elif msg_type == 'buy':
                 contract_id = data['buy']['contract_id']
                 current_data['open_contract_ids'].append(contract_id)
-                current_data["recent_ticks"] = list(current_data["recent_ticks"])
+                # 🚨 لم يعد ضرورياً التحويل هنا لأن save_session_data تقوم به
                 save_session_data(email, current_data)
                 
                 ws_app.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
@@ -676,8 +683,7 @@ def index():
         elif reason.startswith("API Buy Error"): flash(f"❌ API Error: {reason}. Check your token and account status.", 'error')
             
         session_data['stop_reason'] = "Displayed"
-        # تحويل deque إلى list قبل الحفظ
-        session_data["recent_ticks"] = list(session_data.get("recent_ticks", []))
+        # 🚨 لم يعد ضرورياً التحويل هنا لأن save_session_data تقوم به
         save_session_data(email, session_data)
         delete_session_data(email)
 
