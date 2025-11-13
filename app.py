@@ -10,7 +10,7 @@ from multiprocessing import Process
 from threading import Lock
 
 # ==========================================================
-# BOT CONSTANT SETTINGS (R_25 | Single Higher/Lower Fixed Martingale | x2.4 Martingale)
+# BOT CONSTANT SETTINGS (R_25 | Single Reversal Martingale | x2.4 Martingale)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
@@ -69,7 +69,11 @@ DEFAULT_SESSION_STATE = {
     "last_contract_type": CONTRACT_TYPE_HIGHER,  
     "last_barrier_offset": f"+{BARRIER_OFFSET_VALUE}", 
     "current_contract_type": CONTRACT_TYPE_HIGHER,
-    "current_barrier_offset": f"+{BARRIER_OFFSET_VALUE}"
+    "current_barrier_offset": f"+{BARRIER_OFFSET_VALUE}",
+    
+    # 💡 متغيرات جديدة للتقليب الفردي
+    "martingale_fixed_contract": None, 
+    "martingale_fixed_barrier": None
 }
 
 # --- Persistence functions (UNCHANGED) ---
@@ -146,7 +150,7 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
 # --- End of Persistence and Control functions ---
 
 # ==========================================================
-# TRADING BOT FUNCTIONS (MODIFIED FOR FIXED MARTINGALE)
+# TRADING BOT FUNCTIONS (MODIFIED FOR SINGLE REVERSAL MARTINGALE)
 # ==========================================================
 
 def calculate_martingale_stake(base_stake, current_step, multiplier):
@@ -191,7 +195,7 @@ def send_trade_order(email, stake, currency, contract_type_param, barrier_offset
 
 
 def apply_martingale_logic(email):
-    """ 💡 التعديل: يطبق منطق المضاعفة الثابتة (Fixed Martingale) """
+    """ 💡 التعديل: يطبق منطق التقليب الفردي (Single Reversal Martingale) """
     global is_contract_open, MARTINGALE_MULTIPLIER, MARTINGALE_STEPS, MAX_CONSECUTIVE_LOSSES, BARRIER_OFFSET_VALUE, CONTRACT_TYPE_HIGHER, CONTRACT_TYPE_LOWER
     current_data = get_session_data(email)
     
@@ -215,7 +219,7 @@ def apply_martingale_logic(email):
     base_stake_used = current_data['base_stake']
     entry_tag = "WAITING @ SEC 6"
     
-    # ❌ Loss Condition (خسارة صفقة واحدة) - تثبيت الصفقة والمضاعفة
+    # ❌ Loss Condition (خسارة صفقة واحدة)
     if total_profit < 0:
         current_data['total_losses'] += 1
         current_data['consecutive_losses'] += 1
@@ -231,22 +235,54 @@ def apply_martingale_logic(email):
             stop_bot(email, clear_data=True, stop_reason=f"SL Reached: Exceeded {MARTINGALE_STEPS} Martingale steps.")
             return
             
-        # منطق المضاعفة الثابتة: الصفقة التالية هي نفسها الصفقة التي خسرت
-        current_data['current_contract_type'] = current_data['last_contract_type']
-        current_data['current_barrier_offset'] = current_data['last_barrier_offset']
-        
+        # 💡 منطق التقليب الفردي (Single Reversal Logic)
+        if current_data['current_step'] == 1:
+            # الخسارة الأولى: نقوم بالتقليب (Reversal)
+            
+            # تحديد نوع العقد الجديد (العكسي)
+            reversed_contract = CONTRACT_TYPE_LOWER if current_data['last_contract_type'] == CONTRACT_TYPE_HIGHER else CONTRACT_TYPE_HIGHER
+            
+            # تحديد الحاجز الجديد (العكسي)
+            if current_data['last_barrier_offset'].startswith('+'):
+                reversed_barrier = f"-{BARRIER_OFFSET_VALUE}"
+            else:
+                reversed_barrier = f"+{BARRIER_OFFSET_VALUE}"
+                
+            current_data['current_contract_type'] = reversed_contract
+            current_data['current_barrier_offset'] = reversed_barrier
+            
+            # تخزين هذا النوع لجميع المضاعفات اللاحقة
+            current_data['martingale_fixed_contract'] = reversed_contract
+            current_data['martingale_fixed_barrier'] = reversed_barrier
+            
+        elif current_data['current_step'] > 1:
+            # المضاعفات اللاحقة: نستخدم الصفقة الثابتة المخزنة (نفس الصفقة التي تم تقليبها في الخطوة 1)
+            if current_data['martingale_fixed_contract']:
+                current_data['current_contract_type'] = current_data['martingale_fixed_contract']
+                current_data['current_barrier_offset'] = current_data['martingale_fixed_barrier']
+            else:
+                # احتياطي: لو حدث خطأ ولم يتم التخزين (يجب ألا يحدث)
+                print("🚨 [ERROR] Martingale fixed contract not set. Using last trade type.")
+                current_data['current_contract_type'] = current_data['last_contract_type']
+                current_data['current_barrier_offset'] = current_data['last_barrier_offset']
+
+        # حساب الرهان الجديد
         new_stake = calculate_martingale_stake(base_stake_used, current_data['current_step'], MARTINGALE_MULTIPLIER)
         
         current_data['current_stake_lower'] = new_stake
         current_data['current_stake_higher'] = new_stake
         
-        print(f"🔄 [LOSS - FIXED] PnL: {total_profit:.2f}. Step {current_data['current_step']}. Next: {current_data['current_contract_type']} {current_data['current_barrier_offset']}. Next Stake: {round(new_stake, 2):.2f}. Waiting for Sec 6.")
+        print(f"🔄 [LOSS - MARTINGALE] PnL: {total_profit:.2f}. Step {current_data['current_step']}. Next: {current_data['current_contract_type']} {current_data['current_barrier_offset']}. Next Stake: {round(new_stake, 2):.2f}. Waiting for Sec 6.")
         
     # ✅ Win or Draw Condition (فوز أو تعادل) - إعادة التعيين والعودة للبداية
     else:
         current_data['total_wins'] += 1 if total_profit > 0 else 0
         current_data['current_step'] = 0
         current_data['consecutive_losses'] = 0
+        
+        # إعادة تعيين متغيرات التقليب الثابتة
+        current_data['martingale_fixed_contract'] = None
+        current_data['martingale_fixed_barrier'] = None
         
         # إعادة الرهان إلى القيمة الأساسية
         current_data['current_stake_lower'] = base_stake_used
@@ -255,7 +291,7 @@ def apply_martingale_logic(email):
         entry_result_tag = "WIN" if total_profit > 0 else "DRAW"
         print(f"✅ [ENTRY RESULT] {entry_result_tag}. Total PnL: {total_profit:.2f}. Stake reset to base: {base_stake_used:.2f}.")
         
-        # عند الفوز، الصفقة التالية تعود للحالة الافتراضية (Higher +0.04)
+        # الصفقة التالية تعود للحالة الافتراضية (Higher +0.04)
         current_data['current_contract_type'] = CONTRACT_TYPE_HIGHER
         current_data['current_barrier_offset'] = f"+{BARRIER_OFFSET_VALUE}"
         
@@ -318,7 +354,7 @@ def start_new_dual_trade(email):
     
     # إرسال الصفقة بناءً على الحالة الحالية
     if send_trade_order(email, stake_to_use, currency_to_use, contract_type, barrier):
-        # تحديث آخر نوع صفقة تم فتحها (للاستخدام في المضاعفة الثابتة عند الخسارة)
+        # تحديث آخر نوع صفقة تم فتحها (للاستخدام في أول تقليب)
         current_data['last_contract_type'] = contract_type
         current_data['last_barrier_offset'] = barrier
         pass
@@ -365,7 +401,9 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         "last_contract_type": CONTRACT_TYPE_HIGHER,
         "last_barrier_offset": initial_barrier,
         "current_contract_type": CONTRACT_TYPE_HIGHER,
-        "current_barrier_offset": initial_barrier
+        "current_barrier_offset": initial_barrier,
+        "martingale_fixed_contract": None, 
+        "martingale_fixed_barrier": None
     })
     save_session_data(email, session_data)
 
@@ -559,7 +597,7 @@ CONTROL_FORM = """
 
 {% if session_data and session_data.is_running %}
     {% set timing_logic = "Always @ Sec 6 (R_25)" %}
-    {% set strategy = "SINGLE FIXED MARTINGALE (" + session_data.last_contract_type + " " + session_data.last_barrier_offset + " - x" + martingale_multiplier|round(2)|string + " Martingale, Max Steps " + martingale_steps|string + ")" %}
+    {% set strategy = "SINGLE REVERSAL MARTINGALE (Step 1 Reversed, Then Fixed) - x" + martingale_multiplier|round(2)|string + " Martingale, Max Steps " + martingale_steps|string + "" %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
@@ -700,7 +738,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: FIXED MARTINGALE (R_25 - Starts Higher +{BARRIER_OFFSET_VALUE}) with x{MARTINGALE_MULTIPLIER} Martingale (Max {MARTINGALE_STEPS} Steps, Max {MAX_CONSECUTIVE_LOSSES} Losses)', 'success')
+    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: Single Reversal Martingale (R_25 - Starts Higher +{BARRIER_OFFSET_VALUE}) with x{MARTINGALE_MULTIPLIER} Martingale (Max {MARTINGALE_STEPS} Steps, Max {MAX_CONSECUTIVE_LOSSES} Losses)', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
