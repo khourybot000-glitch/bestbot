@@ -207,53 +207,54 @@ def send_trade_order(email, stake, currency, contract_type_param, barrier_offset
         return False
 
 def analyze_and_set_trade(email):
-    """ 💡 تحليل حركة انعكاس "شمعتين منفصلتين" (Separate 2-Tick Candle Reversal) """
+    """ 💡 تحليل حركة انعكاس "شمعتين منفصلتين" (Separate 2-Tick Candle Reversal) 
+        *** تم تعديل المنطق ليعكس إشارات الدخول الأصلية! ***
+    """
     global TICK_ANALYSIS_COUNT, BARRIER_OFFSET_VALUE, CONTRACT_TYPE_HIGHER, CONTRACT_TYPE_LOWER
     current_data = get_session_data(email)
     
-    # يتم تحويل القائمة المخزنة في الجلسة إلى deque في دالة get_session_data
     ticks = list(current_data['recent_ticks'])
     
-    # يجب أن يكون لدينا 4 تكات: T0, T1, T2, T3
     if len(ticks) < TICK_ANALYSIS_COUNT:
         return False 
     
-    # التكات المخزنة هي T0 (الأقدم), T1, T2, T3 (الأحدث)
-    T0 = ticks[0] # فتح الشمعة 1
-    T1 = ticks[1] # إغلاق الشمعة 1
-    T2 = ticks[2] # فتح الشمعة 2
-    T3 = ticks[3] # إغلاق الشمعة 2
+    T0 = ticks[0] 
+    T1 = ticks[1] 
+    T2 = ticks[2] 
+    T3 = ticks[3] 
     
-    # تحليل الشمعة الأولى (T0 vs T1)
     is_candle1_up = (T0 < T1) 
     is_candle1_down = (T0 > T1) 
     
-    # تحليل الشمعة الثانية (T2 vs T3)
     is_candle2_up = (T2 < T3) 
     is_candle2_down = (T2 > T3) 
     
+    
     trade_signal = None
     
-    # 1. سيناريو الهبوط (Lower): الشمعة 1 صعود ثم الشمعة 2 هبوط (انعكاس)
+    # 1. سيناريو الهبوط الأصلي (C1:Up, C2:Down)
+    #  **التعديل:** بدلاً من PUT، ندخل CALL (Higher)
     if is_candle1_up and is_candle2_down:
-        current_data['current_contract_type'] = CONTRACT_TYPE_LOWER
-        current_data['current_barrier_offset'] = f"-{BARRIER_OFFSET_VALUE}" 
-        trade_signal = "C1: Up, C2: Down - Lower"
-        
-    # 2. سيناريو الصعود (Higher): الشمعة 1 هبوط ثم الشمعة 2 صعود (انعكاس)
-    elif is_candle1_down and is_candle2_up:
+        # 🚨 تم قلب الإشارة هنا: أصبح الدخول صعود (Higher)
         current_data['current_contract_type'] = CONTRACT_TYPE_HIGHER
         current_data['current_barrier_offset'] = f"+{BARRIER_OFFSET_VALUE}" 
-        trade_signal = "C1: Down, C2: Up - Higher"
+        trade_signal = "C1: Up, C2: Down - Higher (Reversed)"
+        
+    # 2. سيناريو الصعود الأصلي (C1:Down, C2:Up)
+    #  **التعديل:** بدلاً من CALL، ندخل PUT (Lower)
+    elif is_candle1_down and is_candle2_up:
+        # 🚨 تم قلب الإشارة هنا: أصبح الدخول هبوط (Lower)
+        current_data['current_contract_type'] = CONTRACT_TYPE_LOWER
+        current_data['current_barrier_offset'] = f"-{BARRIER_OFFSET_VALUE}" 
+        trade_signal = "C1: Down, C2: Up - Lower (Reversed)"
         
     else:
-        # لا يوجد نمط الانعكاس المطلوب
         return False
 
     # إذا تم تحديد نوع الصفقة، نقوم بالشراء فوراً
     current_data['current_stake'] = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'], MARTINGALE_MULTIPLIER)
     save_session_data(email, current_data)
-    print(f"✅ [SEPARATE CANDLE REVERSAL] Entry: {current_data['current_contract_type']} {current_data['current_barrier_offset']} | Pattern: {trade_signal}")
+    print(f"✅ [REVERSED CANDLE] Entry: {current_data['current_contract_type']} {current_data['current_barrier_offset']} | Pattern: {trade_signal}")
     start_new_trade(email)
     return True
 
