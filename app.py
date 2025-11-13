@@ -13,15 +13,15 @@ from threading import Lock
 # BOT CONSTANT SETTINGS (R_25 | Single Higher/Lower Reversal | x2.4 Martingale)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
-SYMBOL = "R_25"
-DURATION = 5
+SYMBOL = "R_100"
+DURATION = 10
 DURATION_UNIT = "t"
 
 # إعدادات المضاعفة (تم تعديلها لتناسب صفقة واحدة)
 MARTINGALE_STEPS = 5                 # عدد خطوات المضاعفة المسموح بها
-MAX_CONSECUTIVE_LOSSES = 5           # أقصى عدد للخسائر المتتالية قبل التوقف
-MARTINGALE_MULTIPLIER = 2.4          # معامل المضاعفة للصفقة الواحدة
-BARRIER_OFFSET_VALUE = "0.04"        # 💡 التعديل: قيمة الحاجز المجردة (بدون إشارة)
+MAX_CONSECUTIVE_LOSSES = 6           # أقصى عدد للخسائر المتتالية قبل التوقف
+MARTINGALE_MULTIPLIER = 2          # معامل المضاعفة للصفقة الواحدة
+BARRIER_OFFSET_VALUE = "0.02"        # 💡 التعديل: قيمة الحاجز المجردة (بدون إشارة)
 
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
