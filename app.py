@@ -14,15 +14,15 @@ from collections import deque
 # BOT CONSTANT SETTINGS (Separate 2-Tick Candle Reversal | R_25 | Martingale x2.4)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
-SYMBOL = "R_25"
+SYMBOL = "R_100"
 DURATION = 5
 DURATION_UNIT = "t"
 
 # إعدادات المضاعفة
-MARTINGALE_STEPS = 3                 
-MAX_CONSECUTIVE_LOSSES = 4           
-MARTINGALE_MULTIPLIER = 2.4          
-BARRIER_OFFSET_VALUE = "0.04"        
+MARTINGALE_STEPS = 5                 
+MAX_CONSECUTIVE_LOSSES = 6           
+MARTINGALE_MULTIPLIER = 2          
+BARRIER_OFFSET_VALUE = "0.03"        
 TICK_ANALYSIS_COUNT = 4              # عدد التكات اللازمة للتحليل (T0, T1, T2, T3)
 
 RECONNECT_DELAY = 1
