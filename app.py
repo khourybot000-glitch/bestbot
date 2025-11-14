@@ -16,7 +16,7 @@ import math
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
-DURATION = 7
+DURATION = 5
 DURATION_UNIT = "t"
 
 # إعدادات المضاعفة
@@ -214,13 +214,11 @@ def process_timed_entry(email):
     ticks = list(current_data['recent_ticks'])
     
     if len(ticks) < TICK_ANALYSIS_COUNT:
-        # لا يوجد ما يكفي من التيكات للتحليل
-        current_data['recent_ticks'].clear() # مسح التيكات لتجنب استخدام بيانات قديمة جداً في الفرصة القادمة
-        save_session_data(email, current_data)
-        print(f"🚫 [10-TICK CONT] Timed Analysis at {datetime.now().second}s: Insufficient Ticks ({len(ticks)}/{TICK_ANALYSIS_COUNT}). Skipping entry and clearing ticks.")
+        # لا يوجد ما يكفي من التيكات للتحليل. لن نمسح التيكات ونعتمد على deque للحفاظ على الـ 10 تيك الأحدث.
+        print(f"🚫 [10-TICK CONT] Timed Analysis at {datetime.now().second}s: Insufficient Ticks ({len(ticks)}/{TICK_ANALYSIS_COUNT}). Skipping entry.")
         return False 
     
-    # === تحليل شمعة الـ 10 تيك ===
+    # === تحليل شمعة الـ 10 تيك (اكتملت 10 تيكات) ===
     C_Open = ticks[0]
     C_Close = ticks[TICK_ANALYSIS_COUNT - 1]
     
@@ -435,13 +433,15 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 save_session_data(email, current_data)
                 
             elif msg_type == 'time':
-                current_time_dt = datetime.fromtimestamp(data['time'], tz=timezone.utc)
+                # نستخدم timestamp من السيرفر لضمان دقة التوقيت
+                server_time = int(data['time'])
+                current_time_dt = datetime.fromtimestamp(server_time, tz=timezone.utc)
                 current_second = current_time_dt.second
                 
                 # الدخول يتم فقط في الثواني المحددة
                 if current_second in ENTRY_SECONDS:
-                    # نتحقق من عدم تكرار الدخول في نفس الدورة الزمنية (20 ثانية) إذا حدث تأخير بسيط
-                    if (int(data['time']) - current_data['last_trade_time']) >= 15 and not is_contract_open.get(email):
+                    # نتحقق من عدم تكرار الدخول في نفس الدورة الزمنية (20 ثانية)
+                    if (server_time - current_data['last_trade_time']) >= 15 and not is_contract_open.get(email):
                         # 🚨 التحليل والدخول يتم هنا فقط 🚨
                         process_timed_entry(email)
 
