@@ -16,7 +16,7 @@ import math
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
-DURATION = 5
+DURATION = 7
 DURATION_UNIT = "t"
 
 # إعدادات المضاعفة
@@ -438,7 +438,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 current_time_dt = datetime.fromtimestamp(server_time, tz=timezone.utc)
                 current_second = current_time_dt.second
                 
-                # الدخول يتم فقط في الثواني المحددة
+                # الدخول يتم فقط في الثواني المحددة (التحقق المباشر)
                 if current_second in ENTRY_SECONDS:
                     # نتحقق من عدم تكرار الدخول في نفس الدورة الزمنية (20 ثانية)
                     if (server_time - current_data['last_trade_time']) >= 15 and not is_contract_open.get(email):
