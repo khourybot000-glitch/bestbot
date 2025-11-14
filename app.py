@@ -11,7 +11,7 @@ from threading import Lock
 from collections import deque 
 
 # ==========================================================
-# BOT CONSTANT SETTINGS (Double 10-Tick Candle Trend Continuation | R_100 | Martingale x2.1)
+# BOT CONSTANT SETTINGS (Triple 15-Tick Candle Trend Reversal + Sticky Martingale | R_100 | Martingale x2.1)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
@@ -23,14 +23,14 @@ MARTINGALE_STEPS = 5
 MAX_CONSECUTIVE_LOSSES = 6           
 MARTINGALE_MULTIPLIER = 2.1          
 BARRIER_OFFSET_VALUE = "0.03"        
-TICK_ANALYSIS_COUNT = 10             # 🚨 تم التعديل: تحليل 10 تكات (شمعتين)
+TICK_ANALYSIS_COUNT = 15             # تحليل 15 تيك (ثلاث شمعات)
 
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 
-CONTRACT_TYPE_HIGHER = "PUT"
-CONTRACT_TYPE_LOWER = "CALL"          
+CONTRACT_TYPE_HIGHER = "CALL"
+CONTRACT_TYPE_LOWER = "PUT"          
 
 # ==========================================================
 
@@ -66,7 +66,7 @@ DEFAULT_SESSION_STATE = {
     "current_contract_type": CONTRACT_TYPE_HIGHER,
     "current_barrier_offset": f"+{BARRIER_OFFSET_VALUE}", 
     
-    "recent_ticks": deque(maxlen=TICK_ANALYSIS_COUNT) # الحجم الآن 10
+    "recent_ticks": deque(maxlen=TICK_ANALYSIS_COUNT) 
 }
 
 # --- Persistence functions (معالجة deque) ---
@@ -82,7 +82,6 @@ def save_session_data(email, session_data):
     all_sessions = load_persistent_sessions()
     data_to_save = session_data.copy()
     if isinstance(data_to_save.get("recent_ticks"), deque):
-        # نضمن حفظ الـ deque بالحجم الصحيح
         data_to_save["recent_ticks"] = list(data_to_save["recent_ticks"])
         
     all_sessions[email] = data_to_save
@@ -100,7 +99,6 @@ def get_session_data(email):
         
     if not isinstance(data.get("recent_ticks"), deque):
         tick_data = data.get("recent_ticks", []) or [] 
-        # نضمن تحميل الـ deque بالحجم الجديد 10
         data["recent_ticks"] = deque(tick_data, maxlen=TICK_ANALYSIS_COUNT)
         
     return data
@@ -144,11 +142,9 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
     if email in is_contract_open: is_contract_open[email] = False
 
     if clear_data:
-        # نحفظ البيانات مؤقتاً لعرض رسالة التوقف (SL/TP) ثم يتم مسحها في دالة index()
         if stop_reason in [f"SL Reached: {MAX_CONSECUTIVE_LOSSES} consecutive losses.", "TP Reached", "API Buy Error"]:
             print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}). Data kept temporarily for display.")
         else:
-            # يتم مسح البيانات عند الإيقاف اليدوي أو الانتهاء الطبيعي
             delete_session_data(email)
             print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}) and session data cleared from file.")
     else:
@@ -199,58 +195,58 @@ def send_trade_order(email, stake, currency, contract_type_param, barrier_offset
         return False
         
 def analyze_and_set_trade(email):
-    """ 💡 تحليل حركة استمرار اتجاه شمعتين 10-Tick. """
+    """ تحليل حركة انعكاس اتجاه ثلاث شمعات 15-Tick. يتم التنفيذ فقط إذا لم يكن هناك صفقة مفتوحة. """
     global TICK_ANALYSIS_COUNT, BARRIER_OFFSET_VALUE, CONTRACT_TYPE_HIGHER, CONTRACT_TYPE_LOWER
     current_data = get_session_data(email)
+
+    if is_contract_open.get(email):
+        # لا نحلل أو ندخل إذا كانت المضاعفة المستمرة (Sticky Martingale) قيد العمل
+        return False 
     
     ticks = list(current_data['recent_ticks'])
     
-    # 🚨 التحقق من توفر 10 تكات
     if len(ticks) < TICK_ANALYSIS_COUNT:
         return False 
     
-    # === تحليل الشمعة الأولى (C1) والشمعة الثانية (C2) ===
-    C1_Open = ticks[0] 
-    C1_Close = ticks[4] 
-    C2_Open = ticks[5]
-    C2_Close = ticks[9]
+    # === تحليل الشمعات الثلاث ===
+    C1_Open = ticks[0]; C1_Close = ticks[4] 
+    C2_Open = ticks[5]; C2_Close = ticks[9]
+    C3_Open = ticks[10]; C3_Close = ticks[14]
     
-    # تحديد اتجاه كل شمعة
-    is_candle1_up = (C1_Open < C1_Close) 
-    is_candle1_down = (C1_Open > C1_Close)
-    is_candle2_up = (C2_Open < C2_Close)
-    is_candle2_down = (C2_Open > C2_Close)
+    is_c1_up = (C1_Open < C1_Close); is_c1_down = (C1_Open > C1_Close)
+    is_c2_up = (C2_Open < C2_Close); is_c2_down = (C2_Open > C2_Close)
+    is_c3_up = (C3_Open < C3_Close); is_c3_down = (C3_Open > C3_Close)
     
     trade_signal = None
     
-    # 1. سيناريو الصعود (Higher): C1 صعود AND C2 صعود
-    if is_candle1_up and is_candle2_up:
-        current_data['current_contract_type'] = CONTRACT_TYPE_HIGHER
+    # 1. سيناريو الهبوط (PUT): ثلاث شمعات صعود متتالية
+    if is_c1_up and is_c2_up and is_c3_up:
+        current_data['current_contract_type'] = CONTRACT_TYPE_LOWER # دخول معاكس
         current_data['current_barrier_offset'] = f"-{BARRIER_OFFSET_VALUE}" 
-        trade_signal = "Double 10T: Up-Up - Higher (Strong Continuation)"
+        trade_signal = "Triple 15T: Up-Up-Up -> Lower (Reversal Signal)"
         
-    # 2. سيناريو الهبوط (Lower): C1 هبوط AND C2 هبوط
-    elif is_candle1_down and is_candle2_down:
-        current_data['current_contract_type'] = CONTRACT_TYPE_LOWER
+    # 2. سيناريو الصعود (CALL): ثلاث شمعات هبوط متتالية
+    elif is_c1_down and is_c2_down and is_c3_down:
+        current_data['current_contract_type'] = CONTRACT_TYPE_HIGHER # دخول معاكس
         current_data['current_barrier_offset'] = f"+{BARRIER_OFFSET_VALUE}" 
-        trade_signal = "Double 10T: Down-Down - Lower (Strong Continuation)"
+        trade_signal = "Triple 15T: Down-Down-Down -> Higher (Reversal Signal)"
         
     else:
-        # إذا لم يكن هناك نموذج استمرار قوي، لا دخول
         return False
 
     current_data['current_stake'] = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'], MARTINGALE_MULTIPLIER)
     
-    # 🚨 مسح التكات بعد التحليل
+    # مسح التكات بعد التحليل
     current_data['recent_ticks'].clear() 
     
     save_session_data(email, current_data)
-    print(f"✅ [10-TICK CONT] Entry: {current_data['current_contract_type']} {current_data['current_barrier_offset']} | Pattern: {trade_signal}")
-    start_new_trade(email)
+    print(f"✅ [15-TICK REV] Base Entry: {current_data['current_contract_type']} {current_data['current_barrier_offset']} | Pattern: {trade_signal}")
+    start_new_trade(email, immediate_retry=False) # أول دخول يكون بعد التحليل
     return True
 
         
 def apply_martingale_logic(email):
+    """ 🚨 منطق المضاعفة المستمرة (Sticky Martingale) """
     global is_contract_open, MARTINGALE_MULTIPLIER, MARTINGALE_STEPS, MAX_CONSECUTIVE_LOSSES
     current_data = get_session_data(email)
     
@@ -270,18 +266,18 @@ def apply_martingale_logic(email):
     base_stake_used = current_data['base_stake']
     
     if total_profit < 0:
+        # 🚨 حالة الخسارة: نزيد الخطوة ونستعد لدخول فوري بنفس الإشارة
         current_data['total_losses'] += 1
         current_data['consecutive_losses'] += 1
         current_data['current_step'] += 1 
         
-        # التوقف عند الوصول إلى الحد الأقصى أو تجاوزه
+        # التوقف عند الوصول إلى الحد الأقصى
         if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES:
-            # التوقف ومسح البيانات
             save_session_data(email, current_data)
             stop_bot(email, clear_data=True, stop_reason=f"SL Reached: {MAX_CONSECUTIVE_LOSSES} consecutive losses.")
-            return # إنهاء الدالة
+            return
             
-        # 2. إذا لم يتوقف البوت: التحقق من تجاوز خطوات المضاعفة (Hard Reset)
+        # التحقق من تجاوز خطوات المضاعفة (Hard Reset)
         if current_data['current_step'] > MARTINGALE_STEPS:
             current_data['current_step'] = 0
             current_data['consecutive_losses'] = 0 
@@ -291,25 +287,36 @@ def apply_martingale_logic(email):
             new_stake = calculate_martingale_stake(base_stake_used, current_data['current_step'], MARTINGALE_MULTIPLIER)
         
         current_data['current_stake'] = new_stake
-        print(f"🔄 [LOSS] PnL: {total_profit:.2f}. Step {current_data['current_step']}. Next Stake: {round(new_stake, 2):.2f}. Awaiting next 10-Tick signal.")
+        print(f"🔄 [LOSS] PnL: {total_profit:.2f}. Step {current_data['current_step']}. Next Stake: {round(new_stake, 2):.2f}. 🚨 Immediate re-entry (Sticky Martingale).")
+
+        # إغلاق العقد القديم وتصفير البيانات
+        current_data['current_entry_id'] = None
+        current_data['open_contract_ids'] = []
+        current_data['contract_profits'] = {}
+        is_contract_open[email] = False
+        save_session_data(email, current_data)
+
+        # 🚨 الدخول الفوري بنفس الإشارة
+        start_new_trade(email, immediate_retry=True) 
         
     else:
+        # 🏆 حالة الربح/التعادل: نوقف المضاعفة ونعود لوضع التحليل
         current_data['total_wins'] += 1 if total_profit > 0 else 0
         current_data['current_step'] = 0
         current_data['consecutive_losses'] = 0
         current_data['current_stake'] = base_stake_used
         
         entry_result_tag = "WIN" if total_profit > 0 else "DRAW"
-        print(f"✅ [ENTRY RESULT] {entry_result_tag}. PnL: {total_profit:.2f}. Stake reset to base: {base_stake_used:.2f}. Awaiting next 10-Tick signal.")
+        print(f"✅ [ENTRY RESULT] {entry_result_tag}. PnL: {total_profit:.2f}. Stake reset to base: {base_stake_used:.2f}. Awaiting next 15-Tick signal.")
         
-    current_data['current_entry_id'] = None
-    current_data['open_contract_ids'] = []
-    current_data['contract_profits'] = {}
-    
-    is_contract_open[email] = False
+        # تصفير بيانات الصفقة
+        current_data['current_entry_id'] = None
+        current_data['open_contract_ids'] = []
+        current_data['contract_profits'] = {}
+        is_contract_open[email] = False # مهم: لفتح المجال للتحليل الجديد
 
     currency = current_data.get('currency', 'USD')
-    print(f"[LOG {email}] PNL: {currency} {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Stake: {current_data['current_stake']:.2f} | Strategy: Double 10-Tick Continuation.")
+    print(f"[LOG {email}] PNL: {currency} {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Stake: {current_data['current_stake']:.2f} | Strategy: 15-Tick Reversal + Sticky Martingale.")
     
     save_session_data(email, current_data)
     
@@ -331,7 +338,8 @@ def handle_contract_settlement(email, contract_id, profit_loss):
         apply_martingale_logic(email)
 
 
-def start_new_trade(email): 
+def start_new_trade(email, immediate_retry=False): 
+    """ تبدأ صفقة جديدة. إذا كانت immediate_retry=True، فهذا يعني مضاعفة فورية بعد الخسارة. """
     global is_contract_open
     
     current_data = get_session_data(email)
@@ -350,9 +358,9 @@ def start_new_trade(email):
     current_data['open_contract_ids'] = []
     current_data['contract_profits'] = {}
     
-    entry_type_tag = "BASE ENTRY" if current_data['current_step'] == 0 else f"MARTINGALE STEP {current_data['current_step']}"
+    entry_type_tag = "BASE ENTRY (Analysis)" if current_data['current_step'] == 0 else f"MARTINGALE STEP {current_data['current_step']} (Retry)"
     
-    print(f"🧠 [DOUBLE {contract_type} ENTRY] {entry_type_tag} | Stake: {round(stake_to_use, 2):.2f}. Barrier: {barrier}")
+    print(f"🧠 [TRIPLE {contract_type} ENTRY] {entry_type_tag} | Stake: {round(stake_to_use, 2):.2f}. Barrier: {barrier}")
     
     if send_trade_order(email, stake_to_use, currency_to_use, contract_type, barrier):
         pass
@@ -420,13 +428,14 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 current_price = float(data['tick']['quote'])
                 
                 recent_ticks_deque = current_data['recent_ticks']
-                recent_ticks_deque.append(current_price)
+                # نجمع التكات بشكل مستمر
+                recent_ticks_deque.append(current_price) 
                 
                 current_data['last_valid_tick_price'] = current_price
                 
                 save_session_data(email, current_data)
                 
-                # التحليل يتم فقط عندما يكتمل جمع 10 تكات
+                # التحليل يتم فقط عندما يكتمل جمع 15 تيك وعندما لا تكون هناك صفقة مضاعفة مفتوحة
                 if not is_contract_open.get(email) and len(recent_ticks_deque) == TICK_ANALYSIS_COUNT:
                     analyze_and_set_trade(email)
 
@@ -442,11 +451,15 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 error_message = data['error'].get('message', 'Unknown Error')
                 print(f"❌❌ [API ERROR] Code: {error_code}, Message: {error_message}. Trade may be disrupted.")
                 
+                # عند حدوث خطأ في الشراء، نعتبرها خسارة ونطبق منطق المضاعفة (ربما خطأ في التوكن)
                 if current_data['current_entry_id'] is not None and is_contract_open.get(email):
                     time.sleep(1)
                     if not current_data['open_contract_ids']:
-                        is_contract_open[email] = False
-                        apply_martingale_logic(email)
+                        # لمحاكاة الخسارة وإعادة المحاولة بنفس الإشارة
+                        current_data['contract_profits'][f"error-{time.time()}"] = -current_data['current_stake'] 
+                        current_data['open_contract_ids'].append(f"error-{time.time()}")
+                        is_contract_open[email] = True # نضمن عدم إعادة التحليل حتى يتم حل هذا العقد
+                        handle_contract_settlement(email, f"error-{time.time()}", -current_data['current_stake'])
                     else:
                         print("⚠ [TRADE FAILURE] Waiting for contract result...")
 
@@ -634,7 +647,7 @@ CONTROL_FORM = """
         <div class="info-panel">
             <h2>Strategy Configuration</h2>
             <ul>
-                <li>**Strategy:** Double 10-Tick Continuation 🚨</li>
+                <li>**Strategy:** 15-Tick Reversal + Sticky Martingale 🚨</li>
                 <li>**Symbol (الزوج):** {{ symbol }}</li>
                 <li>**Duration:** {{ duration }} Ticks</li>
                 <li>**Barrier Offset (العائق):** +/-{{ barrier_offset }}</li>
@@ -750,7 +763,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: Double 10-Tick Continuation (Martingale Max {MARTINGALE_STEPS} Steps)', 'success')
+    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: 15-Tick Reversal + Sticky Martingale (Max {MARTINGALE_STEPS} Steps)', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
