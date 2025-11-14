@@ -11,7 +11,7 @@ from threading import Lock
 from collections import deque 
 
 # ==========================================================
-# BOT CONSTANT SETTINGS (Triple 15-Tick Candle Trend Reversal + Sticky Martingale | R_100 | Martingale x2.1)
+# BOT CONSTANT SETTINGS (20-Tick Single Candle Reversal + Sticky Martingale | R_100 | Martingale x2.1)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
@@ -23,14 +23,14 @@ MARTINGALE_STEPS = 5
 MAX_CONSECUTIVE_LOSSES = 6           
 MARTINGALE_MULTIPLIER = 2.1          
 BARRIER_OFFSET_VALUE = "0.03"        
-TICK_ANALYSIS_COUNT = 15             # تحليل 15 تيك (ثلاث شمعات)
+TICK_ANALYSIS_COUNT = 20             # تحليل 20 تيك (شمعة واحدة)
 
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 
-CONTRACT_TYPE_HIGHER = "PUT"
-CONTRACT_TYPE_LOWER = "CALL"          
+CONTRACT_TYPE_HIGHER = "CALL"
+CONTRACT_TYPE_LOWER = "PUT"          
 
 # ==========================================================
 
@@ -195,7 +195,7 @@ def send_trade_order(email, stake, currency, contract_type_param, barrier_offset
         return False
         
 def analyze_and_set_trade(email):
-    """ تحليل حركة انعكاس اتجاه ثلاث شمعات 15-Tick. يتم التنفيذ فقط إذا لم يكن هناك صفقة مفتوحة. """
+    """ تحليل حركة انعكاس اتجاه شمعة واحدة 20-Tick. يتم التنفيذ فقط إذا لم يكن هناك صفقة مفتوحة. """
     global TICK_ANALYSIS_COUNT, BARRIER_OFFSET_VALUE, CONTRACT_TYPE_HIGHER, CONTRACT_TYPE_LOWER
     current_data = get_session_data(email)
 
@@ -208,30 +208,28 @@ def analyze_and_set_trade(email):
     if len(ticks) < TICK_ANALYSIS_COUNT:
         return False 
     
-    # === تحليل الشمعات الثلاث ===
-    C1_Open = ticks[0]; C1_Close = ticks[4] 
-    C2_Open = ticks[5]; C2_Close = ticks[9]
-    C3_Open = ticks[10]; C3_Close = ticks[14]
-    
-    is_c1_up = (C1_Open < C1_Close); is_c1_down = (C1_Open > C1_Close)
-    is_c2_up = (C2_Open < C2_Close); is_c2_down = (C2_Open > C2_Close)
-    is_c3_up = (C3_Open < C3_Close); is_c3_down = (C3_Open > C3_Close)
+    # === تحليل شمعة الـ 20 تيك ===
+    # التكة الأولى هي سعر الفتح، والتكة الأخيرة (العشرون) هي سعر الإغلاق
+    C_Open = ticks[0]
+    C_Close = ticks[TICK_ANALYSIS_COUNT - 1]
     
     trade_signal = None
     
-    # 1. سيناريو الهبوط (PUT): ثلاث شمعات صعود متتالية
-    if is_c1_up and is_c2_up and is_c3_up:
-        current_data['current_contract_type'] = CONTRACT_TYPE_LOWER # دخول معاكس
-        current_data['current_barrier_offset'] = f"+{BARRIER_OFFSET_VALUE}" 
-        trade_signal = "Triple 15T: Up-Up-Up -> Lower (Reversal Signal)"
-        
-    # 2. سيناريو الصعود (CALL): ثلاث شمعات هبوط متتالية
-    elif is_c1_down and is_c2_down and is_c3_down:
-        current_data['current_contract_type'] = CONTRACT_TYPE_HIGHER # دخول معاكس
+    if C_Close > C_Open:
+        # شمعة صاعدة -> دخول هبوط (PUT)
+        current_data['current_contract_type'] = CONTRACT_TYPE_LOWER 
         current_data['current_barrier_offset'] = f"-{BARRIER_OFFSET_VALUE}" 
-        trade_signal = "Triple 15T: Down-Down-Down -> Higher (Reversal Signal)"
+        trade_signal = "20T Candle Up -> Lower (Reversal Signal)"
+        
+    elif C_Close < C_Open:
+        # شمعة هابطة -> دخول صعود (CALL)
+        current_data['current_contract_type'] = CONTRACT_TYPE_HIGHER 
+        current_data['current_barrier_offset'] = f"+{BARRIER_OFFSET_VALUE}" 
+        trade_signal = "20T Candle Down -> Higher (Reversal Signal)"
         
     else:
+        # شمعة متعادلة (سعر الفتح = سعر الإغلاق)
+        current_data['recent_ticks'].clear() # مسح التكات لإعادة التحليل
         return False
 
     current_data['current_stake'] = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'], MARTINGALE_MULTIPLIER)
@@ -240,7 +238,7 @@ def analyze_and_set_trade(email):
     current_data['recent_ticks'].clear() 
     
     save_session_data(email, current_data)
-    print(f"✅ [15-TICK REV] Base Entry: {current_data['current_contract_type']} {current_data['current_barrier_offset']} | Pattern: {trade_signal}")
+    print(f"✅ [20-TICK REV] Base Entry: {current_data['current_contract_type']} {current_data['current_barrier_offset']} | Pattern: {trade_signal}")
     start_new_trade(email, immediate_retry=False) # أول دخول يكون بعد التحليل
     return True
 
@@ -296,7 +294,7 @@ def apply_martingale_logic(email):
         is_contract_open[email] = False
         save_session_data(email, current_data)
 
-        # 🚨 الدخول الفوري بنفس الإشارة
+        # 🚨 الدخول الفوري بنفس الإشارة (يتم تحديد الإشارة من الصفقة الخاسرة الأخيرة)
         start_new_trade(email, immediate_retry=True) 
         
     else:
@@ -307,7 +305,7 @@ def apply_martingale_logic(email):
         current_data['current_stake'] = base_stake_used
         
         entry_result_tag = "WIN" if total_profit > 0 else "DRAW"
-        print(f"✅ [ENTRY RESULT] {entry_result_tag}. PnL: {total_profit:.2f}. Stake reset to base: {base_stake_used:.2f}. Awaiting next 15-Tick signal.")
+        print(f"✅ [ENTRY RESULT] {entry_result_tag}. PnL: {total_profit:.2f}. Stake reset to base: {base_stake_used:.2f}. Awaiting next 20-Tick candle signal.")
         
         # تصفير بيانات الصفقة
         current_data['current_entry_id'] = None
@@ -316,7 +314,7 @@ def apply_martingale_logic(email):
         is_contract_open[email] = False # مهم: لفتح المجال للتحليل الجديد
 
     currency = current_data.get('currency', 'USD')
-    print(f"[LOG {email}] PNL: {currency} {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Stake: {current_data['current_stake']:.2f} | Strategy: 15-Tick Reversal + Sticky Martingale.")
+    print(f"[LOG {email}] PNL: {currency} {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Stake: {current_data['current_stake']:.2f} | Strategy: 20-Tick Reversal + Sticky Martingale.")
     
     save_session_data(email, current_data)
     
@@ -360,7 +358,7 @@ def start_new_trade(email, immediate_retry=False):
     
     entry_type_tag = "BASE ENTRY (Analysis)" if current_data['current_step'] == 0 else f"MARTINGALE STEP {current_data['current_step']} (Retry)"
     
-    print(f"🧠 [TRIPLE {contract_type} ENTRY] {entry_type_tag} | Stake: {round(stake_to_use, 2):.2f}. Barrier: {barrier}")
+    print(f"🧠 [20-TICK {contract_type} ENTRY] {entry_type_tag} | Stake: {round(stake_to_use, 2):.2f}. Barrier: {barrier}")
     
     if send_trade_order(email, stake_to_use, currency_to_use, contract_type, barrier):
         pass
@@ -435,7 +433,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 
                 save_session_data(email, current_data)
                 
-                # التحليل يتم فقط عندما يكتمل جمع 15 تيك وعندما لا تكون هناك صفقة مضاعفة مفتوحة
+                # التحليل يتم فقط عندما يكتمل جمع 20 تيك وعندما لا تكون هناك صفقة مضاعفة مفتوحة
                 if not is_contract_open.get(email) and len(recent_ticks_deque) == TICK_ANALYSIS_COUNT:
                     analyze_and_set_trade(email)
 
@@ -647,7 +645,7 @@ CONTROL_FORM = """
         <div class="info-panel">
             <h2>Strategy Configuration</h2>
             <ul>
-                <li>**Strategy:** 15-Tick Reversal + Sticky Martingale 🚨</li>
+                <li>**Strategy:** 20-Tick Single Candle Reversal + Sticky Martingale 🚨</li>
                 <li>**Symbol (الزوج):** {{ symbol }}</li>
                 <li>**Duration:** {{ duration }} Ticks</li>
                 <li>**Barrier Offset (العائق):** +/-{{ barrier_offset }}</li>
@@ -763,7 +761,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: 15-Tick Reversal + Sticky Martingale (Max {MARTINGALE_STEPS} Steps)', 'success')
+    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: 20-Tick Reversal + Sticky Martingale (Max {MARTINGALE_STEPS} Steps)', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
