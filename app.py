@@ -11,7 +11,7 @@ from threading import Lock
 from collections import deque 
 
 # ==========================================================
-# BOT CONSTANT SETTINGS (Single 5-Tick Candle Trend Continuation | R_100 | Martingale x2.1)
+# BOT CONSTANT SETTINGS (Double 10-Tick Candle Trend Continuation | R_100 | Martingale x2.1)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
@@ -20,17 +20,17 @@ DURATION_UNIT = "t"
 
 # إعدادات المضاعفة
 MARTINGALE_STEPS = 5                 
-MAX_CONSECUTIVE_LOSSES = 6           # 🚨 يتم التوقف عند الوصول إلى 6 خسائر متتالية
+MAX_CONSECUTIVE_LOSSES = 6           
 MARTINGALE_MULTIPLIER = 2.1          
 BARRIER_OFFSET_VALUE = "0.03"        
-TICK_ANALYSIS_COUNT = 5              # تحليل 5 تكات فقط (شمعة واحدة)
+TICK_ANALYSIS_COUNT = 10             # 🚨 تم التعديل: تحليل 10 تكات (شمعتين)
 
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 
-CONTRACT_TYPE_HIGHER = "PUT"
-CONTRACT_TYPE_LOWER = "CALL"          
+CONTRACT_TYPE_HIGHER = "CALL"
+CONTRACT_TYPE_LOWER = "PUT"          
 
 # ==========================================================
 
@@ -66,7 +66,7 @@ DEFAULT_SESSION_STATE = {
     "current_contract_type": CONTRACT_TYPE_HIGHER,
     "current_barrier_offset": f"+{BARRIER_OFFSET_VALUE}", 
     
-    "recent_ticks": deque(maxlen=TICK_ANALYSIS_COUNT)
+    "recent_ticks": deque(maxlen=TICK_ANALYSIS_COUNT) # الحجم الآن 10
 }
 
 # --- Persistence functions (معالجة deque) ---
@@ -82,6 +82,7 @@ def save_session_data(email, session_data):
     all_sessions = load_persistent_sessions()
     data_to_save = session_data.copy()
     if isinstance(data_to_save.get("recent_ticks"), deque):
+        # نضمن حفظ الـ deque بالحجم الصحيح
         data_to_save["recent_ticks"] = list(data_to_save["recent_ticks"])
         
     all_sessions[email] = data_to_save
@@ -99,6 +100,7 @@ def get_session_data(email):
         
     if not isinstance(data.get("recent_ticks"), deque):
         tick_data = data.get("recent_ticks", []) or [] 
+        # نضمن تحميل الـ deque بالحجم الجديد 10
         data["recent_ticks"] = deque(tick_data, maxlen=TICK_ANALYSIS_COUNT)
         
     return data
@@ -197,45 +199,53 @@ def send_trade_order(email, stake, currency, contract_type_param, barrier_offset
         return False
         
 def analyze_and_set_trade(email):
-    """ 💡 تحليل حركة استمرار اتجاه شمعة واحدة 5-Tick. """
+    """ 💡 تحليل حركة استمرار اتجاه شمعتين 10-Tick. """
     global TICK_ANALYSIS_COUNT, BARRIER_OFFSET_VALUE, CONTRACT_TYPE_HIGHER, CONTRACT_TYPE_LOWER
     current_data = get_session_data(email)
     
     ticks = list(current_data['recent_ticks'])
     
-    # التحقق من توفر 5 تكات فقط
+    # 🚨 التحقق من توفر 10 تكات
     if len(ticks) < TICK_ANALYSIS_COUNT:
         return False 
     
-    # === تحليل الشمعة (5 تكات) ===
+    # === تحليل الشمعة الأولى (C1) والشمعة الثانية (C2) ===
     C1_Open = ticks[0] 
     C1_Close = ticks[4] 
+    C2_Open = ticks[5]
+    C2_Close = ticks[9]
+    
+    # تحديد اتجاه كل شمعة
+    is_candle1_up = (C1_Open < C1_Close) 
+    is_candle1_down = (C1_Open > C1_Close)
+    is_candle2_up = (C2_Open < C2_Close)
+    is_candle2_down = (C2_Open > C2_Close)
     
     trade_signal = None
     
-    # 1. سيناريو الصعود (Higher): الشمعة صعود
-    if C1_Open < C1_Close:
+    # 1. سيناريو الصعود (Higher): C1 صعود AND C2 صعود
+    if is_candle1_up and is_candle2_up:
         current_data['current_contract_type'] = CONTRACT_TYPE_HIGHER
-        current_data['current_barrier_offset'] = f"-{BARRIER_OFFSET_VALUE}" 
-        trade_signal = "Single 5T: Up - Higher (Continuation)"
-        
-    # 2. سيناريو الهبوط (Lower): الشمعة هبوط
-    elif C1_Open > C1_Close:
-        current_data['current_contract_type'] = CONTRACT_TYPE_LOWER
         current_data['current_barrier_offset'] = f"+{BARRIER_OFFSET_VALUE}" 
-        trade_signal = "Single 5T: Down - Lower (Continuation)"
+        trade_signal = "Double 10T: Up-Up - Higher (Strong Continuation)"
+        
+    # 2. سيناريو الهبوط (Lower): C1 هبوط AND C2 هبوط
+    elif is_candle1_down and is_candle2_down:
+        current_data['current_contract_type'] = CONTRACT_TYPE_LOWER
+        current_data['current_barrier_offset'] = f"-{BARRIER_OFFSET_VALUE}" 
+        trade_signal = "Double 10T: Down-Down - Lower (Strong Continuation)"
         
     else:
-        # إذا كانت شمعة دوجي (افتتاح = إغلاق)، لا دخول
+        # إذا لم يكن هناك نموذج استمرار قوي، لا دخول
         return False
 
     current_data['current_stake'] = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'], MARTINGALE_MULTIPLIER)
     
-    # 🚨 مسح التكات بعد التحليل لإجبار البوت على جمع 5 تكات جديدة للصفقة التالية
+    # 🚨 مسح التكات بعد التحليل
     current_data['recent_ticks'].clear() 
     
     save_session_data(email, current_data)
-    print(f"✅ [5-TICK CONT] Entry: {current_data['current_contract_type']} {current_data['current_barrier_offset']} | Pattern: {trade_signal}")
+    print(f"✅ [10-TICK CONT] Entry: {current_data['current_contract_type']} {current_data['current_barrier_offset']} | Pattern: {trade_signal}")
     start_new_trade(email)
     return True
 
@@ -264,7 +274,7 @@ def apply_martingale_logic(email):
         current_data['consecutive_losses'] += 1
         current_data['current_step'] += 1 
         
-        # 🚨 التعديل لضمان التوقف النهائي: عند الوصول إلى الحد الأقصى أو تجاوزه
+        # التوقف عند الوصول إلى الحد الأقصى أو تجاوزه
         if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES:
             # التوقف ومسح البيانات
             save_session_data(email, current_data)
@@ -281,7 +291,7 @@ def apply_martingale_logic(email):
             new_stake = calculate_martingale_stake(base_stake_used, current_data['current_step'], MARTINGALE_MULTIPLIER)
         
         current_data['current_stake'] = new_stake
-        print(f"🔄 [LOSS] PnL: {total_profit:.2f}. Step {current_data['current_step']}. Next Stake: {round(new_stake, 2):.2f}. Awaiting next 5-Tick signal.")
+        print(f"🔄 [LOSS] PnL: {total_profit:.2f}. Step {current_data['current_step']}. Next Stake: {round(new_stake, 2):.2f}. Awaiting next 10-Tick signal.")
         
     else:
         current_data['total_wins'] += 1 if total_profit > 0 else 0
@@ -290,7 +300,7 @@ def apply_martingale_logic(email):
         current_data['current_stake'] = base_stake_used
         
         entry_result_tag = "WIN" if total_profit > 0 else "DRAW"
-        print(f"✅ [ENTRY RESULT] {entry_result_tag}. PnL: {total_profit:.2f}. Stake reset to base: {base_stake_used:.2f}. Awaiting next 5-Tick signal.")
+        print(f"✅ [ENTRY RESULT] {entry_result_tag}. PnL: {total_profit:.2f}. Stake reset to base: {base_stake_used:.2f}. Awaiting next 10-Tick signal.")
         
     current_data['current_entry_id'] = None
     current_data['open_contract_ids'] = []
@@ -299,7 +309,7 @@ def apply_martingale_logic(email):
     is_contract_open[email] = False
 
     currency = current_data.get('currency', 'USD')
-    print(f"[LOG {email}] PNL: {currency} {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Stake: {current_data['current_stake']:.2f} | Strategy: Single 5-Tick Continuation.")
+    print(f"[LOG {email}] PNL: {currency} {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Stake: {current_data['current_stake']:.2f} | Strategy: Double 10-Tick Continuation.")
     
     save_session_data(email, current_data)
     
@@ -342,7 +352,7 @@ def start_new_trade(email):
     
     entry_type_tag = "BASE ENTRY" if current_data['current_step'] == 0 else f"MARTINGALE STEP {current_data['current_step']}"
     
-    print(f"🧠 [SINGLE {contract_type} ENTRY] {entry_type_tag} | Stake: {round(stake_to_use, 2):.2f}. Barrier: {barrier}")
+    print(f"🧠 [DOUBLE {contract_type} ENTRY] {entry_type_tag} | Stake: {round(stake_to_use, 2):.2f}. Barrier: {barrier}")
     
     if send_trade_order(email, stake_to_use, currency_to_use, contract_type, barrier):
         pass
@@ -416,7 +426,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 
                 save_session_data(email, current_data)
                 
-                # التحليل يتم فقط عندما يكتمل جمع 5 تكات وليس لكل تيك
+                # التحليل يتم فقط عندما يكتمل جمع 10 تكات
                 if not is_contract_open.get(email) and len(recent_ticks_deque) == TICK_ANALYSIS_COUNT:
                     analyze_and_set_trade(email)
 
@@ -624,7 +634,7 @@ CONTROL_FORM = """
         <div class="info-panel">
             <h2>Strategy Configuration</h2>
             <ul>
-                <li>**Strategy:** Single 5-Tick Continuation</li>
+                <li>**Strategy:** Double 10-Tick Continuation 🚨</li>
                 <li>**Symbol (الزوج):** {{ symbol }}</li>
                 <li>**Duration:** {{ duration }} Ticks</li>
                 <li>**Barrier Offset (العائق):** +/-{{ barrier_offset }}</li>
@@ -740,7 +750,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: Single 5-Tick Continuation (Martingale Max {MARTINGALE_STEPS} Steps)', 'success')
+    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: Double 10-Tick Continuation (Martingale Max {MARTINGALE_STEPS} Steps)', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
