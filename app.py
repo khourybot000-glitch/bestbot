@@ -29,8 +29,8 @@ RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 
-CONTRACT_TYPE_HIGHER = "CALL"
-CONTRACT_TYPE_LOWER = "PUT"          
+CONTRACT_TYPE_HIGHER = "PUT"
+CONTRACT_TYPE_LOWER = "CALL"          
 
 # ==========================================================
 
@@ -226,13 +226,13 @@ def analyze_and_set_trade(email):
     # 1. سيناريو الصعود (Higher): C1 صعود AND C2 صعود
     if is_candle1_up and is_candle2_up:
         current_data['current_contract_type'] = CONTRACT_TYPE_HIGHER
-        current_data['current_barrier_offset'] = f"+{BARRIER_OFFSET_VALUE}" 
+        current_data['current_barrier_offset'] = f"-{BARRIER_OFFSET_VALUE}" 
         trade_signal = "Double 10T: Up-Up - Higher (Strong Continuation)"
         
     # 2. سيناريو الهبوط (Lower): C1 هبوط AND C2 هبوط
     elif is_candle1_down and is_candle2_down:
         current_data['current_contract_type'] = CONTRACT_TYPE_LOWER
-        current_data['current_barrier_offset'] = f"-{BARRIER_OFFSET_VALUE}" 
+        current_data['current_barrier_offset'] = f"+{BARRIER_OFFSET_VALUE}" 
         trade_signal = "Double 10T: Down-Down - Lower (Strong Continuation)"
         
     else:
