@@ -29,8 +29,8 @@ RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 
-CONTRACT_TYPE_HIGHER = "CALL"
-CONTRACT_TYPE_LOWER = "PUT"          
+CONTRACT_TYPE_HIGHER = "PUT"
+CONTRACT_TYPE_LOWER = "CALL"          
 
 # ==========================================================
 
@@ -222,13 +222,13 @@ def analyze_and_set_trade(email):
     # 1. سيناريو الهبوط (PUT): ثلاث شمعات صعود متتالية
     if is_c1_up and is_c2_up and is_c3_up:
         current_data['current_contract_type'] = CONTRACT_TYPE_LOWER # دخول معاكس
-        current_data['current_barrier_offset'] = f"-{BARRIER_OFFSET_VALUE}" 
+        current_data['current_barrier_offset'] = f"+{BARRIER_OFFSET_VALUE}" 
         trade_signal = "Triple 15T: Up-Up-Up -> Lower (Reversal Signal)"
         
     # 2. سيناريو الصعود (CALL): ثلاث شمعات هبوط متتالية
     elif is_c1_down and is_c2_down and is_c3_down:
         current_data['current_contract_type'] = CONTRACT_TYPE_HIGHER # دخول معاكس
-        current_data['current_barrier_offset'] = f"+{BARRIER_OFFSET_VALUE}" 
+        current_data['current_barrier_offset'] = f"-{BARRIER_OFFSET_VALUE}" 
         trade_signal = "Triple 15T: Down-Down-Down -> Higher (Reversal Signal)"
         
     else:
