@@ -15,7 +15,7 @@ from collections import deque
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
-DURATION = 10
+DURATION = 5
 DURATION_UNIT = "t"
 
 # إعدادات المضاعفة
