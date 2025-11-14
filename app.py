@@ -13,21 +13,21 @@ from threading import Lock
 # BOT CONSTANT SETTINGS (R_100 | x29 | انتظار الثانية 6)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
-SYMBOL = "R_25"             
-DURATION = 5                  
+SYMBOL = "R_10"             
+DURATION = 7                  
 DURATION_UNIT = "t"
 
 # إعدادات المضاعفة
 MARTINGALE_STEPS = 1          
-MAX_CONSECUTIVE_LOSSES = 2    
+MAX_CONSECUTIVE_LOSSES = 1    
 MARTINGALE_MULTIPLIER = 14.0  
-BARRIER_OFFSET = "0.05"       
+BARRIER_OFFSET = "0.7"       
 
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 
-CONTRACT_TYPE_HIGHER = "CALL" 
+CONTRACT_TYPE_HIGHER = "PUT" 
 CONTRACT_TYPE_LOWER = "PUT"   
 
 # ==========================================================
