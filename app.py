@@ -16,10 +16,10 @@ WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"             
 DURATION = 5                  
 DURATION_UNIT = "t"
-TICKS_TO_ANALYZE = 5 # ⬅️ ثابت جديد: عدد التيكات المراد تحليلها
+TICKS_TO_ANALYZE = 5 
 
 # إعدادات المضاعفة
-MARTINGALE_STEPS = 5          # تم تعيينه إلى 0 ليوقف البوت عند أول خسارة (إذا لم تكن تريد المضاعفة)
+MARTINGALE_STEPS = 5          # مثال: يسمح بخطوة مضاعفة واحدة (خسارتين متتاليتين قبل الإيقاف)
 MAX_CONSECUTIVE_LOSSES = 6    
 MARTINGALE_MULTIPLIER = 2.1  
 BARRIER_OFFSET = "0.03"       
@@ -28,8 +28,8 @@ RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 
-CONTRACT_TYPE_HIGHER = "PUT" 
-CONTRACT_TYPE_LOWER = "CALL"   
+CONTRACT_TYPE_HIGHER = "CALL" 
+CONTRACT_TYPE_LOWER = "PUT"   
 
 # ==========================================================
 
@@ -62,7 +62,6 @@ DEFAULT_SESSION_STATE = {
     "account_type": "demo",
     
     "last_valid_tick_price": 0.0,
-    # ⬅️ التعديل هنا: قائمة لتخزين آخر 5 تيكات
     "last_5_ticks": [],             
     "current_entry_id": None,             
     "open_contract_ids": [],              
@@ -76,7 +75,6 @@ def load_persistent_sessions():
     try:
         with open(ACTIVE_SESSIONS_FILE, 'r') as f:
             content = f.read()
-            # ⬅️ تحديث لضمان أن last_5_ticks يتم تهيئته كقائمة
             data = json.loads(content) if content else {}
             for email, session_data in data.items():
                 if 'last_5_ticks' not in session_data:
@@ -138,7 +136,6 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
 
     if email in is_contract_open: is_contract_open[email] = False
     
-    # ⬅️ تعديل منطق مسح البيانات لتطبيق الإيقاف الفوري
     if clear_data:
         if stop_reason in ["SL Reached", "TP Reached", "API Buy Error"]:
             print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}). Data kept for display.")
@@ -194,6 +191,7 @@ def send_trade_order(email, stake, currency, contract_type_param, barrier_offset
         return False
 
 
+# ⬅️ التعديل الرئيسي 1: لضمان الدخول الفوري بعد الخسارة
 def apply_martingale_logic(email):
     """ يطبق منطق المضاعفة بناءً على نتيجة الصفقة الواحدة """
     global is_contract_open, MARTINGALE_MULTIPLIER, MARTINGALE_STEPS, MAX_CONSECUTIVE_LOSSES
@@ -224,27 +222,37 @@ def apply_martingale_logic(email):
         current_data['consecutive_losses'] += 1
         current_data['current_step'] += 1 
         
-        # ⬅️ منطق الإيقاف الفوري بعد أول خسارة (إذا كان MARTINGALE_STEPS = 0)
+        # ⚠️ (منطق الإيقاف - إذا تم تجاوز الخطوات أو الخسائر المتتالية)
         if current_data['current_step'] > MARTINGALE_STEPS: 
             save_session_data(email, current_data)
             stop_bot(email, clear_data=True, stop_reason=f"SL Reached: Exceeded {MARTINGALE_STEPS} Martingale steps.")
             return
             
         if current_data['consecutive_losses'] > MAX_CONSECUTIVE_LOSSES:
-             # هذا الشرط لن يتم تنفيذه إذا كان MARTINGALE_STEPS = 0، لكن أبقيناه لسلامة الكود
             save_session_data(email, current_data)
             stop_bot(email, clear_data=True, stop_reason=f"SL Reached: {MAX_CONSECUTIVE_LOSSES} consecutive losses.")
             return
 
+        # ⬅️ حساب المضاعفة وتحديث الحالة
         new_stake = calculate_martingale_stake(base_stake_used, current_data['current_step'], MARTINGALE_MULTIPLIER)
         
         current_data['current_stake_lower'] = new_stake
         current_data['current_stake_higher'] = new_stake 
         
-        entry_tag = "WAITING @ SEC 6" 
+        # إعادة تعيين متغيرات تتبع الصفقة (للسماح بالصفقة الجديدة)
+        current_data['current_entry_id'] = None
+        current_data['open_contract_ids'] = []
+        current_data['contract_profits'] = {}
         
-        print(f"🔄 [SINGLE LOSS] PnL: {total_profit:.2f}. Step {current_data['current_step']}. Next Stake: {round(new_stake, 2):.2f}. Waiting for Sec 6.")
+        # ⚠️ حفظ البيانات وتشغيل الدخول الفوري (لا ننتظر ثانية 6)
+        save_session_data(email, current_data)
         
+        print(f"🔄 [MARTINGALE IMMEDIATE ENTRY] PnL: {total_profit:.2f}. Step {current_data['current_step']}. New Stake: {round(new_stake, 2):.2f}. Analyzing ticks and entering immediately.")
+        
+        # ⬅️ الدخول الفوري مع تحليل التيكات الجديدة
+        start_new_single_trade(email)
+        return # إنهاء الدالة بعد إرسال صفقة المضاعفة
+
     # ✅ Win or Draw Condition
     else: 
         current_data['total_wins'] += 1 if total_profit > 0 else 0 
@@ -255,22 +263,22 @@ def apply_martingale_logic(email):
         current_data['current_stake_higher'] = base_stake_used 
         
         entry_result_tag = "WIN" if total_profit > 0 else "DRAW"
-        entry_tag = "WAITING @ SEC 6" 
         print(f"✅ [ENTRY RESULT] {entry_result_tag}. Total PnL: {total_profit:.2f}. Stake reset to base: {base_stake_used:.2f}.")
 
-    # إعادة تعيين متغيرات الدخول 
-    current_data['current_entry_id'] = None
-    current_data['open_contract_ids'] = []
-    current_data['contract_profits'] = {}
-    
-    is_contract_open[email] = False 
+        # إعادة تعيين متغيرات الدخول 
+        current_data['current_entry_id'] = None
+        current_data['open_contract_ids'] = []
+        current_data['contract_profits'] = {}
+        
+        # ⬅️ السماح بالدخول الأساسي عند الثانية 6 في الجولة القادمة
+        is_contract_open[email] = False 
+        
+        save_session_data(email, current_data)
+        
+        currency = current_data.get('currency', 'USD')
+        print(f"[LOG {email}] PNL: {currency} {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Stake: {current_data['current_stake_higher']:.2f} | Next Entry: @ SEC 6")
 
-    currency = current_data.get('currency', 'USD')
-    print(f"[LOG {email}] PNL: {currency} {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Stake: {current_data['current_stake_higher']:.2f}")
-    
-    save_session_data(email, current_data)
-    
-    
+
 def handle_contract_settlement(email, contract_id, profit_loss):
     """ معالجة نتيجة عقد واحد وتجميعها """
     current_data = get_session_data(email)
@@ -286,26 +294,33 @@ def handle_contract_settlement(email, contract_id, profit_loss):
     save_session_data(email, current_data)
     
     if not current_data['open_contract_ids']:
+        # ⬅️ هذا سيشغل منطق المضاعفة (سواء كان فوريًا أو ينتظر ثانية 6)
         apply_martingale_logic(email)
 
 
-# ⬅️ التعديل الرئيسي 3: تحليل الـ 5 تيكات وتحديد اتجاه الصفقة
 def start_new_single_trade(email):
     """ يحلل آخر 5 تيكات ويرسل صفقة واحدة بناءً على استراتيجية الانعكاس """
     global is_contract_open, BARRIER_OFFSET, CONTRACT_TYPE_HIGHER, CONTRACT_TYPE_LOWER, MARTINGALE_STEPS
     
     current_data = get_session_data(email)
     
+    # ⚠️ شرط الأمان: إذا كانت المضاعفة قد تجاوزت حد الإيقاف، لا تدخل
     if current_data['current_step'] > MARTINGALE_STEPS:
-         stop_bot(email, clear_data=True, stop_reason=f"SL Reached: Max {MARTINGALE_STEPS} Martingale steps reached.")
+         # هذا الشرط يفترض أن الدالة تم استدعاؤها خطأ بعد تجاوز الحد، لكن يجب أن يكون الإيقاف قد حدث في apply_martingale_logic
+         is_contract_open[email] = False 
          return
         
     ticks = current_data.get('last_5_ticks', [])
     
-    # ⚠️ التحقق من توفر 5 تيكات
+    # التحقق من توفر 5 تيكات
     if len(ticks) < TICKS_TO_ANALYZE:
-        print(f"❌ [ENTRY FAIL] Only {len(ticks)} ticks available. Waiting for more data.")
-        is_contract_open[email] = False # السماح بإعادة المحاولة
+        print(f"❌ [ENTRY FAIL] Only {len(ticks)} ticks available. Cannot analyze.")
+        # ⚠️ إذا كانت هذه محاولة دخول مضاعفة (Martingale)، يجب أن ننتظر الجولة القادمة
+        if current_data['current_step'] > 0:
+            print("⚠ [MARTINGALE SKIPPED] Insufficient ticks for immediate entry. Resetting for next tick.")
+            is_contract_open[email] = False # السماح بالمحاولة مع التيك التالي (وهو دخول فوري)
+        else:
+            is_contract_open[email] = False # السماح بالمحاولة في الثانية 6 التالية
         return
 
     # 1. تحديد سعر الفتح (أقدم تيك) وسعر الإغلاق (أحدث تيك)
@@ -314,19 +329,16 @@ def start_new_single_trade(email):
     
     # 2. تحديد الاتجاه ونوع العقد المطلوب (استراتيجية الانعكاس)
     if open_price < close_price:
-        # صاعد (Open < Close) -> نتوقع هبوط (انعكاس) -> ندخل LOWER
         contract_type_to_use = CONTRACT_TYPE_LOWER
-        barrier_to_use = f"+{BARRIER_OFFSET}"
-        strategy_tag = "BULLISH -> LOWER"
-        stake_to_use = current_data['current_stake_lower'] # استخدام رهان Lower
-    elif open_price > close_price:
-        # هابط (Open > Close) -> نتوقع صعود (انعكاس) -> ندخل HIGHER
-        contract_type_to_use = CONTRACT_TYPE_HIGHER
         barrier_to_use = f"-{BARRIER_OFFSET}"
+        strategy_tag = "BULLISH -> LOWER"
+        stake_to_use = current_data['current_stake_lower'] 
+    elif open_price > close_price:
+        contract_type_to_use = CONTRACT_TYPE_HIGHER
+        barrier_to_use = f"+{BARRIER_OFFSET}"
         strategy_tag = "BEARISH -> HIGHER"
-        stake_to_use = current_data['current_stake_higher'] # استخدام رهان Higher
+        stake_to_use = current_data['current_stake_higher'] 
     else:
-        # تعادل، ننتظر الجولة القادمة
         print("⚠ [ENTRY SKIPPED] Open price equals Close price. Waiting.")
         is_contract_open[email] = False
         return
@@ -338,7 +350,7 @@ def start_new_single_trade(email):
     current_data['contract_profits'] = {}
     
     entry_type_tag = "BASE ENTRY" if current_data['current_step'] == 0 else f"MARTINGALE STEP {current_data['current_step']}"
-    entry_timing_tag = "@ SEC 6" 
+    entry_timing_tag = "IMMEDIATE" if current_data['current_step'] > 0 else "@ SEC 6"
     
     print(f"🧠 [SINGLE TRADE ENTRY - {entry_timing_tag}] {entry_type_tag} | Strategy: {strategy_tag} | Stake: {round(stake_to_use, 2):.2f}. Price: {open_price:.5f} -> {close_price:.5f}")
     
@@ -346,11 +358,12 @@ def start_new_single_trade(email):
     if send_trade_order(email, stake_to_use, currency_to_use, contract_type_to_use, barrier_to_use):
         pass
         
+    # ⬅️ وضع علامة "صفقة مفتوحة"
     is_contract_open[email] = True
     
     current_data['last_entry_time'] = int(time.time())
-    current_data['last_entry_price'] = close_price # سعر الإغلاق لـ 5 تيكات هو سعر الدخول
-    current_data['last_5_ticks'] = [] # ⬅️ مسح قائمة التيكات بعد الدخول
+    current_data['last_entry_price'] = close_price 
+    current_data['last_5_ticks'] = [] # مسح قائمة التيكات بعد الدخول
     
     save_session_data(email, current_data)
 
@@ -364,7 +377,6 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
     active_ws = {email: None}
 
     session_data = get_session_data(email)
-    # ⬅️ تأكد من تهيئة last_5_ticks عند بدء التشغيل
     session_data['last_5_ticks'] = [] 
     session_data.update({
         "api_token": token, 
@@ -405,6 +417,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             print(f"✅ [PROCESS] Connection established for {email}.")
             is_contract_open[email] = False
 
+        # ⬅️ التعديل الرئيسي 2: قصر الدخول على الثانية 6 للخطوة 0 فقط
         def on_message_wrapper(ws_app, message):
             data = json.loads(message)
             msg_type = data.get('msg_type')
@@ -418,21 +431,20 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 
                 current_second = datetime.fromtimestamp(tick_epoch, tz=timezone.utc).second
                 
-                # ⬅️ التعديل الرئيسي 4: تخزين التيكات في قائمة متجددة
                 current_data['last_valid_tick_price'] = current_price
                 current_data['last_tick_data'] = data['tick']
                 
-                # إضافة السعر للقائمة
+                # تخزين التيكات في قائمة متجددة
                 current_data['last_5_ticks'].append(current_price)
-                # الحفاظ على حجم القائمة 5 تيكات
                 if len(current_data['last_5_ticks']) > TICKS_TO_ANALYZE:
                     current_data['last_5_ticks'].pop(0) 
                 
                 save_session_data(email, current_data) 
                 
-                # === منطق الدخول الموحد (ينتظر الثانية 6) ===
+                # === منطق الدخول الأساسي (Step 0) ===
                 if not is_contract_open.get(email):
-                    if current_second == 50:
+                    # الدخول الأساسي ينتظر الثانية 6 فقط
+                    if current_data['current_step'] == 0 and current_second == 6:
                         start_new_single_trade(email)
                 # === نهاية منطق الدخول ===
 
@@ -493,164 +505,151 @@ app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SEC
 app.config['SESSION_PERMANENT'] = False
 
 AUTH_FORM = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Bot Login</title>
-    <style>
-        body { font-family: Arial, sans-serif; background-color: #1a1a2e; color: #e0e0e0; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-        .container { background-color: #0f0f1a; padding: 30px; border-radius: 10px; box-shadow: 0 0 20px rgba(0, 0, 0, 0.5); width: 300px; text-align: center; }
-        h2 { color: #88c0d0; margin-bottom: 20px; }
-        input[type="email"], input[type="password"] { width: calc(100% - 20px); padding: 10px; margin-bottom: 15px; border: 1px solid #3b4252; border-radius: 5px; background-color: #2e3440; color: #e0e0e0; }
-        button { background-color: #bf616a; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; width: 100%; font-size: 16px; }
-        button:hover { background-color: #b48ead; }
-        .flash { padding: 10px; margin-bottom: 15px; border-radius: 5px; }
-        .flash.error { background-color: #bf616a; }
-        .flash.success { background-color: #a3be8c; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h2>Bot Login</h2>
-        {% with messages = get_flashed_messages(with_categories=true) %}
-            {% if messages %}
-                {% for category, message in messages %}
-                    <div class="flash {{ category }}">{{ message }}</div>
-                {% endfor %}
-            {% endif %}
-        {% endwith %}
-        <form method="post" action="{{ url_for('login') }}">
-            <input type="email" name="email" placeholder="Enter your authorized email" required>
-            <button type="submit">Login</button>
-        </form>
-    </div>
-</body>
-</html>
+<!doctype html>
+<title>Login - Deriv Bot</title>
+<style>
+    body { font-family: Arial, sans-serif; padding: 20px; max-width: 400px; margin: auto; }
+    h1 { color: #007bff; }
+    input[type="email"] { width: 100%; padding: 10px; margin-top: 5px; margin-bottom: 15px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+    button { background-color: blue; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; }
+</style>
+<h1>Deriv Bot Login</h1>
+<p>Please enter your authorized email address:</p>
+{% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+        {% for category, message in messages %}
+            <p style="color:red;">{{ message }}</p>
+        {% endfor %}
+    {% endif %}
+{% endwith %}
+<form method="POST" action="{{ url_for('login') }}">
+    <label for="email">Email:</label><br>
+    <input type="email" id="email" name="email" required><br><br>
+    <button type="submit">Login</button>
+</form>
 """
 
 CONTROL_FORM = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Trading Bot Control</title>
-    {% if session_data.get('is_running') %}
-    <meta http-equiv="refresh" content="2">
-    {% endif %}
-    <style>
-        body { font-family: Arial, sans-serif; background-color: #1a1a2e; color: #e0e0e0; padding: 20px; }
-        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 2px solid #3b4252; padding-bottom: 10px; }
-        .header h1 { color: #88c0d0; margin: 0; }
-        .header p { margin: 0; font-size: 1.1em; }
-        .content { display: flex; flex-wrap: wrap; gap: 20px; }
-        .control-panel, .status-panel, .info-panel { background-color: #0f0f1a; padding: 20px; border-radius: 10px; box-shadow: 0 0 15px rgba(0, 0, 0, 0.4); flex: 1; min-width: 300px; }
-        .status-panel { flex: 2; }
-        h2 { color: #a3be8c; border-bottom: 1px solid #3b4252; padding-bottom: 5px; margin-top: 0; }
-        label { display: block; margin-top: 10px; font-size: 0.9em; color: #b48ead; }
-        input[type="text"], input[type="number"], select { width: calc(100% - 22px); padding: 10px; margin-top: 5px; margin-bottom: 10px; border: 1px solid #3b4252; border-radius: 5px; background-color: #2e3440; color: #e0e0e0; }
-        button { background-color: #bf616a; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; margin-top: 10px; font-size: 1em; }
-        .start-button { background-color: #a3be8c; }
-        button:hover { opacity: 0.8; }
-        .status { padding: 15px; border-radius: 8px; text-align: center; font-size: 1.2em; font-weight: bold; margin-bottom: 20px; }
-        .running { background-color: #2e4a40; color: #a3be8c; }
-        .stopped { background-color: #4a2e2e; color: #bf616a; }
-        .flash { padding: 10px; margin-bottom: 15px; border-radius: 5px; font-weight: bold; }
-        .flash.error { background-color: #bf616a; color: white; }
-        .flash.success { background-color: #a3be8c; color: #0f0f1a; }
-        .stats table { width: 100%; border-collapse: collapse; margin-top: 15px; }
-        .stats th, .stats td { border: 1px solid #3b4252; padding: 10px; text-align: left; }
-        .stats th { background-color: #2e3440; color: #88c0d0; }
-        .stats .profit-value { color: {{ 'green' if session_data.get('current_profit', 0) >= 0 else 'red' }}; font-weight: bold; }
-        .info-panel ul { list-style: none; padding: 0; }
-        .info-panel li { margin-bottom: 8px; padding: 5px; border-bottom: 1px dotted #3b4252; }
-        .logout-button { background-color: #3b4252; float: right; }
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>Trading Bot Control Panel</h1>
-        <div>
-            <p>User: <strong>{{ email }}</strong></p>
-            <form method="get" action="{{ url_for('logout') }}" style="display:inline;">
-                <button type="submit" class="logout-button">Logout</button>
-            </form>
-        </div>
-    </div>
+<!doctype html>
+<title>Control Panel</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+    body {
+        font-family: Arial, sans-serif;
+        padding: 10px;
+        max-width: 600px;
+        margin: auto;
+        direction: ltr;
+        text-align: left;
+    }
+    h1 {
+        color: #007bff;
+        font-size: 1.8em;
+        border-bottom: 2px solid #eee;
+        padding-bottom: 10px;
+    }
+    .status-running {
+        color: green;
+        font-weight: bold;
+        font-size: 1.3em;
+    }
+    .status-stopped {
+        color: red;
+        font-weight: bold;
+        font-size: 1.3em;
+    }
+    input[type="text"], input[type="number"], select {
+        width: 98%;
+        padding: 10px;
+        margin-top: 5px;
+        margin-bottom: 10px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        box-sizing: border-box;
+        text-align: left;
+    }
+    form button {
+        padding: 12px 20px;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        font-size: 1.1em;
+        margin-top: 15px;
+        width: 100%;
+    }
+</style>
+<h1>Bot Control Panel | User: {{ email }}</h1>
+<hr>
 
-    {% with messages = get_flashed_messages(with_categories=true) %}
-        {% if messages %}
-            {% for category, message in messages %}
-                <div class="flash {{ category }}">{{ message }}</div>
-            {% endfor %}
-        {% endif %}
-    {% endwith %}
-
-    <div class="status {{ 'running' if session_data.get('is_running') else 'stopped' }}">
-        {{ 'BOT IS RUNNING' if session_data.get('is_running') else 'BOT IS STOPPED' }} ({{ session_data.get('stop_reason', 'Stopped Manually') }})
-    </div>
-
-    <div class="content">
-        <div class="control-panel">
-            <h2>{{ 'Stop Bot' if session_data.get('is_running') else 'Start Bot' }}</h2>
-            {% if session_data.get('is_running') %}
-                <form method="post" action="{{ url_for('stop_route') }}">
-                    <button type="submit">🛑 Stop Bot</button>
-                </form>
-            {% else %}
-                <form method="post" action="{{ url_for('start_bot') }}">
-                    <label for="token">Deriv API Token:</label>
-                    <input type="text" id="token" name="token" value="{{ session_data.get('api_token', '') }}" placeholder="Enter API Token" required>
-                    
-                    <label for="account_type">Account Type:</label>
-                    <select id="account_type" name="account_type" required>
-                        <option value="demo" {% if session_data.get('account_type') == 'demo' %}selected{% endif %}>Demo (USD)</option>
-                        <option value="real" {% if session_data.get('account_type') == 'real' %}selected{% endif %}>Real (tUSDT)</option>
-                    </select>
-
-                    <label for="stake">Base Stake (Min 0.35):</label>
-                    <input type="number" id="stake" name="stake" step="0.01" min="0.35" value="{{ session_data.get('base_stake', 1.0) }}" required>
-                    
-                    <label for="tp">Take Profit Target (TP):</label>
-                    <input type="number" id="tp" name="tp" step="1" min="1" value="{{ session_data.get('tp_target', 10.0) }}" required>
-                    
-                    <button type="submit" class="start-button">🚀 Start Bot</button>
-                </form>
-            {% endif %}
-        </div>
+{% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+        {% for category, message in messages %}
+            <p style="color:{{ 'green' if category == 'success' else ('blue' if category == 'info' else 'red') }};">{{ message }}</p>
+        {% endfor %}
         
-        <div class="status-panel stats">
-            <h2>Trading Statistics</h2>
-            <table>
-                <tr><th>Metric</th><th>Value</th></tr>
-                <tr><td>Current PNL ({{ session_data.get('currency', 'USD') }})</td><td class="profit-value">{{ '%.2f' | format(session_data.get('current_profit', 0.0)) }}</td></tr>
-                <tr><td>Target PNL (TP)</td><td>{{ '%.2f' | format(session_data.get('tp_target', 0.0)) }}</td></tr>
-                <tr><td>Total Wins</td><td>{{ session_data.get('total_wins', 0) }}</td></tr>
-                <tr><td>Total Losses</td><td>{{ session_data.get('total_losses', 0) }}</td></tr>
-                <tr><td>Consecutive Losses</td><td>{{ session_data.get('consecutive_losses', 0) }}</td></tr>
-                <tr><td>Current Martingale Step</td><td>{{ session_data.get('current_step', 0) }} / {{ martingale_steps }}</td></tr>
-                <tr><td>Current Stake ({{ session_data.get('currency', 'USD') }})</td><td>{{ '%.2f' | format(session_data.get('current_stake', session_data.get('base_stake', 1.0))) }}</td></tr>
-                <tr><td>Last Tick Price</td><td>{{ '%.4f' | format(session_data.get('last_valid_tick_price', 0.0)) }}</td></tr>
-                <tr><td>Active Contract IDs</td><td>{{ session_data.get('open_contract_ids', []) | length }}</td></tr>
-            </table>
-        </div>
+        {% if session_data and session_data.stop_reason and session_data.stop_reason != "Running" %}
+            <p style="color:red; font-weight:bold;">Last Reason: {{ session_data.stop_reason }}</p>
+        {% endif %}
+    {% endif %}
+{% endwith %}
 
-        <div class="info-panel">
-            <h2>Strategy Configuration</h2>
-            <ul>
-                <li>**Strategy:** 15-Tick Reversal + Sticky Martingale 🚨</li>
-                <li>**Symbol (الزوج):** {{ symbol }}</li>
-                <li>**Duration:** {{ duration }} Ticks</li>
-                <li>**Barrier Offset (العائق):** +/-{{ barrier_offset }}</li>
-                <li>**Base Stake:** {{ '%.2f' | format(session_data.get('base_stake', 1.0)) }} {{ session_data.get('currency', 'USD') }}</li>
-                <li>**Martingale Multiplier:** x{{ martingale_multiplier }}</li>
-                <li>**Max Martingale Steps:** {{ martingale_steps }}</li>
-                <li>**Stop Loss (Max Cons. Losses):** {{ max_consecutive_losses }}</li>
-            </ul>
-        </div>
-    </div>
-</body>
-</html>
+
+{% if session_data and session_data.is_running %}
+    {% set timing_logic = "Immediate after Loss / @ Sec 6 after Win" %}
+    {% set strategy = "5-Tick Reversal (" + symbol + " - " + timing_logic + " - x" + martingale_multiplier|string + " Martingale, Max Steps " + martingale_steps|string + ")" %}
+    
+    <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
+    <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
+    <p>Net Profit: {{ session_data.currency }} {{ session_data.current_profit|round(2) }}</p>
+    <p>Current Stake (Higher/Lower): {{ session_data.currency }} {{ session_data.current_stake_higher|round(2) }}</p>
+    <p>Step: {{ session_data.current_step }} / {{ martingale_steps }} (Max Loss: {{ max_consecutive_losses }})</p>
+    <p style="font-weight: bold; color: green;">Total Wins: {{ session_data.total_wins }} | Total Losses: {{ session_data.total_losses }}</p>
+    <p style="font-weight: bold; color: purple;">Last Tick Price: {{ session_data.last_valid_tick_price|round(5) }}</p>
+    <p style="font-weight: bold; color: #007bff;">Current Strategy: {{ strategy }}</p>
+    <p style="font-weight: bold; color: #ff5733;">Contracts Open: {{ session_data.open_contract_ids|length }}</p>
+    
+    <form method="POST" action="{{ url_for('stop_route') }}">
+        <button type="submit" style="background-color: red; color: white;">🛑 Stop Bot</button>
+    </form>
+{% else %}
+    <p class="status-stopped">🛑 Bot is Stopped. Enter settings to start a new session.</p>
+    <form method="POST" action="{{ url_for('start_bot') }}">
+
+        <label for="account_type">Account Type:</label><br>
+        <select id="account_type" name="account_type" required>
+            <option value="demo" selected>Demo (USD)</option>
+            <option value="live">Live (tUSDT)</option>
+        </select><br>
+
+        <label for="token">Deriv API Token:</label><br>
+        <input type="text" id="token" name="token" required value="{{ session_data.api_token if session_data else '' }}" {% if session_data and session_data.api_token and session_data.is_running is not none %}readonly{% endif %}><br>
+        
+        <label for="stake">Base Stake (USD/tUSDT):</label><br>
+        <input type="number" id="stake" name="stake" value="{{ session_data.base_stake|round(2) if session_data else 0.35 }}" step="0.01" min="0.35" required><br>
+        
+        <label for="tp">TP Target (USD/tUSDT):</label><br>
+        <input type="number" id="tp" name="tp" value="{{ session_data.tp_target|round(2) if session_data else 10.0 }}" step="0.01" required><br>
+        
+        <button type="submit" style="background-color: green; color: white;">🚀 Start Bot</button>
+    </form>
+{% endif %}
+<hr>
+<a href="{{ url_for('logout') }}" style="display: block; text-align: center; margin-top: 15px; font-size: 1.1em;">Logout</a>
+
+<script>
+    function autoRefresh() {
+        var isRunning = {{ 'true' if session_data and session_data.is_running else 'false' }};
+        
+        if (isRunning) {
+            setTimeout(function() {
+                window.location.reload();
+            }, 5000); 
+        }
+    }
+
+    autoRefresh();
+</script>
 """
-
 
 @app.before_request
 def check_user_status():
@@ -672,17 +671,13 @@ def index():
     if not session_data.get('is_running') and "stop_reason" in session_data and session_data["stop_reason"] not in ["Stopped Manually", "Running", "Disconnected (Auto-Retry)", "Displayed"]:
         reason = session_data["stop_reason"]
         
-        # ⬅️ تعديل منطق مسح البيانات لضمان الانتقال لشاشة الإعدادات
         if reason in ["SL Reached", "TP Reached", "API Buy Error"]:
             
-            # 1. إظهار الرسالة
             if reason.startswith("SL Reached"): flash(f"🛑 STOP: Max loss reached! ({reason.split(': ')[1]})", 'error')
             elif reason == "TP Reached": flash(f"✅ GOAL: Profit target ({session_data['tp_target']} {session_data.get('currency', 'USD')}) reached successfully! (TP Reached)", 'success')
             elif reason.startswith("API Buy Error"): flash(f"❌ API Error: {reason}. Check your token and account status.", 'error')
             
-            # 2. مسح البيانات المتبقية لضمان الانتقال لشاشة الإعدادات
             delete_session_data(email)
-            # 3. إعادة تحميل البيانات بعد المسح لعرض الواجهة الصحيحة
             session_data = get_session_data(email)
             
     return render_template_string(CONTROL_FORM,
@@ -744,7 +739,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {TICKS_TO_ANALYZE}-Tick Reversal (R_25 - Always @ Sec 6) with x{MARTINGALE_MULTIPLIER} Martingale (Max {MARTINGALE_STEPS} Steps, Max {MAX_CONSECUTIVE_LOSSES} Losses)', 'success')
+    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {TICKS_TO_ANALYZE}-Tick Reversal (Martingale Immediate / Base @ Sec 6) with x{MARTINGALE_MULTIPLIER} Martingale (Max {MARTINGALE_STEPS} Steps, Max {MAX_CONSECUTIVE_LOSSES} Losses)', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
