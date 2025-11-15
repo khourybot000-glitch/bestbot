@@ -14,9 +14,9 @@ from threading import Lock
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"               # ⬅️ تغيير الزوج
-DURATION = 26                  
+DURATION = 56                  
 DURATION_UNIT = "s"
-TICKS_TO_ANALYZE = 15 
+TICKS_TO_ANALYZE = 30 
 
 # إعدادات المضاعفة
 MARTINGALE_STEPS = 5           # ⬅️ الحد الأقصى لخطوات المضاعفة
