@@ -10,19 +10,19 @@ from multiprocessing import Process
 from threading import Lock
 
 # ==========================================================
-# BOT CONSTANT SETTINGS (R_25 | x14 | انتظار الثانية 6)
+# BOT CONSTANT SETTINGS (R_100 | x2.1 | اتجاه مباشر)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
-SYMBOL = "R_100"             
+SYMBOL = "R_100"               # ⬅️ تغيير الزوج
 DURATION = 5                  
 DURATION_UNIT = "t"
 TICKS_TO_ANALYZE = 5 
 
 # إعدادات المضاعفة
-MARTINGALE_STEPS = 5          # مثال: يسمح بخطوة مضاعفة واحدة (خسارتين متتاليتين قبل الإيقاف)
-MAX_CONSECUTIVE_LOSSES = 6    
-MARTINGALE_MULTIPLIER = 2.1  
-BARRIER_OFFSET = "0.03"       
+MARTINGALE_STEPS = 5           # ⬅️ الحد الأقصى لخطوات المضاعفة
+MAX_CONSECUTIVE_LOSSES = 6     # ⬅️ الحد الأقصى للخسائر المتتالية
+MARTINGALE_MULTIPLIER = 2.1    # ⬅️ معامل المضاعفة الجديد
+BARRIER_OFFSET = "0.03"        # ⬅️ قيمة الحاجز الجديدة
 
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
@@ -191,7 +191,6 @@ def send_trade_order(email, stake, currency, contract_type_param, barrier_offset
         return False
 
 
-# ⬅️ التعديل الرئيسي 1: لضمان الدخول الفوري بعد الخسارة
 def apply_martingale_logic(email):
     """ يطبق منطق المضاعفة بناءً على نتيجة الصفقة الواحدة """
     global is_contract_open, MARTINGALE_MULTIPLIER, MARTINGALE_STEPS, MAX_CONSECUTIVE_LOSSES
@@ -233,7 +232,7 @@ def apply_martingale_logic(email):
             stop_bot(email, clear_data=True, stop_reason=f"SL Reached: {MAX_CONSECUTIVE_LOSSES} consecutive losses.")
             return
 
-        # ⬅️ حساب المضاعفة وتحديث الحالة
+        # حساب المضاعفة وتحديث الحالة
         new_stake = calculate_martingale_stake(base_stake_used, current_data['current_step'], MARTINGALE_MULTIPLIER)
         
         current_data['current_stake_lower'] = new_stake
@@ -244,14 +243,14 @@ def apply_martingale_logic(email):
         current_data['open_contract_ids'] = []
         current_data['contract_profits'] = {}
         
-        # ⚠️ حفظ البيانات وتشغيل الدخول الفوري (لا ننتظر ثانية 6)
+        # حفظ البيانات وتشغيل الدخول الفوري (لا ننتظر ثانية 6)
         save_session_data(email, current_data)
         
         print(f"🔄 [MARTINGALE IMMEDIATE ENTRY] PnL: {total_profit:.2f}. Step {current_data['current_step']}. New Stake: {round(new_stake, 2):.2f}. Analyzing ticks and entering immediately.")
         
-        # ⬅️ الدخول الفوري مع تحليل التيكات الجديدة
+        # الدخول الفوري مع تحليل التيكات الجديدة
         start_new_single_trade(email)
-        return # إنهاء الدالة بعد إرسال صفقة المضاعفة
+        return 
 
     # ✅ Win or Draw Condition
     else: 
@@ -270,7 +269,7 @@ def apply_martingale_logic(email):
         current_data['open_contract_ids'] = []
         current_data['contract_profits'] = {}
         
-        # ⬅️ السماح بالدخول الأساسي عند الثانية 6 في الجولة القادمة
+        # السماح بالدخول الأساسي عند الثانية 6 في الجولة القادمة
         is_contract_open[email] = False 
         
         save_session_data(email, current_data)
@@ -294,19 +293,16 @@ def handle_contract_settlement(email, contract_id, profit_loss):
     save_session_data(email, current_data)
     
     if not current_data['open_contract_ids']:
-        # ⬅️ هذا سيشغل منطق المضاعفة (سواء كان فوريًا أو ينتظر ثانية 6)
         apply_martingale_logic(email)
 
 
 def start_new_single_trade(email):
-    """ يحلل آخر 5 تيكات ويرسل صفقة واحدة بناءً على استراتيجية الانعكاس """
+    """ يحلل آخر 5 تيكات ويرسل صفقة واحدة بناءً على استراتيجية الاتجاه المباشر/الزخم """
     global is_contract_open, BARRIER_OFFSET, CONTRACT_TYPE_HIGHER, CONTRACT_TYPE_LOWER, MARTINGALE_STEPS
     
     current_data = get_session_data(email)
     
-    # ⚠️ شرط الأمان: إذا كانت المضاعفة قد تجاوزت حد الإيقاف، لا تدخل
     if current_data['current_step'] > MARTINGALE_STEPS:
-         # هذا الشرط يفترض أن الدالة تم استدعاؤها خطأ بعد تجاوز الحد، لكن يجب أن يكون الإيقاف قد حدث في apply_martingale_logic
          is_contract_open[email] = False 
          return
         
@@ -315,29 +311,30 @@ def start_new_single_trade(email):
     # التحقق من توفر 5 تيكات
     if len(ticks) < TICKS_TO_ANALYZE:
         print(f"❌ [ENTRY FAIL] Only {len(ticks)} ticks available. Cannot analyze.")
-        # ⚠️ إذا كانت هذه محاولة دخول مضاعفة (Martingale)، يجب أن ننتظر الجولة القادمة
         if current_data['current_step'] > 0:
             print("⚠ [MARTINGALE SKIPPED] Insufficient ticks for immediate entry. Resetting for next tick.")
-            is_contract_open[email] = False # السماح بالمحاولة مع التيك التالي (وهو دخول فوري)
+            is_contract_open[email] = False 
         else:
-            is_contract_open[email] = False # السماح بالمحاولة في الثانية 6 التالية
+            is_contract_open[email] = False 
         return
 
     # 1. تحديد سعر الفتح (أقدم تيك) وسعر الإغلاق (أحدث تيك)
     open_price = ticks[0] 
     close_price = ticks[-1]
     
-    # 2. تحديد الاتجاه ونوع العقد المطلوب (استراتيجية الانعكاس)
+    # ⬅️ التعديل هنا: تطبيق منطق الاتجاه المباشر (Momentum)
     if open_price < close_price:
-        contract_type_to_use = CONTRACT_TYPE_LOWER
-        barrier_to_use = f"-{BARRIER_OFFSET}"
-        strategy_tag = "BULLISH -> LOWER"
-        stake_to_use = current_data['current_stake_lower'] 
-    elif open_price > close_price:
+        # صاعد (Open < Close) -> نتوقع استمرار الصعود (الزخم) -> ندخل HIGHER
         contract_type_to_use = CONTRACT_TYPE_HIGHER
         barrier_to_use = f"+{BARRIER_OFFSET}"
-        strategy_tag = "BEARISH -> HIGHER"
+        strategy_tag = "BULLISH -> HIGHER (MOMENTUM)"
         stake_to_use = current_data['current_stake_higher'] 
+    elif open_price > close_price:
+        # هابط (Open > Close) -> نتوقع استمرار الهبوط (الزخم) -> ندخل LOWER
+        contract_type_to_use = CONTRACT_TYPE_LOWER
+        barrier_to_use = f"-{BARRIER_OFFSET}"
+        strategy_tag = "BEARISH -> LOWER (MOMENTUM)"
+        stake_to_use = current_data['current_stake_lower'] 
     else:
         print("⚠ [ENTRY SKIPPED] Open price equals Close price. Waiting.")
         is_contract_open[email] = False
@@ -358,12 +355,11 @@ def start_new_single_trade(email):
     if send_trade_order(email, stake_to_use, currency_to_use, contract_type_to_use, barrier_to_use):
         pass
         
-    # ⬅️ وضع علامة "صفقة مفتوحة"
     is_contract_open[email] = True
     
     current_data['last_entry_time'] = int(time.time())
     current_data['last_entry_price'] = close_price 
-    current_data['last_5_ticks'] = [] # مسح قائمة التيكات بعد الدخول
+    current_data['last_5_ticks'] = [] 
     
     save_session_data(email, current_data)
 
@@ -417,7 +413,6 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             print(f"✅ [PROCESS] Connection established for {email}.")
             is_contract_open[email] = False
 
-        # ⬅️ التعديل الرئيسي 2: قصر الدخول على الثانية 6 للخطوة 0 فقط
         def on_message_wrapper(ws_app, message):
             data = json.loads(message)
             msg_type = data.get('msg_type')
@@ -596,7 +591,7 @@ CONTROL_FORM = """
 
 {% if session_data and session_data.is_running %}
     {% set timing_logic = "Immediate after Loss / @ Sec 6 after Win" %}
-    {% set strategy = "5-Tick Reversal (" + symbol + " - " + timing_logic + " - x" + martingale_multiplier|string + " Martingale, Max Steps " + martingale_steps|string + ")" %}
+    {% set strategy = "5-Tick MOMENTUM (" + symbol + " - " + timing_logic + " - x" + martingale_multiplier|string + " Martingale, Max Steps " + martingale_steps|string + ")" %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
@@ -739,7 +734,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {TICKS_TO_ANALYZE}-Tick Reversal (Martingale Immediate / Base @ Sec 6) with x{MARTINGALE_MULTIPLIER} Martingale (Max {MARTINGALE_STEPS} Steps, Max {MAX_CONSECUTIVE_LOSSES} Losses)', 'success')
+    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {TICKS_TO_ANALYZE}-Tick Momentum ({SYMBOL} - Martingale Immediate / Base @ Sec 6) with x{MARTINGALE_MULTIPLIER} Martingale (Max {MARTINGALE_STEPS} Steps, Max {MAX_CONSECUTIVE_LOSSES} Losses)', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
