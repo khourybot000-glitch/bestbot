@@ -10,19 +10,19 @@ from multiprocessing import Process
 from threading import Lock
 
 # ==========================================================
-# BOT CONSTANT SETTINGS (R_100 | x2.1 | اتجاه مباشر)
+# BOT CONSTANT SETTINGS (R_100 | x2.1 | عكس الاتجاه)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
-SYMBOL = "R_100"               # ⬅️ تغيير الزوج
+SYMBOL = "R_100"               
 DURATION = 5                  
 DURATION_UNIT = "t"
 TICKS_TO_ANALYZE = 5 
 
 # إعدادات المضاعفة
-MARTINGALE_STEPS = 5           # ⬅️ الحد الأقصى لخطوات المضاعفة
-MAX_CONSECUTIVE_LOSSES = 6     # ⬅️ الحد الأقصى للخسائر المتتالية
-MARTINGALE_MULTIPLIER = 2.1    # ⬅️ معامل المضاعفة الجديد
-BARRIER_OFFSET = "0.03"        # ⬅️ قيمة الحاجز الجديدة
+MARTINGALE_STEPS = 5           
+MAX_CONSECUTIVE_LOSSES = 6     
+MARTINGALE_MULTIPLIER = 2.1    
+BARRIER_OFFSET = "0.03"        
 
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
@@ -297,7 +297,7 @@ def handle_contract_settlement(email, contract_id, profit_loss):
 
 
 def start_new_single_trade(email):
-    """ يحلل آخر 5 تيكات ويرسل صفقة واحدة بناءً على استراتيجية الاتجاه المباشر/الزخم """
+    """ يحلل آخر 5 تيكات ويرسل صفقة واحدة بناءً على استراتيجية عكس الاتجاه (Reversal) """
     global is_contract_open, BARRIER_OFFSET, CONTRACT_TYPE_HIGHER, CONTRACT_TYPE_LOWER, MARTINGALE_STEPS
     
     current_data = get_session_data(email)
@@ -322,19 +322,19 @@ def start_new_single_trade(email):
     open_price = ticks[0] 
     close_price = ticks[-1]
     
-    # ⬅️ التعديل هنا: تطبيق منطق الاتجاه المباشر (Momentum)
+    # ⬅️ التعديل هنا: تطبيق منطق عكس الاتجاه (Reversal)
     if open_price < close_price:
-        # صاعد (Open < Close) -> نتوقع استمرار الصعود (الزخم) -> ندخل HIGHER
-        contract_type_to_use = CONTRACT_TYPE_HIGHER
-        barrier_to_use = f"+{BARRIER_OFFSET}"
-        strategy_tag = "BULLISH -> HIGHER (MOMENTUM)"
-        stake_to_use = current_data['current_stake_higher'] 
-    elif open_price > close_price:
-        # هابط (Open > Close) -> نتوقع استمرار الهبوط (الزخم) -> ندخل LOWER
+        # صاعد (Open < Close) -> نتوقع هبوط (انعكاس) -> ندخل LOWER
         contract_type_to_use = CONTRACT_TYPE_LOWER
         barrier_to_use = f"-{BARRIER_OFFSET}"
-        strategy_tag = "BEARISH -> LOWER (MOMENTUM)"
+        strategy_tag = "BULLISH -> LOWER (REVERSAL)"
         stake_to_use = current_data['current_stake_lower'] 
+    elif open_price > close_price:
+        # هابط (Open > Close) -> نتوقع صعود (انعكاس) -> ندخل HIGHER
+        contract_type_to_use = CONTRACT_TYPE_HIGHER
+        barrier_to_use = f"+{BARRIER_OFFSET}"
+        strategy_tag = "BEARISH -> HIGHER (REVERSAL)"
+        stake_to_use = current_data['current_stake_higher'] 
     else:
         print("⚠ [ENTRY SKIPPED] Open price equals Close price. Waiting.")
         is_contract_open[email] = False
@@ -591,7 +591,7 @@ CONTROL_FORM = """
 
 {% if session_data and session_data.is_running %}
     {% set timing_logic = "Immediate after Loss / @ Sec 6 after Win" %}
-    {% set strategy = "5-Tick MOMENTUM (" + symbol + " - " + timing_logic + " - x" + martingale_multiplier|string + " Martingale, Max Steps " + martingale_steps|string + ")" %}
+    {% set strategy = "5-Tick REVERSAL (" + symbol + " - " + timing_logic + " - x" + martingale_multiplier|string + " Martingale, Max Steps " + martingale_steps|string + ")" %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
@@ -734,7 +734,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {TICKS_TO_ANALYZE}-Tick Momentum ({SYMBOL} - Martingale Immediate / Base @ Sec 6) with x{MARTINGALE_MULTIPLIER} Martingale (Max {MARTINGALE_STEPS} Steps, Max {MAX_CONSECUTIVE_LOSSES} Losses)', 'success')
+    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {TICKS_TO_ANALYZE}-Tick Reversal ({SYMBOL} - Martingale Immediate / Base @ Sec 6) with x{MARTINGALE_MULTIPLIER} Martingale (Max {MARTINGALE_STEPS} Steps, Max {MAX_CONSECUTIVE_LOSSES} Losses)', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
