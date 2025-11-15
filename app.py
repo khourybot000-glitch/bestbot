@@ -28,8 +28,8 @@ RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 
-CONTRACT_TYPE_HIGHER = "CALL" 
-CONTRACT_TYPE_LOWER = "PUT"   
+CONTRACT_TYPE_HIGHER = "PUT" 
+CONTRACT_TYPE_LOWER = "CALL"   
 
 # ==========================================================
 
@@ -316,13 +316,13 @@ def start_new_single_trade(email):
     if open_price < close_price:
         # صاعد (Open < Close) -> نتوقع هبوط (انعكاس) -> ندخل LOWER
         contract_type_to_use = CONTRACT_TYPE_LOWER
-        barrier_to_use = f"-{BARRIER_OFFSET}"
+        barrier_to_use = f"+{BARRIER_OFFSET}"
         strategy_tag = "BULLISH -> LOWER"
         stake_to_use = current_data['current_stake_lower'] # استخدام رهان Lower
     elif open_price > close_price:
         # هابط (Open > Close) -> نتوقع صعود (انعكاس) -> ندخل HIGHER
         contract_type_to_use = CONTRACT_TYPE_HIGHER
-        barrier_to_use = f"+{BARRIER_OFFSET}"
+        barrier_to_use = f"-{BARRIER_OFFSET}"
         strategy_tag = "BEARISH -> HIGHER"
         stake_to_use = current_data['current_stake_higher'] # استخدام رهان Higher
     else:
