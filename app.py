@@ -10,21 +10,21 @@ from multiprocessing import Process
 from threading import Lock
 
 # ==========================================================
-# BOT CONSTANT SETTINGS (R_100 | x2.1 | 90 Ticks | Same Direction Martingale)
+# BOT CONSTANT SETTINGS (R_100 | x2.1 | 60 Ticks | Delayed Martingale)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"               
-DURATION = 56                  # 56 ثانية
+DURATION = 56                  # 56 ثانية (مدة الصفقة)
 DURATION_UNIT = "s"            
-TICKS_TO_ANALYZE = 90          # 90 تيك للتحليل (3 شمعات x 30 تيك)
+TICKS_TO_ANALYZE = 60          # ⬅️ 60 تيك للتحليل (2 شمعة x 30 تيك)
 
 # إعدادات المضاعفة
-MARTINGALE_STEPS = 5           
-MAX_CONSECUTIVE_LOSSES = 6     
-MARTINGALE_MULTIPLIER = 2.1    
-BARRIER_OFFSET = "0.03"        
+MARTINGALE_STEPS = 5           # الحد الأقصى لخطوات المضاعفة (Step 0, 1, 2, 3, 4, 5)
+MAX_CONSECUTIVE_LOSSES = 6     # الحد الأقصى للخسائر المتتالية
+MARTINGALE_MULTIPLIER = 2.1    # معامل المضاعفة
+BARRIER_OFFSET = "0.03"        # قيمة الحاجز (مثلاً 0.03+)
 
-RECONNECT_DELAY = 2            # ⬅️ زمن الانتظار لإعادة الاتصال بالثواني (مفتاح الاستقرار)
+RECONNECT_DELAY = 2            
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 
@@ -126,7 +126,6 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
             process = active_processes[email]
             if process.is_alive():
                 print(f"🛑 [INFO] Terminating Process for {email}...")
-                # استخدام terminate لإيقاف العملية المنفصلة بشكل قسري
                 process.terminate() 
             del active_processes[email]
     
@@ -193,55 +192,6 @@ def send_trade_order(email, stake, currency, contract_type_param, barrier_offset
         return False
 
 
-def start_martingale_re_entry(email, contract_to_replicate):
-    """ يدخل فوراً في صفقة مضاعفة بنفس اتجاه الصفقة الخاسرة، دون تحليل الـ 90 تيك. """
-    global is_contract_open, BARRIER_OFFSET, CONTRACT_TYPE_HIGHER, CONTRACT_TYPE_LOWER
-    
-    current_data = get_session_data(email)
-    
-    if current_data['current_step'] == 0:
-        print("❌ [MARTINGALE FAIL] Called re-entry function outside of martingale step. Reverting.")
-        is_contract_open[email] = False
-        return
-    
-    # 1. تحديد نوع الصفقة الجديدة (نفس اتجاه الصفقة الخاسرة)
-    contract_type_to_use = contract_to_replicate
-    
-    if contract_type_to_use == CONTRACT_TYPE_HIGHER:
-        barrier_to_use = f"+{BARRIER_OFFSET}"
-        strategy_tag = "INSTANT RE-ENTRY -> HIGHER (SAME DIRECTION)"
-    elif contract_type_to_use == CONTRACT_TYPE_LOWER:
-        barrier_to_use = f"-{BARRIER_OFFSET}"
-        strategy_tag = "INSTANT RE-ENTRY -> LOWER (SAME DIRECTION)"
-    else:
-        print("❌ [MARTINGALE FAIL] Unknown contract type. Returning to standard analysis.")
-        is_contract_open[email] = False
-        return
-        
-    stake_to_use = current_data['current_stake_higher'] # يستخدم الرهان المضاعف المحسوب
-    currency_to_use = current_data['currency']
-    
-    # 2. إرسال الصفقة
-    current_data['current_entry_id'] = time.time()
-    current_data['open_contract_ids'] = []
-    current_data['contract_profits'] = {}
-    
-    entry_type_tag = f"MARTINGALE STEP {current_data['current_step']}"
-    entry_timing_tag = "INSTANT ENTRY"
-    
-    print(f"🧠 [SINGLE TRADE ENTRY - {entry_timing_tag}] {entry_type_tag} | Strategy: {strategy_tag} | Stake: {round(stake_to_use, 2):.2f}")
-    
-    # تخزين نوع العقد الذي تم إرساله (نفس النوع)
-    current_data['last_contract_type_used'] = contract_type_to_use 
-    
-    if send_trade_order(email, stake_to_use, currency_to_use, contract_type_to_use, barrier_to_use):
-        pass
-        
-    is_contract_open[email] = True
-    current_data['last_entry_time'] = int(time.time())
-    
-    save_session_data(email, current_data)
-
 def apply_martingale_logic(email):
     """ يطبق منطق المضاعفة بناءً على نتيجة الصفقة الواحدة """
     global is_contract_open, MARTINGALE_MULTIPLIER, MARTINGALE_STEPS, MAX_CONSECUTIVE_LOSSES
@@ -266,9 +216,8 @@ def apply_martingale_logic(email):
     
     base_stake_used = current_data['base_stake']
     
-    # ❌ Loss Condition 
+    # ❌ Loss Condition (يتم تعيين المضاعفة والانتظار حتى الثانية 0 والتحليل الجديد)
     if total_profit < 0:
-        last_contract_type = current_data.get('last_contract_type_used') 
         
         current_data['total_losses'] += 1 
         current_data['consecutive_losses'] += 1
@@ -298,18 +247,13 @@ def apply_martingale_logic(email):
         
         save_session_data(email, current_data)
         
-        print(f"🔄 [MARTINGALE INSTANT ENTRY] PnL: {total_profit:.2f}. Step {current_data['current_step']}. New Stake: {round(new_stake, 2):.2f}. Re-entering immediately.")
-        
-        # 🚀 الدخول الفوري في المضاعفة بنفس الصفقة الخاسرة دون تحليل
-        if last_contract_type:
-            start_martingale_re_entry(email, last_contract_type)
-        else:
-            print("❌ [RE-ENTRY FAIL] Could not find the last contract type. Returning to full analysis @ SEC 0.")
-            is_contract_open[email] = False
+        # ⬅️ **التعديل الهام:** يتم إنهاء الصفقة والسماح بالدخول عند الثانية 0 القادمة
+        print(f"🔄 [MARTINGALE DELAYED ENTRY] PnL: {total_profit:.2f}. Step {current_data['current_step']}. New Stake: {round(new_stake, 2):.2f}. Waiting for next @ SEC 0 (New Analysis Required).")
+        is_contract_open[email] = False # يسمح بالدخول عند الثانية 0
         
         return 
 
-    # ✅ Win or Draw Condition (الربح أو التعادل) ⬅️ العودة للتحليل عند الثانية 0
+    # ✅ Win or Draw Condition (الربح أو التعادل) 
     else: 
         current_data['total_wins'] += 1 if total_profit > 0 else 0 
         current_data['current_step'] = 0 
@@ -327,7 +271,7 @@ def apply_martingale_logic(email):
         current_data['contract_profits'] = {}
         current_data['last_contract_type_used'] = None 
         
-        # السماح بالدخول الأساسي عند الثانية 0 في الجولة القادمة (إعادة تحليل الـ 90 تيك)
+        # السماح بالدخول الأساسي عند الثانية 0 في الجولة القادمة
         is_contract_open[email] = False 
         
         save_session_data(email, current_data)
@@ -355,28 +299,27 @@ def handle_contract_settlement(email, contract_id, profit_loss):
 
 
 def start_new_single_trade(email):
-    """ يتم تنفيذ هذه الدالة فقط للصفقة الأساسية، حيث تقوم بتحليل الـ 90 تيك. """
-    global is_contract_open, BARRIER_OFFSET, CONTRACT_TYPE_HIGHER, CONTRACT_TYPE_LOWER, MARTINGALE_STEPS, TICKS_TO_ANALYZE
+    """ 
+    يتم تنفيذ هذه الدالة للصفقة الأساسية ولصفقات المضاعفة المؤجلة.
+    الشرط: C1 عكس C2، والدخول باتجاه C2.
+    """
+    global is_contract_open, BARRIER_OFFSET, CONTRACT_TYPE_HIGHER, CONTRACT_TYPE_LOWER, TICKS_TO_ANALYZE
     
     current_data = get_session_data(email)
     
-    # إذا كنا في خطوة مضاعفة، يتم تجاوز هذا التحليل
-    if current_data['current_step'] > 0:
-         print("❌ [ENTRY SKIP] Currently in Martingale sequence (Step > 0). Waiting for result or stop.")
-         is_contract_open[email] = False 
-         return
-        
     ticks = current_data.get('last_5_ticks', [])
     
-    # التحقق من توفر 90 تيك
+    # التحقق من توفر 60 تيك
     if len(ticks) < TICKS_TO_ANALYZE:
-        print(f"❌ [ENTRY FAIL] Only {len(ticks)} ticks available (Need {TICKS_TO_ANALYZE} for 3 candles). Waiting for more ticks @ SEC 0.")
+        if current_data['current_step'] == 0: 
+            # رسالة التنبيه تظهر فقط في الخطوة 0 لتجنب الإزعاج
+            print(f"❌ [ENTRY FAIL] Only {len(ticks)} ticks available (Need {TICKS_TO_ANALYZE} for 2 candles). Waiting for more ticks @ SEC 0.")
         is_contract_open[email] = False 
         return
     
-    # 1. تحديد اتجاهات الشمعات الثلاث
+    # 1. تحديد اتجاهات الشمعتين (30 تيك لكل شمعة)
     
-    CANDLE_SIZE = TICKS_TO_ANALYZE // 3 # 30 تيك
+    CANDLE_SIZE = TICKS_TO_ANALYZE // 2 # 30 تيك
 
     # الشمعة 1 (تيك 0 حتى 29)
     candle1_open = ticks[0]
@@ -385,36 +328,31 @@ def start_new_single_trade(email):
 
     # الشمعة 2 (تيك 30 حتى 59)
     candle2_open = ticks[CANDLE_SIZE]      
-    candle2_close = ticks[CANDLE_SIZE * 2 - 1] 
+    candle2_close = ticks[-1]                          
     is_candle2_up = candle2_close > candle2_open
-
-    # الشمعة 3 (تيك 60 حتى 89)
-    candle3_open = ticks[CANDLE_SIZE * 2]    
-    candle3_close = ticks[-1]                          
-    is_candle3_up = candle3_close > candle3_open
     
-    # 2. تحديد نوع الدخول بناءً على توافق الاتجاه (عكسي)
+    # 2. تحديد نوع الدخول بناءً على قاعدة التذبذب (C1 عكس C2) والدخول باتجاه C2
     contract_type_to_use = None
     barrier_to_use = None
     strategy_tag = None
     
-    # ⬆️ 3 شمعات صاعدة متتالية -> ندخل LOWER (عكس)
-    if is_candle1_up and is_candle2_up and is_candle3_up:
+    stake_to_use = current_data['current_stake_higher'] # يستخدم الرهان الحالي (قد يكون مضاعفاً)
+
+    # ⬆️⬇️ الشمعة 1 صاعدة + الشمعة 2 هابطة -> ندخل PUT (باتجاه C2 الهابطة)
+    if is_candle1_up and not is_candle2_up:
         contract_type_to_use = CONTRACT_TYPE_LOWER
         barrier_to_use = f"-{BARRIER_OFFSET}"
-        strategy_tag = "3 BULLISH CANDLES -> REVERSAL LOWER"
-        stake_to_use = current_data['current_stake_lower'] 
+        strategy_tag = "C1 BULL + C2 BEAR -> FOLLOW C2 LOWER"
         
-    # ⬇️ 3 شمعات هابطة متتالية -> ندخل HIGHER (عكس)
-    elif not is_candle1_up and not is_candle2_up and not is_candle3_up:
+    # ⬇️⬆️ الشمعة 1 هابطة + الشمعة 2 صاعدة -> ندخل CALL (باتجاه C2 الصاعدة)
+    elif not is_candle1_up and is_candle2_up:
         contract_type_to_use = CONTRACT_TYPE_HIGHER
         barrier_to_use = f"+{BARRIER_OFFSET}"
-        strategy_tag = "3 BEARISH CANDLES -> REVERSAL HIGHER"
-        stake_to_use = current_data['current_stake_higher'] 
+        strategy_tag = "C1 BEAR + C2 BULL -> FOLLOW C2 HIGHER"
         
     else:
-        # لا يوجد توافق للـ 3 شمعات، لا ندخل (ننتظر الثانية 0 القادمة)
-        print("⚠ [ENTRY SKIPPED] No 3-candle momentum found. Waiting for next tick @ SEC 0.")
+        # لا يوجد تذبذب مطلوب (مثل 2 صاعدة أو 2 هابطة)
+        print(f"⚠ [ENTRY SKIPPED @ SEC 0] No C1-C2 opposite pattern found. Current Step: {current_data['current_step']}")
         is_contract_open[email] = False
         return
 
@@ -426,7 +364,7 @@ def start_new_single_trade(email):
     current_data['open_contract_ids'] = []
     current_data['contract_profits'] = {}
     
-    entry_type_tag = "BASE ENTRY"
+    entry_type_tag = f"ENTRY (STEP {current_data['current_step']})"
     entry_timing_tag = "@ SEC 0"
     
     print(f"🧠 [SINGLE TRADE ENTRY - {entry_timing_tag}] {entry_type_tag} | Strategy: {strategy_tag} | Stake: {round(stake_to_use, 2):.2f}")
@@ -438,7 +376,7 @@ def start_new_single_trade(email):
     is_contract_open[email] = True
     
     current_data['last_entry_time'] = int(time.time())
-    current_data['last_entry_price'] = candle3_close 
+    current_data['last_entry_price'] = candle2_close 
     
     # تخزين نوع العقد الذي تم إرساله
     current_data['last_contract_type_used'] = contract_type_to_use 
@@ -517,17 +455,17 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                         current_data['last_valid_tick_price'] = current_price
                         current_data['last_tick_data'] = data['tick']
                         
-                        # تخزين التيكات في قائمة متجددة (نافذة متحركة 90 تيك)
                         current_data['last_5_ticks'].append(current_price)
                         if len(current_data['last_5_ticks']) > TICKS_TO_ANALYZE: 
                             current_data['last_5_ticks'].pop(0) 
                         
                         save_session_data(email, current_data) 
                         
-                        # === منطق الدخول الأساسي ===
-                        if not is_contract_open.get(email) and current_data['current_step'] == 0:
+                        # === منطق الدخول الأساسي (يعالج المضاعفة المؤجلة أيضاً) ===
+                        if not is_contract_open.get(email):
                             if current_second == 0:
                                 start_new_single_trade(email)
+                        # === نهاية منطق الدخول ===
                     except KeyError:
                         pass 
                     except Exception as e:
@@ -572,22 +510,18 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 )
                 active_ws[email] = ws
                 
-                # استخدام reconnect=RECONNECT_DELAY لتمكين إعادة الاتصال المستمرة
                 ws.run_forever(ping_interval=10, ping_timeout=5, reconnect=RECONNECT_DELAY)
                 
             except Exception as e:
-                # التقاط أي خطأ حرج (مثل مشاكل الشبكة) خارج run_forever
                 print(f"❌ [CRITICAL ERROR] Uncaught exception in WS connection loop for {email}: {e}")
                 is_contract_open[email] = False
             
-            # إذا خرجنا من ws.run_forever (بسبب فشل إعادة الاتصال)، ننتقل إلى هنا ونحاول إعادة إنشاء الاتصال بالكامل
             current_data = get_session_data(email)
             if not current_data.get('is_running'): break
             
             print(f"💤 [PROCESS] WS failed to reconnect, attempting to restart connection in {RECONNECT_DELAY} seconds...")
             time.sleep(RECONNECT_DELAY)
 
-        # إذا توقفت الحلقة الداخلية، نتحقق من حالة البوت النهائية
         if get_session_data(email).get('is_running') is False: break
 
     print(f"🛑 [PROCESS] Bot process loop ended for {email}.")
@@ -689,8 +623,8 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set timing_logic = "Base @ Sec 0 (90-Tick Analysis) | Martingale is Instant Re-Entry (Same Direction)" %}
-    {% set strategy = ticks_to_analyze|string + "-Tick (3 Candle Reversal) (" + symbol + " - " + timing_logic + " - x" + martingale_multiplier|string + " Martingale, Max Steps " + martingale_steps|string + ")" %}
+    {% set timing_logic = "Delayed Martingale @ Sec 0 (New Analysis)" %}
+    {% set strategy = ticks_to_analyze|string + "-Tick (C1 vs C2 Opposite -> Follow C2) (" + symbol + " - Entry @ Sec 0 | " + timing_logic + " with x" + martingale_multiplier|string + " Martingale, Max Steps " + martingale_steps|string + ")" %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
@@ -834,7 +768,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {TICKS_TO_ANALYZE}-Tick (3 Candle Reversal) ({SYMBOL} - Base Entry @ Sec 0 | Martingale is Instant Re-Entry Same Direction) with x{MARTINGALE_MULTIPLIER} Martingale (Max {MARTINGALE_STEPS} Steps, Max {MAX_CONSECUTIVE_LOSSES} Losses)', 'success')
+    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {TICKS_TO_ANALYZE}-Tick (C1 vs C2 Opposite -> Follow C2) ({SYMBOL} - Entry @ Sec 0 | Delayed Martingale with x{MARTINGALE_MULTIPLIER} Martingale (Max {MARTINGALE_STEPS} Steps, Max {MAX_CONSECUTIVE_LOSSES} Losses))', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
@@ -852,6 +786,7 @@ def logout():
 
 
 if __name__ == '__main__':
+    # إيقاف أي عمليات سابقة عند بدء تشغيل الخادم
     all_sessions = load_persistent_sessions()
     for email in list(all_sessions.keys()):
         stop_bot(email, clear_data=False, stop_reason="Disconnected (Auto-Retry)")
