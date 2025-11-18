@@ -24,7 +24,7 @@ MAX_CONSECUTIVE_LOSSES = 6
 MARTINGALE_MULTIPLIER = 2.1    
 BARRIER_OFFSET = "0.03"        
 
-RECONNECT_DELAY = 1
+RECONNECT_DELAY = 2            # ⬅️ زمن الانتظار لإعادة الاتصال بالثواني (مفتاح الاستقرار)
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 
@@ -67,7 +67,7 @@ DEFAULT_SESSION_STATE = {
     "open_contract_ids": [],              
     "contract_profits": {},               
     "last_barrier_value": BARRIER_OFFSET,
-    "last_contract_type_used": None # ⬅️ متغير لتتبع نوع الصفقة الخاسرة
+    "last_contract_type_used": None 
 }
 
 # --- Persistence functions (UNCHANGED) ---
@@ -126,6 +126,7 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
             process = active_processes[email]
             if process.is_alive():
                 print(f"🛑 [INFO] Terminating Process for {email}...")
+                # استخدام terminate لإيقاف العملية المنفصلة بشكل قسري
                 process.terminate() 
             del active_processes[email]
     
@@ -193,7 +194,7 @@ def send_trade_order(email, stake, currency, contract_type_param, barrier_offset
 
 
 def start_martingale_re_entry(email, contract_to_replicate):
-    """ ⬅️ دالة جديدة: يدخل فوراً في صفقة مضاعفة بنفس اتجاه الصفقة الخاسرة، دون تحليل الـ 90 تيك. """
+    """ يدخل فوراً في صفقة مضاعفة بنفس اتجاه الصفقة الخاسرة، دون تحليل الـ 90 تيك. """
     global is_contract_open, BARRIER_OFFSET, CONTRACT_TYPE_HIGHER, CONTRACT_TYPE_LOWER
     
     current_data = get_session_data(email)
@@ -230,7 +231,7 @@ def start_martingale_re_entry(email, contract_to_replicate):
     
     print(f"🧠 [SINGLE TRADE ENTRY - {entry_timing_tag}] {entry_type_tag} | Strategy: {strategy_tag} | Stake: {round(stake_to_use, 2):.2f}")
     
-    # ⬅️ **تعديل:** تخزين نوع العقد الذي تم إرساله (نفس النوع)
+    # تخزين نوع العقد الذي تم إرساله (نفس النوع)
     current_data['last_contract_type_used'] = contract_type_to_use 
     
     if send_trade_order(email, stake_to_use, currency_to_use, contract_type_to_use, barrier_to_use):
@@ -267,7 +268,7 @@ def apply_martingale_logic(email):
     
     # ❌ Loss Condition 
     if total_profit < 0:
-        last_contract_type = current_data.get('last_contract_type_used') # ⬅️ الحصول على نوع الصفقة الخاسرة
+        last_contract_type = current_data.get('last_contract_type_used') 
         
         current_data['total_losses'] += 1 
         current_data['consecutive_losses'] += 1
@@ -299,7 +300,7 @@ def apply_martingale_logic(email):
         
         print(f"🔄 [MARTINGALE INSTANT ENTRY] PnL: {total_profit:.2f}. Step {current_data['current_step']}. New Stake: {round(new_stake, 2):.2f}. Re-entering immediately.")
         
-        # 🚀 **التعديل:** الدخول الفوري في المضاعفة بنفس الصفقة الخاسرة دون تحليل
+        # 🚀 الدخول الفوري في المضاعفة بنفس الصفقة الخاسرة دون تحليل
         if last_contract_type:
             start_martingale_re_entry(email, last_contract_type)
         else:
@@ -324,7 +325,7 @@ def apply_martingale_logic(email):
         current_data['current_entry_id'] = None
         current_data['open_contract_ids'] = []
         current_data['contract_profits'] = {}
-        current_data['last_contract_type_used'] = None # ⬅️ مسح نوع العقد للتحليل الجديد
+        current_data['last_contract_type_used'] = None 
         
         # السماح بالدخول الأساسي عند الثانية 0 في الجولة القادمة (إعادة تحليل الـ 90 تيك)
         is_contract_open[email] = False 
@@ -354,7 +355,7 @@ def handle_contract_settlement(email, contract_id, profit_loss):
 
 
 def start_new_single_trade(email):
-    """ ⬅️ يتم تنفيذ هذه الدالة فقط للصفقة الأساسية، حيث تقوم بتحليل الـ 90 تيك. """
+    """ يتم تنفيذ هذه الدالة فقط للصفقة الأساسية، حيث تقوم بتحليل الـ 90 تيك. """
     global is_contract_open, BARRIER_OFFSET, CONTRACT_TYPE_HIGHER, CONTRACT_TYPE_LOWER, MARTINGALE_STEPS, TICKS_TO_ANALYZE
     
     current_data = get_session_data(email)
@@ -439,7 +440,7 @@ def start_new_single_trade(email):
     current_data['last_entry_time'] = int(time.time())
     current_data['last_entry_price'] = candle3_close 
     
-    # ⬅️ **التعديل:** تخزين نوع العقد الذي تم إرساله
+    # تخزين نوع العقد الذي تم إرساله
     current_data['last_contract_type_used'] = contract_type_to_use 
 
     save_session_data(email, current_data)
@@ -448,7 +449,7 @@ def start_new_single_trade(email):
 def bot_core_logic(email, token, stake, tp, currency, account_type):
     """ Core bot logic """
     
-    global is_contract_open, active_ws
+    global is_contract_open, active_ws, RECONNECT_DELAY
 
     is_contract_open = {email: False}
     active_ws = {email: None}
@@ -478,107 +479,116 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
     })
     save_session_data(email, session_data)
 
-    while True:
+    # الحلقة الخارجية: تبقي العملية (Process) نشطة وتحاول إعادة الاتصال إذا انهار كائن WebSocketApp
+    while True: 
         current_data = get_session_data(email)
         
         if not current_data.get('is_running'): break
 
         print(f"🔗 [PROCESS] Attempting to connect for {email} ({account_type.upper()}/{currency})...")
 
-        def on_open_wrapper(ws_app):
-            current_data = get_session_data(email) 
-            ws_app.send(json.dumps({"authorize": current_data['api_token']}))
-            ws_app.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
-            running_data = get_session_data(email)
-            running_data['is_running'] = True
-            save_session_data(email, running_data)
-            print(f"✅ [PROCESS] Connection established for {email}.")
-            is_contract_open[email] = False
-
-        def on_message_wrapper(ws_app, message):
-            data = json.loads(message)
-            msg_type = data.get('msg_type')
+        # الحلقة الداخلية: تتعامل مع إنشاء اتصال WebSocket ومحاولات إعادة الاتصال التلقائية للمكتبة
+        while current_data.get('is_running'): 
             
+            def on_open_wrapper(ws_app):
+                current_data = get_session_data(email) 
+                ws_app.send(json.dumps({"authorize": current_data['api_token']}))
+                ws_app.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
+                running_data = get_session_data(email)
+                running_data['is_running'] = True
+                save_session_data(email, running_data)
+                print(f"✅ [PROCESS] Connection established for {email}.")
+                is_contract_open[email] = False
+
+            def on_message_wrapper(ws_app, message):
+                data = json.loads(message)
+                msg_type = data.get('msg_type')
+                
+                current_data = get_session_data(email)
+                if not current_data.get('is_running'): return
+                    
+                if msg_type == 'tick':
+                    try:
+                        current_price = float(data['tick']['quote'])
+                        tick_epoch = data['tick']['epoch'] 
+                        
+                        current_second = datetime.fromtimestamp(tick_epoch, tz=timezone.utc).second
+                        
+                        current_data['last_valid_tick_price'] = current_price
+                        current_data['last_tick_data'] = data['tick']
+                        
+                        # تخزين التيكات في قائمة متجددة (نافذة متحركة 90 تيك)
+                        current_data['last_5_ticks'].append(current_price)
+                        if len(current_data['last_5_ticks']) > TICKS_TO_ANALYZE: 
+                            current_data['last_5_ticks'].pop(0) 
+                        
+                        save_session_data(email, current_data) 
+                        
+                        # === منطق الدخول الأساسي ===
+                        if not is_contract_open.get(email) and current_data['current_step'] == 0:
+                            if current_second == 0:
+                                start_new_single_trade(email)
+                    except KeyError:
+                        pass 
+                    except Exception as e:
+                        print(f"❌ [TICK ERROR] Failed to process tick: {e}")
+                        
+                elif msg_type == 'buy':
+                    contract_id = data['buy']['contract_id']
+                    current_data['open_contract_ids'].append(contract_id)
+                    save_session_data(email, current_data)
+                    
+                    ws_app.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
+                
+                elif 'error' in data:
+                    error_code = data['error'].get('code', 'N/A')
+                    error_message = data['error'].get('message', 'Unknown Error')
+                    print(f"❌❌ [API ERROR] Code: {error_code}, Message: {error_message}. Trade may be disrupted.")
+                    
+                    if current_data['current_entry_id'] is not None and is_contract_open.get(email):
+                        time.sleep(1) 
+                        if not current_data['open_contract_ids']: 
+                            apply_martingale_logic(email)
+                        else: 
+                            print("⚠ [TRADE FAILURE] Waiting for the open contract result...")
+
+                elif msg_type == 'proposal_open_contract':
+                    contract = data['proposal_open_contract']
+                    if contract.get('is_sold') == 1:
+                        contract_id = contract['contract_id']
+                        handle_contract_settlement(email, contract_id, contract['profit'])
+                        
+                        if 'subscription_id' in data: ws_app.send(json.dumps({"forget": data['subscription_id']}))
+
+            def on_close_wrapper(ws_app, code, msg):
+                print(f"⚠ [PROCESS] WS closed for {email} (Code: {code}). Attempting reconnection...")
+                is_contract_open[email] = False
+
+            try:
+                ws = websocket.WebSocketApp(
+                    WSS_URL, on_open=on_open_wrapper, on_message=on_message_wrapper,
+                    on_error=lambda ws, err: print(f"[WS Error {email}] {err}"),
+                    on_close=on_close_wrapper
+                )
+                active_ws[email] = ws
+                
+                # استخدام reconnect=RECONNECT_DELAY لتمكين إعادة الاتصال المستمرة
+                ws.run_forever(ping_interval=10, ping_timeout=5, reconnect=RECONNECT_DELAY)
+                
+            except Exception as e:
+                # التقاط أي خطأ حرج (مثل مشاكل الشبكة) خارج run_forever
+                print(f"❌ [CRITICAL ERROR] Uncaught exception in WS connection loop for {email}: {e}")
+                is_contract_open[email] = False
+            
+            # إذا خرجنا من ws.run_forever (بسبب فشل إعادة الاتصال)، ننتقل إلى هنا ونحاول إعادة إنشاء الاتصال بالكامل
             current_data = get_session_data(email)
-            if not current_data.get('is_running'): return
-                
-            if msg_type == 'tick':
-                try:
-                    current_price = float(data['tick']['quote'])
-                    tick_epoch = data['tick']['epoch'] 
-                    
-                    current_second = datetime.fromtimestamp(tick_epoch, tz=timezone.utc).second
-                    
-                    current_data['last_valid_tick_price'] = current_price
-                    current_data['last_tick_data'] = data['tick']
-                    
-                    # تخزين التيكات في قائمة متجددة (نافذة متحركة 90 تيك)
-                    current_data['last_5_ticks'].append(current_price)
-                    if len(current_data['last_5_ticks']) > TICKS_TO_ANALYZE: # 90 تيك
-                        current_data['last_5_ticks'].pop(0) 
-                    
-                    save_session_data(email, current_data) 
-                    
-                    # === منطق الدخول الأساسي (فقط عند الثانية 0 وخطوة المضاعفة 0) ===
-                    if not is_contract_open.get(email) and current_data['current_step'] == 0:
-                        if current_second == 0:
-                            start_new_single_trade(email)
-                    # === نهاية منطق الدخول ===
-                except KeyError:
-                    pass 
-                except Exception as e:
-                    print(f"❌ [TICK ERROR] Failed to process tick: {e}")
-                    
-            elif msg_type == 'buy':
-                contract_id = data['buy']['contract_id']
-                current_data['open_contract_ids'].append(contract_id)
-                save_session_data(email, current_data)
-                
-                ws_app.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
+            if not current_data.get('is_running'): break
             
-            elif 'error' in data:
-                error_code = data['error'].get('code', 'N/A')
-                error_message = data['error'].get('message', 'Unknown Error')
-                print(f"❌❌ [API ERROR] Code: {error_code}, Message: {error_message}. Trade may be disrupted.")
-                
-                if current_data['current_entry_id'] is not None and is_contract_open.get(email):
-                    time.sleep(1) 
-                    if not current_data['open_contract_ids']: 
-                        apply_martingale_logic(email)
-                    else: 
-                        print("⚠ [TRADE FAILURE] Waiting for the open contract result...")
+            print(f"💤 [PROCESS] WS failed to reconnect, attempting to restart connection in {RECONNECT_DELAY} seconds...")
+            time.sleep(RECONNECT_DELAY)
 
-            elif msg_type == 'proposal_open_contract':
-                contract = data['proposal_open_contract']
-                if contract.get('is_sold') == 1:
-                    contract_id = contract['contract_id']
-                    handle_contract_settlement(email, contract_id, contract['profit'])
-                    
-                    if 'subscription_id' in data: ws_app.send(json.dumps({"forget": data['subscription_id']}))
-
-        def on_close_wrapper(ws_app, code, msg):
-            print(f"⚠ [PROCESS] WS closed for {email}. Logic will automatically try to reconnect.")
-            is_contract_open[email] = False
-
-        try:
-            ws = websocket.WebSocketApp(
-                WSS_URL, on_open=on_open_wrapper, on_message=on_message_wrapper,
-                on_error=lambda ws, err: print(f"[WS Error {email}] {err}"),
-                on_close=on_close_wrapper
-            )
-            active_ws[email] = ws
-            ws.run_forever(ping_interval=10, ping_timeout=5)
-            
-        except Exception as e:
-            # معالجة الأخطاء الحرجة خارج WS
-            print(f"❌ [CRITICAL ERROR] Uncaught exception in bot process for {email}: {e}")
-            is_contract_open[email] = False
-        
+        # إذا توقفت الحلقة الداخلية، نتحقق من حالة البوت النهائية
         if get_session_data(email).get('is_running') is False: break
-        
-        # زيادة زمن الانتظار لإعادة الاتصال لزيادة الاستقرار
-        print(f"💤 [PROCESS] Connection closed for {email}. Retrying in 2 seconds...")
-        time.sleep(2) 
 
     print(f"🛑 [PROCESS] Bot process loop ended for {email}.")
 
