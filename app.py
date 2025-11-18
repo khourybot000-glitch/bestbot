@@ -14,7 +14,7 @@ from threading import Lock
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"               
-DURATION = 56                  
+DURATION = 54                  
 DURATION_UNIT = "s"            
 
 # إعدادات المضاعفة
