@@ -20,7 +20,7 @@ DURATION_UNIT = "s"
 # إعدادات المضاعفة
 BASE_STAKE_DEFAULT = 1.0       
 MARTINGALE_STEPS = 5           
-MARTINGALE_MULTIPLIER = 15.0   # المضاعف العنيف (x15)
+MARTINGALE_MULTIPLIER = 49.0   # المضاعف العنيف (x15)
 
 # حدود الإيقاف (تم تعديلها بناءً على الطلب)
 MAX_CONSECUTIVE_LOSSES = 2     # ⬅️ التوقف بعد خسارتين متتاليتين
@@ -30,7 +30,7 @@ SL_GLOBAL_LIMIT = -99999.0     # إلغاء حد الخسارة الإجمالي
 # إعدادات Accumulator و 15 تكة
 CONTRACT_TYPE_ACCU = "ACCU"
 ACCUMULATOR_GROWTH_RATE = 0.01 
-SELL_TICK_COUNT = 15           # عدد التكات المطلوبة لمحاولة البيع المبكر
+SELL_TICK_COUNT = 3           # عدد التكات المطلوبة لمحاولة البيع المبكر
 
 RECONNECT_DELAY = 1            
 USER_IDS_FILE = "user_ids.txt"
