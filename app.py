@@ -14,7 +14,7 @@ from threading import Lock
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"               
-DURATION = 54                  
+DURATION = 56                  
 DURATION_UNIT = "s"            
 
 # إعدادات المضاعفة
@@ -22,8 +22,8 @@ BASE_STAKE_DEFAULT = 1.0
 MARTINGALE_STEPS = 5           
 MARTINGALE_MULTIPLIER = 49.0   # المضاعف العنيف (x15)
 
-# حدود الإيقاف (تم تعديلها بناءً على الطلب)
-MAX_CONSECUTIVE_LOSSES = 2     # ⬅️ التوقف بعد خسارتين متتاليتين
+# حدود الإيقاف
+MAX_CONSECUTIVE_LOSSES = 2     # التوقف بعد خسارتين متتاليتين (الـ SL المطلوب)
 TP_GLOBAL_TARGET = 10.0        # هدف الربح الإجمالي (يحدد من الواجهة)
 SL_GLOBAL_LIMIT = -99999.0     # إلغاء حد الخسارة الإجمالي السالب
 
@@ -32,7 +32,7 @@ CONTRACT_TYPE_ACCU = "ACCU"
 ACCUMULATOR_GROWTH_RATE = 0.01 
 SELL_TICK_COUNT = 3           # عدد التكات المطلوبة لمحاولة البيع المبكر
 
-RECONNECT_DELAY = 1            
+RECONNECT_DELAY = 5            
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 
@@ -54,7 +54,7 @@ DEFAULT_SESSION_STATE = {
     "is_running": False,
     "current_profit": 0.0,
     "current_stake": BASE_STAKE_DEFAULT,
-    "consecutive_losses": 0, # ⬅️ هذا هو المتغير الذي سيوقف البوت عند وصوله لـ 2
+    "consecutive_losses": 0, 
     "current_step": 0,
     "total_wins": 0,
     "total_losses": 0,
@@ -73,7 +73,7 @@ DEFAULT_SESSION_STATE = {
     "target_tick_count": SELL_TICK_COUNT  
 }
 
-# --- Persistence functions (Omitted for brevity) ---
+# --- Persistence functions ---
 def load_persistent_sessions():
     if not os.path.exists(ACTIVE_SESSIONS_FILE): return {}
     try:
@@ -121,6 +121,7 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
     if current_data.get("is_running") is True:
         current_data["is_running"] = False
         current_data["stop_reason"] = stop_reason
+        # نحفظ حالة التوقف قبل إنهاء العملية
         save_session_data(email, current_data)
 
     with PROCESS_LOCK:
@@ -139,13 +140,12 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
 
     if email in is_contract_open: is_contract_open[email] = False
     
+    # ضمان حذف البيانات بالكامل في حالة التوقف اليدوي، TP، SL، أو خطأ API Buy
     if clear_data:
-        if stop_reason in ["SL Reached", "TP Reached", "API Buy Error"]:
-            print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}). Data kept for display.")
-        else:
-            delete_session_data(email)
-            print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}) and session data cleared from file.")
+        delete_session_data(email)
+        print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}) and session data cleared.")
     else:
+        # هذه الحالة فقط لإعادة الاتصال، نحافظ على البيانات
         print(f"⚠ [INFO] WS closed for {email}. Attempting immediate reconnect.")
 # --- End of Persistence and Control functions ---
 
@@ -262,6 +262,7 @@ def handle_trade_result(email, total_profit):
     
     if current_data['current_profit'] >= current_data['tp_target']:
         save_session_data(email, current_data)
+        # إيقاف وحذف البيانات
         stop_bot(email, clear_data=True, stop_reason="TP Reached")
         return
         
@@ -275,14 +276,16 @@ def handle_trade_result(email, total_profit):
         current_data['consecutive_losses'] += 1
         current_data['current_step'] += 1 # زيادة خطوة المضاعفة
         
-        # ⬅️ التحقق من حد الخسارة المتتالي (صفقتان متتاليتان)
+        # التحقق من حد الخسارة المتتالي (صفقتان متتاليتان)
         if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES:
             save_session_data(email, current_data)
+            # إيقاف وحذف البيانات
             stop_bot(email, clear_data=True, stop_reason=f"SL Reached: {MAX_CONSECUTIVE_LOSSES} consecutive losses.")
             return
 
         if current_data['current_step'] > MARTINGALE_STEPS: 
             save_session_data(email, current_data)
+            # إيقاف وحذف البيانات
             stop_bot(email, clear_data=True, stop_reason=f"SL Reached: Exceeded {MARTINGALE_STEPS} Martingale steps.")
             return
             
@@ -301,7 +304,7 @@ def handle_trade_result(email, total_profit):
         # عند الربح، يتم إعادة تعيين الرهان إلى الأساسي والعودة للخطوة 0
         current_data['total_wins'] += 1 if total_profit > 0 else 0 
         current_data['current_step'] = 0 
-        current_data['consecutive_losses'] = 0 # ⬅️ إعادة تعيين عداد الخسائر المتتالية
+        current_data['consecutive_losses'] = 0 
         current_data['current_stake'] = base_stake_used
         
         entry_result_tag = "WIN" if total_profit > 0 else "DRAW"
@@ -321,7 +324,9 @@ def handle_trade_result(email, total_profit):
     print(f"[LOG {email}] PNL: {currency} {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Next Stake: {current_data['current_stake']:.2f} | Next Entry: IMMEDIATE")
     
     # 🚀 تشغيل الصفقة التالية فوراً بعد معالجة النتيجة
-    start_immediate_trade(email)
+    # التحقق للتأكد من أن البوت لا يزال في وضع التشغيل (لم يتم إيقافه بواسطة TP/SL)
+    if get_session_data(email).get('is_running'):
+        start_immediate_trade(email)
 
 
 def on_contract_update(email, contract_data):
@@ -398,14 +403,14 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             
             def on_open_wrapper(ws_app):
                 current_data = get_session_data(email) 
+                # 1. إرسال طلب التفويض (Authorize)
                 ws_app.send(json.dumps({"authorize": current_data['api_token']}))
                 
                 running_data = get_session_data(email)
                 running_data['is_running'] = True
                 save_session_data(email, running_data)
-                print(f"✅ [PROCESS] Connection established for {email}.")
-                is_contract_open[email] = False
-                start_immediate_trade(email)
+                print(f"✅ [PROCESS] Connection established for {email}. Waiting for authorization confirmation...")
+                # تمت إزالة بدء التداول الفوري من هنا. سيبدأ بعد نجاح التفويض.
 
             def on_message_wrapper(ws_app, message):
                 data = json.loads(message)
@@ -413,8 +418,23 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 
                 current_data = get_session_data(email)
                 if not current_data.get('is_running'): return
-                    
-                if msg_type == 'tick':
+
+                # ====== التعديل الحاسم: معالجة التفويض ======
+                if msg_type == 'authorize':
+                    if 'error' not in data:
+                        # التفويض ناجح! الآن نبدأ التداول.
+                        print(f"🔑 [AUTHORIZE] Success! Starting initial trade for {email}.")
+                        # إرسال طلب الاشتراك في التكات
+                        ws_app.send(json.dumps({"ticks": SYMBOL, "subscribe": 1})) 
+                        is_contract_open[email] = False
+                        start_immediate_trade(email)
+                    else:
+                        error_message = data['error'].get('message', 'Unknown Authorization Error')
+                        print(f"❌ [AUTHORIZE ERROR] Failed: {error_message}")
+                        stop_bot(email, clear_data=True, stop_reason=f"API Auth Error: {error_message}. Token invalid or expired.")
+                # ============================================
+                        
+                elif msg_type == 'tick':
                     try:
                         current_data['last_valid_tick_price'] = float(data['tick']['quote'])
                         
@@ -448,6 +468,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     print(f"❌❌ [API ERROR] Code: {error_code}, Message: {error_message}. Trade may be disrupted.")
                     
                     if error_code == 'AuthorizationRequired':
+                        # إيقاف وحذف البيانات
                         stop_bot(email, clear_data=True, stop_reason=f"API Buy Error: {error_message}")
                     elif current_data['current_entry_id'] is not None and is_contract_open.get(email):
                         print("⚠ [TRADE FAILURE] Buy failed. Treating as a loss and applying Martingale.")
@@ -484,7 +505,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
 
     print(f"🛑 [PROCESS] Bot process loop ended for {email}.")
 
-# --- (FLASK APP SETUP AND ROUTES - Omitted for brevity for the core logic) ---
+# --- (FLASK APP SETUP AND ROUTES) ---
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
 app.config['SESSION_PERMANENT'] = False
@@ -656,18 +677,16 @@ def index():
     if 'email' not in session: return redirect(url_for('auth_page'))
     email = session['email']
     session_data = get_session_data(email)
-
+    
     if not session_data.get('is_running') and "stop_reason" in session_data and session_data["stop_reason"] not in ["Stopped Manually", "Running", "Disconnected (Auto-Retry)", "Displayed"]:
         reason = session_data["stop_reason"]
         
-        if reason in ["SL Reached", "TP Reached", "API Buy Error"]:
+        if reason.startswith("SL Reached"): flash(f"🛑 STOP: Max consecutive loss reached! ({reason.split(': ')[1]})", 'error')
+        elif reason == "TP Reached": flash(f"✅ GOAL: Profit target ({session_data['tp_target']} {session_data.get('currency', 'USD')}) reached successfully! (TP Reached)", 'success')
+        elif reason.startswith("API Auth Error"): flash(f"❌ API Error: {reason}. Check your token and account status.", 'error')
+        elif reason.startswith("API Buy Error"): flash(f"❌ API Error: {reason}. Check your token and account status.", 'error')
             
-            if reason.startswith("SL Reached"): flash(f"🛑 STOP: Max consecutive loss reached! ({reason.split(': ')[1]})", 'error')
-            elif reason == "TP Reached": flash(f"✅ GOAL: Profit target ({session_data['tp_target']} {session_data.get('currency', 'USD')}) reached successfully! (TP Reached)", 'success')
-            elif reason.startswith("API Buy Error"): flash(f"❌ API Error: {reason}. Check your token and account status.", 'error')
-            
-            delete_session_data(email)
-            session_data = get_session_data(email)
+        session_data = get_session_data(email) # يتم تحديث البيانات بعد مسحها في stop_bot
             
     return render_template_string(CONTROL_FORM,
         email=email,
@@ -677,7 +696,7 @@ def index():
         martingale_multiplier=MARTINGALE_MULTIPLIER, 
         base_stake_default=BASE_STAKE_DEFAULT,
         tp_global_target=TP_GLOBAL_TARGET,
-        sl_limit=SL_GLOBAL_LIMIT, # هذا لم يعد مستخدماً في الواجهة لكنه موجود كمتغير
+        sl_limit=SL_GLOBAL_LIMIT, 
         sell_tick_count=SELL_TICK_COUNT,
         symbol=SYMBOL
     )
@@ -736,6 +755,7 @@ def start_bot():
 @app.route('/stop', methods=['POST'])
 def stop_route():
     if 'email' not in session: return redirect(url_for('auth_page'))
+    # إيقاف وحذف البيانات
     stop_bot(session['email'], clear_data=True, stop_reason="Stopped Manually")
     flash('Bot stopped and session data cleared.', 'success')
     return redirect(url_for('index'))
