@@ -21,7 +21,6 @@ DURATION_UNIT = "t"
 MARTINGALE_STEPS = 1000       
 MAX_CONSECUTIVE_LOSSES = 3    # الإيقاف عند 3 خسائر متتالية
 MARTINGALE_MULTIPLIER = 6.0  # x20 مضاعفة
-# **تم إلغاء MAX_TOTAL_LOSS من الشيكات**
 
 # إعدادات عقد UNDER 8
 CONTRACT_TYPE = "DIGITUNDER"  # نوع العقد الجديد
@@ -47,7 +46,6 @@ DEFAULT_SESSION_STATE = {
     "api_token": "",
     "base_stake": 2.0,                  
     "tp_target": 10.0,
-    # "max_total_loss": float('inf'), # تم إلغاء حد الخسارة الكلي
     "is_running": False,
     "current_profit": 0.0,
     "current_stake": 2.0,               
@@ -180,6 +178,8 @@ def send_single_trade_order(email, stake, currency, contract_type, prediction):
     }
     
     try:
+        # ✅ رسالة تتبع جديدة - للتأكد من محاولة الإرسال
+        print(f"✅ [DEBUG] Sending BUY request for {round(stake, 2):.2f}...")
         ws_app.send(json.dumps(trade_request))
         return True
     except Exception as e:
@@ -209,8 +209,6 @@ def apply_martingale_logic(email):
         stop_bot(email, clear_data=True, stop_reason="TP Reached")
         return
         
-    # **تم إلغاء شيك الخسارة الكلية (MAX_TOTAL_LOSS) كما طلب المستخدم**
-
     base_stake_used = current_data['base_stake']
     
     # ❌ حالة الخسارة (Loss)
@@ -302,7 +300,7 @@ def start_new_single_trade(email):
     save_session_data(email, current_data)
 
 # شرط الدخول: آخر رقمين متتاليين (T1 و T2) أصغر من 3
-def check_entry_condition(tick_data):
+def check_entry_condition(email, tick_data): # ✅ تم التأكد من وجود email كـ argument
     """ شرط الدخول: آخر رقمين متتاليين (T1 و T2) أصغر من 3 """
     if not tick_data:
         return False
@@ -316,7 +314,7 @@ def check_entry_condition(tick_data):
     T2 = last_two_digits[1]
 
     if T1 < 3 and T2 < 3:
-        # print(f"🔥 [TICK] T1={T1}, T2={T2}. Condition met.")
+        print(f"🔥 [TICK] T1={T1}, T2={T2}. Condition met (T1 < 3 AND T2 < 3).")
         return True
     return False
 
@@ -334,7 +332,6 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         "api_token": token, 
         "base_stake": stake, 
         "tp_target": tp,
-        # "max_total_loss": MAX_TOTAL_LOSS, # تم إلغاء حد الخسارة الكلي من الإعدادات
         "is_running": True, 
         "current_stake": stake,       
         "stop_reason": "Running",
@@ -389,13 +386,21 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 current_data['last_valid_tick_price'] = current_price
                 current_data['last_tick_data'] = data['tick']
                 
+                # ✅ رسالة تتبع الأرقام
+                print(f"🔬 [DIGIT CHECK] Price: {current_price:.5f} | T1 (Current): {T1} | T2 (Previous): {T2}")
+                
                 save_session_data(email, current_data) 
                 
                 # === منطق الدخول (التحقق من شرط T1 < 3 AND T2 < 3) ===
                 if not is_contract_open.get(email):
-                    # نمرر tick_data بالرغم من أن check_entry_condition لا تستخدمها مباشرة بل تستخدم state
-                    if check_entry_condition(current_data['last_tick_data']):
+                    # ✅ رسالة تتبع حالة الصفقة
+                    # print("✅ [FLOW CHECK] Contract NOT Open. Checking entry condition...")
+                    
+                    if check_entry_condition(email, current_data['last_tick_data']):
                         start_new_single_trade(email)
+                else:
+                    # ❌ رسالة تتبع حالة الصفقة
+                    print("❌ [FLOW CHECK] Contract IS Open. Skipping entry.")
                 # === نهاية منطق الدخول ===
 
             elif msg_type == 'buy':
@@ -429,10 +434,14 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             print(f"⚠ [PROCESS] WS closed for {email}. RECONNECTING IMMEDIATELY.")
             is_contract_open[email] = False
 
+        # 💡 التعديل الجديد 1: دالة معالجة الأخطاء الثابتة
+        def on_error_wrapper(ws_app, err):
+            print(f"❌ [WS Critical Error {email}] {err}") 
+
         try:
             ws = websocket.WebSocketApp(
                 WSS_URL, on_open=on_open_wrapper, on_message=on_message_wrapper,
-                on_error=lambda ws, err: print(f"[WS Error {email}] {err}"),
+                on_error=on_error_wrapper, # 💡 التعديل الجديد 2: استبدال الـ lambda بهذه الدالة
                 on_close=on_close_wrapper
             )
             active_ws[email] = ws
