@@ -24,8 +24,8 @@ MAX_CONSECUTIVE_LOSSES = 3    # الإيقاف عند 3 خسائر متتالي�
 MARTINGALE_MULTIPLIER = 6.0  # x20 مضاعفة
 
 # إعدادات عقد UNDER 8
-CONTRACT_TYPE = "DIGITUNDER"  
-PREDICTION = 8                
+CONTRACT_TYPE = "DIGITOVER"  
+PREDICTION = 1                
 BARRIER_OFFSET = None         
 
 RECONNECT_DELAY = 1
