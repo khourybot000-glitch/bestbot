@@ -11,21 +11,21 @@ from threading import Lock
 import traceback # مكتبة ضرورية للتشخيص
 
 # ==========================================================
-# BOT CONSTANT SETTINGS (R_100 | OVER 1 | x6)
+# BOT CONSTANT SETTINGS (R_100 | DIFFER 2 | x6)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"              
-DURATION = 1                  
+DURATION = 1                  # مدة الصفقة 1 تيك
 DURATION_UNIT = "t"           
 
 # إعدادات المضاعفة
 MARTINGALE_STEPS = 1000       
-MAX_CONSECUTIVE_LOSSES = 3    
-MARTINGALE_MULTIPLIER = 6.0   
+MAX_CONSECUTIVE_LOSSES = 2    
+MARTINGALE_MULTIPLIER = 19.0   
 
-# 💡 إعدادات عقد OVER 1
-CONTRACT_TYPE = "DIGITUNDER"   # تم التعديل
-PREDICTION = 8                # تم التعديل
+# 💡 إعدادات عقد DIFFER 2
+CONTRACT_TYPE = "DIGITDIFF"   # تم التعديل إلى DIFFER
+PREDICTION = 2                # تم التعديل إلى 2
 BARRIER_OFFSET = None         
 
 RECONNECT_DELAY = 1
@@ -154,7 +154,7 @@ def calculate_martingale_stake(base_stake, current_step, multiplier):
 
 
 def send_single_trade_order(email, stake, currency, contract_type, prediction):
-    """ إرسال طلب شراء واحد (DIGITOVER 1) """
+    """ إرسال طلب شراء واحد (DIGITDIFFER 2) """
     global active_ws, DURATION, DURATION_UNIT, SYMBOL
     
     if email not in active_ws or active_ws[email] is None: 
@@ -188,7 +188,7 @@ def send_single_trade_order(email, stake, currency, contract_type, prediction):
 
 
 def apply_martingale_logic(email):
-    """ 💡 يطبق منطق المضاعفة مع الدخول الفوري بعد الخسارة، والمشروط بعد الربح """
+    """ يطبق منطق المضاعفة مع الدخول الفوري بعد الخسارة، والمشروط بعد الربح """
     global is_contract_open, MARTINGALE_MULTIPLIER, MAX_CONSECUTIVE_LOSSES
     current_data = get_session_data(email)
     
@@ -260,7 +260,7 @@ def apply_martingale_logic(email):
             print("🚀 [IMMEDIATE ENTRY] Loss detected. Entering next trade immediately without condition check.")
             start_new_single_trade(email) 
     else:
-        # إذا كان ربحاً، ننتظر التيك القادم ليتحقق من شرط الدخول الأساسي.
+        # إذا كان ربحاً، ننتظر التيك القادم ليتحقق من شرط الدخول الأساسي (تحليل).
         is_contract_open[email] = False
 
 
@@ -284,7 +284,7 @@ def handle_contract_settlement(email, contract_id, profit_loss):
 
 
 def start_new_single_trade(email):
-    """ إرسال الصفقة الواحدة (DIGITOVER 1) """
+    """ إرسال الصفقة الواحدة (DIGITDIFFER 2) """
     global is_contract_open, CONTRACT_TYPE, PREDICTION
     
     current_data = get_session_data(email)
@@ -314,9 +314,8 @@ def start_new_single_trade(email):
 
     save_session_data(email, current_data)
 
-# شرط الدخول: آخر رقمين متتاليين (T1 و T2) أصغر من 3
 def check_entry_condition(email, tick_data): 
-    """ شرط الدخول (للدخول الأساسي بعد الربح): آخر رقمين متتاليين (T1 و T2) أصغر من 3 """
+    """ 💡 شرط الدخول (للدخول الأساسي بعد الربح): آخر رقم (T1) يساوي 1 """
     if not tick_data:
         return False
         
@@ -324,11 +323,12 @@ def check_entry_condition(email, tick_data):
     
     last_two_digits = current_data.get('last_two_digits', [9, 9]) 
 
+    # T1 هو آخر رقم (الرقم الحالي)
     T1 = last_two_digits[0]
-    T2 = last_two_digits[1]
 
-    if T1 < 3 and T2 < 3:
-        print(f"🔥 [TICK] T1={T1}, T2={T2}. Condition met (T1 < 3 AND T2 < 3).")
+    # الشرط الجديد: إذا كان آخر رقم هو 1
+    if T1 == 1:
+        print(f"🔥 [TICK] T1={T1}. Condition met (Last Digit == 1).")
         return True
     return False
 
@@ -391,8 +391,8 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 if msg_type == 'tick':
                     current_price = float(data['tick']['quote'])
                     
-                    T1 = int(str(current_price)[-1])
-                    T2 = current_data['last_two_digits'][0]
+                    T1 = int(str(current_price)[-1]) # آخر رقم
+                    T2 = current_data['last_two_digits'][0] # الرقم الذي سبقه
                     current_data['last_two_digits'] = [T1, T2]
                     
                     current_data['last_valid_tick_price'] = current_price
@@ -567,7 +567,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = contract_type_name + " " + prediction|string + " (" + symbol + " - T1&T2 < 3 Entry: ONLY on Win Reset / Immediate Entry: ON Loss - x" + martingale_multiplier|string + " Martingale, " + duration|string + " Tick)" %}
+    {% set strategy = contract_type_name + " " + prediction|string + " (" + symbol + " - Last Digit=1 Entry: ONLY on Win Reset / Immediate Entry: ON Loss - x" + martingale_multiplier|string + " Martingale, " + duration|string + " Tick)" %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
@@ -649,7 +649,7 @@ def index():
         session_data['stop_reason'] = "Displayed"
         save_session_data(email, session_data)
     
-    contract_type_name = CONTRACT_TYPE.replace("DIGIT", "") # 💡 لتسهيل العرض في الواجهة
+    contract_type_name = CONTRACT_TYPE.replace("DIGIT", "") # لتسهيل العرض في الواجهة
 
     return render_template_string(CONTROL_FORM,
         email=email,
@@ -659,7 +659,7 @@ def index():
         duration=DURATION,
         prediction=PREDICTION,
         symbol=SYMBOL,
-        contract_type_name=contract_type_name # 💡 تمرير اسم نوع العقد
+        contract_type_name=contract_type_name
     )
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -711,7 +711,7 @@ def start_bot():
     with PROCESS_LOCK: active_processes[email] = process
     
     contract_display = CONTRACT_TYPE.replace("DIGIT", "")
-    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {contract_display} {PREDICTION} (R_100 - Conditional Entry on Win, Immediate on Loss) with x{MARTINGALE_MULTIPLIER} Martingale (Max {MAX_CONSECUTIVE_LOSSES} Losses, 1 Tick)', 'success')
+    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {contract_display} {PREDICTION} (R_100 - Conditional Entry on Last Digit=1, Immediate on Loss) with x{MARTINGALE_MULTIPLIER} Martingale (Max {MAX_CONSECUTIVE_LOSSES} Losses, 1 Tick)', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
