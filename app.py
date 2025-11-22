@@ -21,11 +21,11 @@ DURATION_UNIT = "t"
 # إعدادات المضاعفة
 MARTINGALE_STEPS = 1000       
 MAX_CONSECUTIVE_LOSSES = 3    # الإيقاف عند 3 خسائر متتالية
-MARTINGALE_MULTIPLIER = 6.0  # x20 مضاعفة
+MARTINGALE_MULTIPLIER = 19.0  # x20 مضاعفة
 
 # إعدادات عقد UNDER 8
-CONTRACT_TYPE = "DIGITOVER"  
-PREDICTION = 1                
+CONTRACT_TYPE = "DIGITDIFF"  
+PREDICTION = 2                
 BARRIER_OFFSET = None         
 
 RECONNECT_DELAY = 1
