@@ -20,7 +20,7 @@ DURATION_UNIT = "t"
 
 # إعدادات المضاعفة
 MARTINGALE_STEPS = 1000       
-MAX_CONSECUTIVE_LOSSES = 3    # الإيقاف عند 3 خسائر متتالية
+MAX_CONSECUTIVE_LOSSES = 2    # الإيقاف عند 3 خسائر متتالية
 MARTINGALE_MULTIPLIER = 19.0  # x20 مضاعفة
 
 # إعدادات عقد UNDER 8
