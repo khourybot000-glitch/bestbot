@@ -24,8 +24,8 @@ MAX_CONSECUTIVE_LOSSES = 3
 MARTINGALE_MULTIPLIER = 6.0   
 
 # 💡 إعدادات عقد OVER 1
-CONTRACT_TYPE = "DIGITOVER"   # تم التعديل
-PREDICTION = 1                # تم التعديل
+CONTRACT_TYPE = "DIGITUNDER"   # تم التعديل
+PREDICTION = 8                # تم التعديل
 BARRIER_OFFSET = None         
 
 RECONNECT_DELAY = 1
