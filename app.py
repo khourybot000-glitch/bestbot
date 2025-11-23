@@ -21,8 +21,8 @@ DURATION_UNIT = "t"
 
 # إعدادات المضاعفة والتحليل
 TICK_SAMPLE_SIZE = 20           # 💡 عدد التيكات المطلوبة للتحليل (20 تيك)
-MAX_CONSECUTIVE_LOSSES = 2    # 💡 تم التعديل إلى 2 (الحد الأقصى للخسائر المتتالية)
-MARTINGALE_MULTIPLIER = 19.0  # 💡 تم التعديل إلى 19.0 (معامل المضاعفة)
+MAX_CONSECUTIVE_LOSSES = 2    # الحد الأقصى للخسائر المتتالية
+MARTINGALE_MULTIPLIER = 19.0  # معامل المضاعفة
 
 # إعدادات العقد
 CONTRACT_TYPE = "DIGITDIFF" 
@@ -307,7 +307,7 @@ def start_new_single_trade(email, contract_type, prediction):
     
     entry_tag = f"Consecutive Loss Step {current_data['consecutive_losses']}"
     
-    # 💡 مسح قائمة التيكات بعد الدخول (حسب طلب المستخدم)
+    # 💡 مسح قائمة التيكات بعد الدخول (يجب أن يتم الحفظ مباشرة هنا)
     current_data['last_digits_history'] = [] 
     
     print(f"🧠 [SINGLE ENTRY - {contract_type}] Digit: {prediction} | {entry_tag} | Stake: {round(stake, 2):.2f}.")
@@ -320,6 +320,7 @@ def start_new_single_trade(email, contract_type, prediction):
     current_data['last_entry_time'] = int(time.time())
     current_data['last_entry_price'] = current_data.get('last_valid_tick_price', 0.0)
 
+    # حفظ حالة المسح مباشرة بعد الدخول
     save_session_data(email, current_data)
 
 
@@ -412,12 +413,15 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                             
                             start_new_single_trade(email, contract_type="DIGITDIFF", prediction=target_prediction)
                             
+                            # 💡 FIX: إعادة تحميل البيانات لتعكس مسح سجل التيكات الذي تم في الدالة السابقة
+                            current_data = get_session_data(email) 
+                            
                         else:
                             print(f"❌ [COLLECTING] Collecting digits... ({len(current_data['last_digits_history'])}/{TICK_SAMPLE_SIZE})")
                     else:
                         print("❌ [FLOW CHECK] Contract IS Open. Skipping entry.")
                         
-                    save_session_data(email, current_data) 
+                    save_session_data(email, current_data) # حفظ بعد كل تيك وتحديث التحليل
 
                 elif msg_type == 'buy':
                     contract_id = data['buy']['contract_id']
