@@ -25,7 +25,7 @@ MARTINGALE_MULTIPLIER = 19.0
 
 # 💡 إعدادات عقد DIFFER 2
 CONTRACT_TYPE = "DIGITDIFF"   # تم التعديل إلى DIFFER
-PREDICTION = 2                # تم التعديل إلى 2
+PREDICTION = 7                # تم التعديل إلى 2
 BARRIER_OFFSET = None         
 
 RECONNECT_DELAY = 1
