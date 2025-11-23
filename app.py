@@ -9,7 +9,7 @@ from datetime import timedelta, datetime, timezone
 from multiprocessing import Process
 from threading import Lock
 import traceback 
-from collections import Counter
+from collections import Counter # تم الإبقاء عليها ولكن لن تستخدم في تحديد التوقع
 
 # ==========================================================
 # BOT CONSTANT SETTINGS (R_100 | DIGIT DIFFER | x19.0 | 20 Ticks)
@@ -20,7 +20,7 @@ DURATION = 1                  # مدة الصفقة 1 تيك
 DURATION_UNIT = "t"           
 
 # إعدادات المضاعفة والتحليل
-TICK_SAMPLE_SIZE = 20           # 💡 عدد التيكات المطلوبة للتحليل (20 تيك)
+TICK_SAMPLE_SIZE = 20           # عدد التيكات المطلوبة للتحليل (20 تيك)
 MAX_CONSECUTIVE_LOSSES = 2    # الحد الأقصى للخسائر المتتالية
 MARTINGALE_MULTIPLIER = 19.0  # معامل المضاعفة
 
@@ -144,23 +144,7 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
 # TRADING BOT FUNCTIONS
 # ==========================================================
 
-def find_least_frequent_digit(digits_list):
-    """تحسب الرقم الأقل تكراراً في قائمة الأرقام النهائية (Last Digits)."""
-    if not digits_list:
-        return 0 
-        
-    counts = Counter(digits_list)
-    all_digits_counts = {i: counts[i] for i in range(10)}
-    
-    min_count = min(all_digits_counts.values())
-    
-    # إرجاع أول رقم وجد لديه هذا التكرار الأدنى
-    for digit in range(10):
-        if all_digits_counts[digit] == min_count:
-            return digit
-
-    return 0 
-
+# تم حذف دالة find_least_frequent_digit حيث أصبح التوقع يعتمد على آخر تيك.
 
 def calculate_martingale_stake(base_stake, current_step, multiplier):
     """ منطق المضاعفة: ضرب الرهان الأساسي في معامل المضاعفة (x19) لعدد الخطوات """
@@ -405,15 +389,15 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     if not is_contract_open.get(email):
                         if len(current_data['last_digits_history']) == TICK_SAMPLE_SIZE:
                             
-                            # أ. تحديد الرقم الأقل تكراراً
-                            target_prediction = find_least_frequent_digit(current_data['last_digits_history'])
-
+                            # 💡 التعديل الجديد: التوقع هو الرقم النهائي لآخر تيك في العينة (العنصر الأخير)
+                            target_prediction = current_data['last_digits_history'][-1]
+                            
                             # ب. تنفيذ صفقة DIFFER
-                            print(f"📊 [ANALYSIS READY] {TICK_SAMPLE_SIZE} Digits collected. Least frequent digit: {target_prediction}. Entering DIGITDIFF.")
+                            print(f"📊 [ANALYSIS READY] {TICK_SAMPLE_SIZE} Digits collected. Target digit (Last Tick Digit): {target_prediction}. Entering DIGITDIFF.")
                             
                             start_new_single_trade(email, contract_type="DIGITDIFF", prediction=target_prediction)
                             
-                            # 💡 FIX: إعادة تحميل البيانات لتعكس مسح سجل التيكات الذي تم في الدالة السابقة
+                            # 💡 ضروري لإعادة تحميل البيانات بعد المسح في الدالة السابقة
                             current_data = get_session_data(email) 
                             
                         else:
@@ -579,7 +563,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = 'Digit Differ (R_100 - Conditional Entry: Least Frequent Digit in Last ' + tick_sample_size|string + ' Ticks / Conditional Martingale on Loss - x' + martingale_multiplier|string + ' Martingale, Max ' + max_consecutive_losses|string + ' Losses, ' + duration|string + ' Tick)' %}
+    {% set strategy = 'Digit Differ (R_100 - Conditional Entry: Last Digit of 20th Tick / Conditional Martingale on Loss - x' + martingale_multiplier|string + ' Martingale, Max ' + max_consecutive_losses|string + ' Losses, ' + duration|string + ' Tick)' %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
