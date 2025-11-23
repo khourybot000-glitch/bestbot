@@ -11,22 +11,21 @@ from threading import Lock
 import traceback # مكتبة ضرورية للتشخيص
 
 # ==========================================================
-# BOT CONSTANT SETTINGS (R_100 | DIFFER 2 | x6)
+# BOT CONSTANT SETTINGS (R_100 | RISE/FALL DYNAMIC | x2.2)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"              
-DURATION = 1                  # مدة الصفقة 1 تيك
+DURATION = 5                  # مدة الصفقة 1 تيك
 DURATION_UNIT = "t"           
 
 # إعدادات المضاعفة
 MARTINGALE_STEPS = 1000       
-MAX_CONSECUTIVE_LOSSES = 2    
-MARTINGALE_MULTIPLIER = 19.0   
+MAX_CONSECUTIVE_LOSSES = 5    # 💡 تم التعديل إلى 5
+MARTINGALE_MULTIPLIER = 2.2   # 💡 تم التعديل إلى 2.2
 
-# 💡 إعدادات عقد DIFFER 2
-CONTRACT_TYPE = "DIGITDIFF"   # تم التعديل إلى DIFFER
-PREDICTION = 7                # تم التعديل إلى 2
-BARRIER_OFFSET = None         
+# إعدادات العقد
+CONTRACT_TYPE = "RISE_FALL_DYNAMIC" 
+PREDICTION = None                  
 
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
@@ -63,7 +62,8 @@ DEFAULT_SESSION_STATE = {
     "current_entry_id": None,             
     "open_contract_ids": [],              
     "contract_profits": {},               
-    "last_two_digits": [9, 9] # [T1, T2]
+    "last_two_digits": [9, 9], 
+    "tick_history": []         # لتخزين آخر 5 أسعار
 }
 
 # --- Persistence functions ---
@@ -131,7 +131,6 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
     if email in is_contract_open: is_contract_open[email] = False
 
     if clear_data:
-        # يتم الاحتفاظ بالبيانات هنا لعرض رسالة الإيقاف في واجهة المستخدم
         if stop_reason in ["SL Reached: Consecutive losses", "TP Reached", "API Buy Error", "Displayed"]:
             print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}). Data kept for display.")
         else:
@@ -146,15 +145,15 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
 # ==========================================================
 
 def calculate_martingale_stake(base_stake, current_step, multiplier):
-    """ منطق المضاعفة: ضرب الرهان الأساسي في معامل المضاعفة (6.0) لعدد الخطوات """
+    """ منطق المضاعفة: ضرب الرهان الأساسي في معامل المضاعفة (2.2) لعدد الخطوات """
     if current_step == 0: 
         return base_stake
-    # مضاعفة x6
+    # مضاعفة x2.2
     return base_stake * (multiplier ** current_step)
 
 
-def send_single_trade_order(email, stake, currency, contract_type, prediction):
-    """ إرسال طلب شراء واحد (DIGITDIFFER 2) """
+def send_single_trade_order(email, stake, currency, contract_type):
+    """ إرسال طلب شراء واحد (CALL أو PUT) """
     global active_ws, DURATION, DURATION_UNIT, SYMBOL
     
     if email not in active_ws or active_ws[email] is None: 
@@ -174,12 +173,11 @@ def send_single_trade_order(email, stake, currency, contract_type, prediction):
             "duration": DURATION, 
             "duration_unit": DURATION_UNIT, 
             "symbol": SYMBOL,
-            "barrier": str(prediction)       
         }
     }
     
     try:
-        print(f"✅ [DEBUG] Sending BUY request for {round(stake, 2):.2f}...")
+        print(f"✅ [DEBUG] Sending BUY request for {round(stake, 2):.2f} (Type: {contract_type})...")
         ws_app.send(json.dumps(trade_request))
         return True
     except Exception as e:
@@ -188,7 +186,7 @@ def send_single_trade_order(email, stake, currency, contract_type, prediction):
 
 
 def apply_martingale_logic(email):
-    """ يطبق منطق المضاعفة مع الدخول الفوري بعد الخسارة، والمشروط بعد الربح """
+    """ يطبق منطق المضاعفة مع انتظار شرط الدخول الجديد بعد الخسارة (Conditional Martingale) """
     global is_contract_open, MARTINGALE_MULTIPLIER, MAX_CONSECUTIVE_LOSSES
     current_data = get_session_data(email)
     
@@ -199,7 +197,6 @@ def apply_martingale_logic(email):
         is_contract_open[email] = False
         return
 
-    # يتم التعامل مع صفقة واحدة، لذا نأخذ القيمة الأولى
     total_profit_loss = list(current_data['contract_profits'].values())[0]
 
     current_data['current_profit'] += total_profit_loss
@@ -211,7 +208,6 @@ def apply_martingale_logic(email):
         return
         
     base_stake_used = current_data['base_stake']
-    should_enter_immediately = False
     
     # ❌ حالة الخسارة (Loss)
     if total_profit_loss < 0:
@@ -227,9 +223,8 @@ def apply_martingale_logic(email):
             
         new_stake = calculate_martingale_stake(base_stake_used, current_data['current_step'], MARTINGALE_MULTIPLIER)
         current_data['current_stake'] = new_stake
-        should_enter_immediately = True # 💡 نحدد الدخول الفوري هنا
-
-        print(f"🔄 [LOSS] PnL: {total_profit_loss:.2f}. Consecutive: {current_data['consecutive_losses']}. Next Stake (x{MARTINGALE_MULTIPLIER}^{current_data['current_step']}) calculated: {round(new_stake, 2):.2f}.")
+        
+        print(f"🔄 [LOSS] PnL: {total_profit_loss:.2f}. Consecutive: {current_data['consecutive_losses']}. Next Stake (x{MARTINGALE_MULTIPLIER}^{current_data['current_step']}) calculated: {round(new_stake, 2):.2f}. Awaiting next conditional entry.")
         
     # ✅ حالة الربح (Win)
     else: 
@@ -248,20 +243,12 @@ def apply_martingale_logic(email):
     current_data['contract_profits'] = {}
     
     currency = current_data.get('currency', 'USD')
-    contract_display = CONTRACT_TYPE.replace("DIGIT", "")
-    print(f"[LOG {email}] PNL: {currency} {current_data['current_profit']:.2f}, Con. Loss: {current_data['consecutive_losses']}/{MAX_CONSECUTIVE_LOSSES}, Stake: {current_data['current_stake']:.2f}, Strategy: {contract_display} {PREDICTION} (R_100, x{MARTINGALE_MULTIPLIER})")
+    print(f"[LOG {email}] PNL: {currency} {current_data['current_profit']:.2f}, Con. Loss: {current_data['consecutive_losses']}/{MAX_CONSECUTIVE_LOSSES}, Stake: {current_data['current_stake']:.2f}, Strategy: {CONTRACT_TYPE} (R_100, x{MARTINGALE_MULTIPLIER})")
     
-    # حفظ الحالة قبل الدخول المحتمل
     save_session_data(email, current_data) 
     
-    # 💡 منطق الدخول الفوري (Martingale Immediate Entry) بعد الخسارة
-    if should_enter_immediately:
-        if get_session_data(email).get('is_running'):
-            print("🚀 [IMMEDIATE ENTRY] Loss detected. Entering next trade immediately without condition check.")
-            start_new_single_trade(email) 
-    else:
-        # إذا كان ربحاً، ننتظر التيك القادم ليتحقق من شرط الدخول الأساسي (تحليل).
-        is_contract_open[email] = False
+    # 💡 منطق الدخول: دائمًا ننتظر التيك القادم ليتحقق من شرط الدخول الأساسي (تحليل).
+    is_contract_open[email] = False
 
 
 def handle_contract_settlement(email, contract_id, profit_loss):
@@ -278,14 +265,13 @@ def handle_contract_settlement(email, contract_id, profit_loss):
         
     save_session_data(email, current_data)
     
-    # بمجرد انتهاء جميع العقود المفتوحة (سيكون عقداً واحداً هنا)
     if not current_data['open_contract_ids']:
         apply_martingale_logic(email)
 
 
-def start_new_single_trade(email):
-    """ إرسال الصفقة الواحدة (DIGITDIFFER 2) """
-    global is_contract_open, CONTRACT_TYPE, PREDICTION
+def start_new_single_trade(email, entry_type):
+    """ إرسال الصفقة الواحدة (CALL أو PUT) """
+    global is_contract_open
     
     current_data = get_session_data(email)
     stake = current_data['current_stake']
@@ -300,11 +286,10 @@ def start_new_single_trade(email):
     current_data['contract_profits'] = {}
     
     entry_tag = f"Consecutive Loss Step {current_data['consecutive_losses']}"
-    contract_display = CONTRACT_TYPE.replace("DIGIT", "")
     
-    print(f"🧠 [SINGLE ENTRY - {contract_display} {PREDICTION}] {entry_tag} | Stake: {round(stake, 2):.2f}.")
+    print(f"🧠 [SINGLE ENTRY - {entry_type}] {entry_tag} | Stake: {round(stake, 2):.2f}.")
     
-    if send_single_trade_order(email, stake, currency_to_use, CONTRACT_TYPE, PREDICTION):
+    if send_single_trade_order(email, stake, currency_to_use, entry_type): 
         pass
         
     is_contract_open[email] = True
@@ -314,29 +299,35 @@ def start_new_single_trade(email):
 
     save_session_data(email, current_data)
 
-def check_entry_condition(email, tick_data): 
-    """ 💡 شرط الدخول (للدخول الأساسي بعد الربح): آخر رقم (T1) يساوي 1 """
-    if not tick_data:
-        return False
-        
-    current_data = get_session_data(email)
+def check_rise_fall_entry_condition(email, T1, tick_history): 
+    """ شرط الدخول: آخر رقم = 1 AND تحديد الاتجاه من آخر 5 تيك """
     
-    last_two_digits = current_data.get('last_two_digits', [9, 9]) 
-
-    # T1 هو آخر رقم (الرقم الحالي)
-    T1 = last_two_digits[0]
-
-    # الشرط الجديد: إذا كان آخر رقم هو 1
-    if T1 == 1:
-        print(f"🔥 [TICK] T1={T1}. Condition met (Last Digit == 1).")
-        return True
-    return False
+    # 1. شرط الرقم الأخير (Last Digit = 1)
+    if T1 != 1:
+        return None 
+        
+    # 2. شرط الاتجاه (Trend Check - 5 ticks)
+    if len(tick_history) < 5:
+        print(f"❌ [TICK HISTORY] Insufficient ticks ({len(tick_history)}/5). Skipping entry.")
+        return None 
+        
+    first_price = tick_history[0]
+    last_price = tick_history[-1]
+    
+    if last_price > first_price:
+        print(f"🔥 [TREND UP] {first_price:.5f} -> {last_price:.5f}. T1={T1}. Entering CALL.")
+        return "CALL"
+    elif last_price < first_price:
+        print(f"🔥 [TREND DOWN] {first_price:.5f} -> {last_price:.5f}. T1={T1}. Entering PUT.")
+        return "PUT"
+    else:
+        print(f"❌ [NO TREND] Price remained flat over 5 ticks. T1={T1}. Skipping entry.")
+        return None
 
 
 def bot_core_logic(email, token, stake, tp, currency, account_type):
     """ Core bot logic """
     
-    # رسالة لتأكيد بدء العملية
     print(f"🚀🚀 [CORE START] Bot logic started for {email}. Checking settings...") 
     
     global is_contract_open, active_ws
@@ -351,7 +342,8 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         "last_entry_price": 0.0, "last_tick_data": None, "currency": currency,
         "account_type": account_type, "last_valid_tick_price": 0.0,
         "current_entry_id": None, "open_contract_ids": [], "contract_profits": {},
-        "last_two_digits": [9, 9] 
+        "last_two_digits": [9, 9],
+        "tick_history": []
     })
     save_session_data(email, session_data)
 
@@ -373,13 +365,16 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 print(f"✅ [PROCESS] Connection established for {email}.")
                 is_contract_open[email] = False
                 
-                # 💡 منطق استرداد العقود المفتوحة بعد انقطاع الاتصال (Recovery Logic)
+                # منطق استرداد العقود المفتوحة بعد انقطاع الاتصال
                 if current_data['open_contract_ids']:
-                    print(f"🔍 [RECOVERY CHECK] Found {len(current_data['open_contract_ids'])} contracts pending settlement. Checking status...")
-                    # إرسال طلب تحقق لمرة واحدة بدون اشتراك
+                    print(f"🔍 [RECOVERY CHECK] Found {len(current_data['open_contract_ids'])} contracts pending settlement. RE-SUBSCRIBING...")
                     for contract_id in current_data['open_contract_ids']:
                         if contract_id:
-                            ws_app.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id}))
+                            ws_app.send(json.dumps({
+                                "proposal_open_contract": 1, 
+                                "contract_id": contract_id, 
+                                "subscribe": 1  
+                            }))
 
             def on_message_wrapper(ws_app, message):
                 data = json.loads(message)
@@ -391,21 +386,30 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 if msg_type == 'tick':
                     current_price = float(data['tick']['quote'])
                     
-                    T1 = int(str(current_price)[-1]) # آخر رقم
-                    T2 = current_data['last_two_digits'][0] # الرقم الذي سبقه
+                    T1 = int(str(current_price)[-1]) 
+                    T2 = current_data['last_two_digits'][0] 
                     current_data['last_two_digits'] = [T1, T2]
                     
+                    # تحديث سجل التيكات
+                    current_data['tick_history'].append(current_price)
+                    if len(current_data['tick_history']) > 5:
+                        current_data['tick_history'].pop(0)
+
                     current_data['last_valid_tick_price'] = current_price
                     current_data['last_tick_data'] = data['tick']
                     
-                    print(f"🔬 [DIGIT CHECK] Price: {current_price:.5f} | T1 (Current): {T1} | T2 (Previous): {T2}")
+                    print(f"🔬 [TICK] Price: {current_price:.5f} | T1 (Current): {T1} | T2 (Previous): {T2} | History Size: {len(current_data['tick_history'])}")
                     
                     save_session_data(email, current_data) 
                     
-                    # 💡 التحقق من الشرط فقط إذا لم يكن هناك عقد مفتوح (وهذا يحدث بعد الربح أو في بداية التشغيل)
+                    # التحقق من الشرط (Last Digit = 1 & Trend)
                     if not is_contract_open.get(email):
-                        if check_entry_condition(email, current_data['last_tick_data']):
-                            start_new_single_trade(email)
+                        if len(current_data['tick_history']) >= 5: 
+                            determined_type = check_rise_fall_entry_condition(
+                                email, T1, current_data['tick_history']
+                            )
+                            if determined_type:
+                                start_new_single_trade(email, determined_type)
                     else:
                         print("❌ [FLOW CHECK] Contract IS Open. Skipping entry.")
 
@@ -435,12 +439,11 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                         contract_id = contract['contract_id']
                         handle_contract_settlement(email, contract_id, contract['profit'])
                         
-                        # نسيان الاشتراك القديم إذا كان موجوداً
                         if 'subscription_id' in data: ws_app.send(json.dumps({"forget": data['subscription_id']}))
 
             def on_close_wrapper(ws_app, code, msg):
                 print(f"⚠ [PROCESS] WS closed for {email}. RECONNECTING IMMEDIATELY.")
-                is_contract_open[email] = False # السماح بإعادة الدخول في صفقة جديدة بعد التأكد من النتيجة
+                is_contract_open[email] = False 
 
             def on_error_wrapper(ws_app, err):
                 print(f"❌ [WS Critical Error {email}] {err}") 
@@ -465,7 +468,6 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         print(f"🛑 [PROCESS] Bot process loop ended for {email}.")
         
     except Exception as process_error:
-        # التقاط أي خطأ صامت يقتل العملية بالكامل
         print(f"\n\n💥💥 [CRITICAL PROCESS CRASH] The entire bot process for {email} failed with an unhandled exception: {process_error}")
         traceback.print_exc()
         stop_bot(email, clear_data=True, stop_reason="Critical Python Crash")
@@ -567,7 +569,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = contract_type_name + " " + prediction|string + " (" + symbol + " - Last Digit=1 Entry: ONLY on Win Reset / Immediate Entry: ON Loss - x" + martingale_multiplier|string + " Martingale, " + duration|string + " Tick)" %}
+    {% set strategy = 'Rise/Fall (R_100 - Conditional Entry: Last Digit=1 AND 5-Tick Trend / Conditional Martingale on Loss - x' + martingale_multiplier|string + ' Martingale, Max ' + max_consecutive_losses|string + ' Losses, ' + duration|string + ' Tick)' %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
@@ -575,7 +577,7 @@ CONTROL_FORM = """
     <p>Current Stake: {{ session_data.currency }} {{ session_data.current_stake|round(2) }}</p>
     <p>Consecutive Losses: {{ session_data.consecutive_losses }} / {{ max_consecutive_losses }}</p>
     <p style="font-weight: bold; color: green;">Total Wins: {{ session_data.total_wins }} | Total Losses: {{ session_data.total_losses }}</p>
-    <p style="font-weight: bold; color: purple;">Last Tick Price: {{ session_data.last_valid_tick_price|round(5) }}</p>
+    <p style="font-weight: bold; color: purple;">Last Digit: {{ session_data.last_two_digits[0] }}</p>
     <p style="font-weight: bold; color: #007bff;">Current Strategy: {{ strategy }}</p>
     <p style="font-weight: bold; color: #ff5733;">Contracts Open: {{ session_data.open_contract_ids|length }}</p>
     
@@ -649,7 +651,7 @@ def index():
         session_data['stop_reason'] = "Displayed"
         save_session_data(email, session_data)
     
-    contract_type_name = CONTRACT_TYPE.replace("DIGIT", "") # لتسهيل العرض في الواجهة
+    contract_type_name = "Rise/Fall"
 
     return render_template_string(CONTROL_FORM,
         email=email,
@@ -710,8 +712,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    contract_display = CONTRACT_TYPE.replace("DIGIT", "")
-    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {contract_display} {PREDICTION} (R_100 - Conditional Entry on Last Digit=1, Immediate on Loss) with x{MARTINGALE_MULTIPLIER} Martingale (Max {MAX_CONSECUTIVE_LOSSES} Losses, 1 Tick)', 'success')
+    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: Rise/Fall (T1=1 + 5-Tick Trend) with x{MARTINGALE_MULTIPLIER} Conditional Martingale (Max {MAX_CONSECUTIVE_LOSSES} Losses, 1 Tick)', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
@@ -731,7 +732,6 @@ def logout():
 if __name__ == '__main__':
     all_sessions = load_persistent_sessions()
     for email in list(all_sessions.keys()):
-        # محاولة إيقاف أي عملية قديمة عالقة قبل بدء تشغيل تطبيق Flask
         stop_bot(email, clear_data=False, stop_reason="Disconnected (Auto-Retry)")
         
     port = int(os.environ.get("PORT", 5000))
