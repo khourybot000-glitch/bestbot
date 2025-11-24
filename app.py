@@ -9,18 +9,18 @@ from datetime import timedelta, datetime, timezone
 from multiprocessing import Process
 from threading import Lock
 import traceback 
-from collections import Counter # تم الإبقاء عليها ولكن لن تستخدم في تحديد التوقع
+from collections import Counter
 
 # ==========================================================
 # BOT CONSTANT SETTINGS (R_100 | DIGIT DIFFER | x19.0 | 20 Ticks)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
-SYMBOL = "R_100"              
-DURATION = 1                  # مدة الصفقة 1 تيك
-DURATION_UNIT = "t"           
+SYMBOL = "R_100"          
+DURATION = 1              # مدة الصفقة 1 تيك
+DURATION_UNIT = "t"       
 
 # إعدادات المضاعفة والتحليل
-TICK_SAMPLE_SIZE = 20           # عدد التيكات المطلوبة للتحليل (20 تيك)
+TICK_SAMPLE_SIZE = 8           # 💡 عدد التيكات المطلوبة للتحليل (20 تيك)
 MAX_CONSECUTIVE_LOSSES = 2    # الحد الأقصى للخسائر المتتالية
 MARTINGALE_MULTIPLIER = 19.0  # معامل المضاعفة
 
@@ -42,11 +42,11 @@ TRADE_LOCK = Lock()
 
 DEFAULT_SESSION_STATE = {
     "api_token": "",
-    "base_stake": 0.35,                 
+    "base_stake": 0.35,           
     "tp_target": 10.0,
     "is_running": False,
     "current_profit": 0.0,
-    "current_stake": 0.35,              
+    "current_stake": 0.35,            
     "consecutive_losses": 0,
     "current_step": 0,
     "total_wins": 0,
@@ -62,7 +62,7 @@ DEFAULT_SESSION_STATE = {
     "current_entry_id": None,             
     "open_contract_ids": [],              
     "contract_profits": {},               
-    "last_two_digits": [9, 9], 
+    "last_two_digits": [9, 9],
     "last_digits_history": []    # قائمة لتخزين آخر 20 رقم نهائي
 }
 
@@ -144,7 +144,23 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
 # TRADING BOT FUNCTIONS
 # ==========================================================
 
-# تم حذف دالة find_least_frequent_digit حيث أصبح التوقع يعتمد على آخر تيك.
+def find_most_frequent_digit(digits_list):
+    """تحسب الرقم الأكثر تكراراً (الأكثر شيوعاً) في قائمة الأرقام النهائية (Last Digits)."""
+    if not digits_list:
+        return 0 
+        
+    counts = Counter(digits_list)
+    all_digits_counts = {i: counts[i] for i in range(10)}
+    
+    max_count = max(all_digits_counts.values())
+    
+    # إرجاع أول رقم وجد لديه هذا التكرار الأقصى
+    for digit in range(10):
+        if all_digits_counts[digit] == max_count:
+            return digit
+
+    return 0 
+
 
 def calculate_martingale_stake(base_stake, current_step, multiplier):
     """ منطق المضاعفة: ضرب الرهان الأساسي في معامل المضاعفة (x19) لعدد الخطوات """
@@ -176,7 +192,7 @@ def send_single_trade_order(email, stake, currency, contract_type, prediction):
             "duration": DURATION, 
             "duration_unit": DURATION_UNIT, 
             "symbol": SYMBOL,
-            "barrier": prediction # الرقم الذي يجب أن يختلف عنه الرقم النهائي
+            "barrier": prediction # الرقم الذي يجب أن يختلف عنه الرقم النهائي (الأكثر تكراراً)
         }
     }
     
@@ -282,8 +298,8 @@ def start_new_single_trade(email, contract_type, prediction):
     currency_to_use = current_data['currency']
     
     if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES:
-         stop_bot(email, clear_data=True, stop_reason=f"SL Reached: Max {MAX_CONSECUTIVE_LOSSES} Consecutive Losses reached.")
-         return
+          stop_bot(email, clear_data=True, stop_reason=f"SL Reached: Max {MAX_CONSECUTIVE_LOSSES} Consecutive Losses reached.")
+          return
         
     current_data['current_entry_id'] = time.time()
     current_data['open_contract_ids'] = []
@@ -291,7 +307,7 @@ def start_new_single_trade(email, contract_type, prediction):
     
     entry_tag = f"Consecutive Loss Step {current_data['consecutive_losses']}"
     
-    # 💡 مسح قائمة التيكات بعد الدخول (يجب أن يتم الحفظ مباشرة هنا)
+    # 💡 مسح قائمة التيكات بعد الدخول 
     current_data['last_digits_history'] = [] 
     
     print(f"🧠 [SINGLE ENTRY - {contract_type}] Digit: {prediction} | {entry_tag} | Stake: {round(stake, 2):.2f}.")
@@ -389,15 +405,15 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     if not is_contract_open.get(email):
                         if len(current_data['last_digits_history']) == TICK_SAMPLE_SIZE:
                             
-                            # 💡 التعديل الجديد: التوقع هو الرقم النهائي لآخر تيك في العينة (العنصر الأخير)
-                            target_prediction = current_data['last_digits_history'][-1]
-                            
-                            # ب. تنفيذ صفقة DIFFER
-                            print(f"📊 [ANALYSIS READY] {TICK_SAMPLE_SIZE} Digits collected. Target digit (Last Tick Digit): {target_prediction}. Entering DIGITDIFF.")
+                            # أ. تحديد الرقم الأكثر تكراراً (بدلاً من الأقل)
+                            target_prediction = find_most_frequent_digit(current_data['last_digits_history'])
+
+                            # ب. تنفيذ صفقة DIFFER (الرهان على أن الرقم الأكثر تكراراً لن يظهر)
+                            print(f"📊 [ANALYSIS READY] {TICK_SAMPLE_SIZE} Digits collected. Most frequent digit: {target_prediction}. Entering DIGITDIFF.")
                             
                             start_new_single_trade(email, contract_type="DIGITDIFF", prediction=target_prediction)
                             
-                            # 💡 ضروري لإعادة تحميل البيانات بعد المسح في الدالة السابقة
+                            # 💡 FIX: إعادة تحميل البيانات لتعكس مسح سجل التيكات الذي تم في الدالة السابقة
                             current_data = get_session_data(email) 
                             
                         else:
@@ -563,7 +579,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = 'Digit Differ (R_100 - Conditional Entry: Last Digit of 20th Tick / Conditional Martingale on Loss - x' + martingale_multiplier|string + ' Martingale, Max ' + max_consecutive_losses|string + ' Losses, ' + duration|string + ' Tick)' %}
+    {% set strategy = 'Digit Differ (R_100 - Conditional Entry: Most Frequent Digit in Last ' + tick_sample_size|string + ' Ticks / Conditional Martingale on Loss - x' + martingale_multiplier|string + ' Martingale, Max ' + max_consecutive_losses|string + ' Losses, ' + duration|string + ' Tick)' %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
@@ -706,7 +722,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    flash(f'Bot started successfully. Strategy: Digit Differ ({TICK_SAMPLE_SIZE} Ticks Analysis) with x{MARTINGALE_MULTIPLIER} Conditional Martingale (Max {MAX_CONSECUTIVE_LOSSES} Losses, 1 Tick)', 'success')
+    flash(f'Bot started successfully. Strategy: Digit Differ (Most Frequent Digit in {TICK_SAMPLE_SIZE} Ticks Analysis) with x{MARTINGALE_MULTIPLIER} Conditional Martingale (Max {MAX_CONSECUTIVE_LOSSES} Losses, 1 Tick)', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
