@@ -27,13 +27,18 @@ USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 
 # ==========================================================
-# GLOBAL STATE
+# GLOBAL STATE & CONSTANTS
 # ==========================================================
 active_processes = {} 
 active_ws = {}
 is_contract_open = {} 
 PROCESS_LOCK = Lock() 
 TRADE_LOCK = Lock() 
+
+# 💡 طلبات الرصيد المُعرّفة
+PRE_TRADE_BALANCE_REQ_ID = "PRE_TRADE_BALANCE"
+TIMED_SETTLEMENT_REQ_ID = "TIMED_SETTLEMENT_CHECK"
+DASHBOARD_BALANCE_REQ_ID = "DASHBOARD_BALANCE_CHECK"
 
 DEFAULT_SESSION_STATE = {
     "api_token": "", "base_stake": 0.35, "tp_target": 10.0, "is_running": False,
@@ -47,7 +52,8 @@ DEFAULT_SESSION_STATE = {
     "last_trade_prediction": -1,
     
     "pre_trade_balance": 0.0,    
-    "current_stake_recovery": 0.0 
+    "current_stake_recovery": 0.0,
+    "latest_balance": 0.0, # 💡 جديد: لعرض الرصيد في الواجهة
 }
 
 # --- Persistence functions ---
@@ -100,7 +106,7 @@ def load_allowed_users():
             return {line.strip().lower() for line in f if line.strip()}
     except: return set()
         
-# 💡 تم تعديل دالة stop_bot هنا 💡
+# 💡 تم تعديل دالة stop_bot لحذف البيانات عند TP/SL
 def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
     """
     يوقف عملية البوت، و ينهي اتصال WebSocket، و يحذف البيانات من الملفات بناءً على الطلب.
@@ -112,7 +118,6 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
         current_data["is_running"] = False
         current_data["stop_reason"] = stop_reason
     
-    # نحفظ الحالة الجديدة حتى يتم إغلاق العملية
     if stop_reason != "Running": save_session_data(email, current_data)
 
     if email in active_ws and active_ws[email]:
@@ -130,7 +135,6 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
     if clear_data or not current_data.get('open_contract_ids'): 
         if email in is_contract_open: is_contract_open[email] = False
 
-    # 💡 التعديل: عند الوصول إلى TP أو SL (حيث clear_data = True) سيتم الحذف فوراً
     if clear_data:
         # نبقي البيانات فقط لأخطاء الـ API وحالة 'Displayed' (أي خطأ تم عرضه)
         if stop_reason in ["API Buy Error", "Displayed"]:
@@ -140,7 +144,6 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
             delete_session_data(email)
             print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}) and session data cleared from file.")
     else:
-        # تُستخدم فقط عندما يكون stop_reason هو Disconnected (Auto-Retry)
         print(f"⚠ [INFO] WS closed for {email}. Attempting immediate reconnect.")
 
 
@@ -197,12 +200,13 @@ def send_single_trade_order(email, stake, currency, contract_type, prediction):
 # BALANCE CHECK FUNCTIONS
 # -------------------------------------------------------------------
 
-def send_pre_trade_balance_request(email, ws_app):
-    """ إرسال طلب لمرة واحدة للحصول على الرصيد قبل الشراء. """
+def send_pre_trade_balance_request(email, ws_app, purpose=PRE_TRADE_BALANCE_REQ_ID):
+    """ إرسال طلب للحصول على الرصيد قبل الشراء أو لتحديث الواجهة. """
     try:
         ws_app.send(json.dumps({
             "balance": 1, 
-            "req_id": f"PRE_TRADE_BALANCE_{email}_{int(time.time())}"
+            # نستخدم الـ purpose لتحديد نوع الطلب
+            "req_id": f"{purpose}_{email}_{int(time.time())}" 
         })) 
     except: pass
 
@@ -211,7 +215,7 @@ def send_settlement_balance_request(ws_app):
     try:
         ws_app.send(json.dumps({
             "balance": 1, 
-            "req_id": f"TIMED_SETTLEMENT_CHECK_{int(time.time())}"
+            "req_id": f"{TIMED_SETTLEMENT_REQ_ID}_{int(time.time())}"
         })) 
     except: pass 
 
@@ -260,22 +264,29 @@ def schedule_settlement_check(email, ws_app):
     
 
 def handle_balance_response_on_message(email, data, req_id):
-    """ معالجة استجابة الرصيد: حفظه قبل الصفقة أو استخدامه لتسوية الصفقة. """
+    """ معالجة استجابة الرصيد: حفظه قبل الصفقة أو استخدامه لتسوية الصفقة أو عرضه في الواجهة. """
     current_data = get_session_data(email)
     
     try:
         current_balance = float(data['balance']['balance'])
         
-        if req_id.startswith('PRE_TRADE_BALANCE'):
+        # 💡 التحديث الأساسي: دائماً نحفظ الرصيد الأخير للواجهة
+        current_data['latest_balance'] = current_balance
+        
+        if req_id.startswith(PRE_TRADE_BALANCE_REQ_ID):
             current_data['pre_trade_balance'] = current_balance
             save_session_data(email, current_data)
-            print(f"💰 [INFO] PRE-TRADE balance recorded: {current_balance:.2f}.")
+            print(f"💰 [INFO] PRE-TRADE balance recorded: {current_balance:.2f} {current_data.get('currency', 'USD')}.")
             return
 
-        if req_id.startswith('TIMED_SETTLEMENT_CHECK'):
+        if req_id.startswith(TIMED_SETTLEMENT_REQ_ID):
             if current_data['open_contract_ids']:
                 handle_contract_settlement_by_balance(email, current_balance)
             return
+            
+        if req_id.startswith(DASHBOARD_BALANCE_REQ_ID):
+            print(f"💰 [INFO] Dashboard Balance updated: {current_balance:.2f} {current_data.get('currency', 'USD')}.")
+            save_session_data(email, current_data)
 
     except Exception as e:
         print(f"❌ [BALANCE HANDLE ERROR] Could not process balance response ({req_id}): {e}")
@@ -298,7 +309,6 @@ def apply_martingale_logic(email):
     
     if current_data['current_profit'] >= current_data['tp_target']:
         save_session_data(email, current_data)
-        # 💡 سيؤدي هذا إلى حذف البيانات بفضل التعديل في stop_bot
         stop_bot(email, clear_data=True, stop_reason="TP Reached")
         return
         
@@ -311,7 +321,6 @@ def apply_martingale_logic(email):
         
         if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES:
             save_session_data(email, current_data)
-            # 💡 سيؤدي هذا إلى حذف البيانات بفضل التعديل في stop_bot
             stop_bot(email, clear_data=True, stop_reason="SL Reached: Consecutive losses")
             return
             
@@ -344,6 +353,7 @@ def apply_martingale_logic(email):
     
     is_contract_open[email] = False
 
+# 💡 تم تعديل دالة start_new_single_trade لآلية الانتظار المؤكد (Polling Loop)
 def start_new_single_trade(email, contract_type, prediction):
     global is_contract_open
     
@@ -361,21 +371,36 @@ def start_new_single_trade(email, contract_type, prediction):
     current_data['last_trade_prediction'] = prediction 
     current_data['current_stake_recovery'] = stake
     
+    # 1. طلب الرصيد
     ws_app = active_ws.get(email)
     if ws_app:
-        send_pre_trade_balance_request(email, ws_app)
+        send_pre_trade_balance_request(email, ws_app, purpose=PRE_TRADE_BALANCE_REQ_ID)
     else:
         print("❌ [TRADE ABORT] WS is inactive. Cannot proceed with trade.")
         is_contract_open[email] = False
         return
 
-    time.sleep(0.5) 
+    # 💡 الانتظار المؤكد (Polling Loop) حتى وصول الرصيد
+    start_wait_time = time.time()
+    balance_recorded = False
     
-    current_data = get_session_data(email) 
+    # ننتظر حتى 5 ثوانٍ كحد أقصى لتأكيد حفظ الرصيد
+    while time.time() - start_wait_time < 5.0: 
+        current_data = get_session_data(email) 
+        if current_data['pre_trade_balance'] > 0.0:
+            balance_recorded = True
+            break
+        time.sleep(0.1) # انتظار قصير جداً بين الفحص والآخر
+
+    current_data = get_session_data(email) # قراءة البيانات المحدثة
     
-    if current_data['pre_trade_balance'] <= 0.0:
-        print("❌ [TRADE ABORT] Failed to record Pre-Trade Balance in time. Aborting trade.")
+    # 3. التحقق النهائي: إذا لم يتم التسجيل، نلغي الصفقة
+    if not balance_recorded:
+        print("❌ [TRADE ABORT] Failed to record Pre-Trade Balance in time (5.0s timeout). Aborting trade.")
         is_contract_open[email] = False
+        current_data['pre_trade_balance'] = 0.0
+        current_data['current_stake_recovery'] = 0.0
+        save_session_data(email, current_data)
         return
         
     entry_tag = f"Martingale Step {current_data['consecutive_losses']}" if current_data['consecutive_losses'] > 0 else "Base Stake Entry"
@@ -429,6 +454,10 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 current_data = get_session_data(email) 
                 ws_app.send(json.dumps({"authorize": current_data['api_token']}))
                 ws_app.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
+                
+                # 💡 طلب الرصيد فور الاتصال لعرضه في الواجهة
+                send_pre_trade_balance_request(email, ws_app, purpose=DASHBOARD_BALANCE_REQ_ID)
+                
                 running_data = get_session_data(email)
                 running_data['is_running'] = True
                 save_session_data(email, running_data)
@@ -474,7 +503,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 
                 elif msg_type == 'balance':
                     req_id = data.get('req_id', '')
-                    if req_id.startswith('PRE_TRADE_BALANCE') or req_id.startswith('TIMED_SETTLEMENT_CHECK'):
+                    if req_id.startswith(PRE_TRADE_BALANCE_REQ_ID) or req_id.startswith(TIMED_SETTLEMENT_REQ_ID) or req_id.startswith(DASHBOARD_BALANCE_REQ_ID):
                         handle_balance_response_on_message(email, data, req_id)
                 
                 elif 'error' in data:
@@ -634,6 +663,9 @@ CONTROL_FORM = """
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
+    
+    <p style="font-weight: bold; color: blue;">💰 Current Balance: {{ session_data.currency }} {{ session_data.latest_balance|round(2) }}</p>
+    
     <p>Net Profit: {{ session_data.currency }} {{ session_data.current_profit|round(2) }}</p>
     <p>Current Stake: {{ session_data.currency }} {{ session_data.current_stake|round(2) }}</p>
     <p>Consecutive Losses: {{ session_data.consecutive_losses }} / {{ max_consecutive_losses }}</p>
@@ -704,7 +736,6 @@ def index():
 
     if not session_data.get('is_running') and "stop_reason" in session_data and session_data["stop_reason"].startswith("API Buy Error"):
         flash(f"❌ API Error: {session_data['stop_reason']}. Check your token and account status.", 'error')
-        # بعد عرض رسالة الخطأ، نضع علامة 'Displayed' لمنع عرضها مرة أخرى
         session_data['stop_reason'] = "Displayed"
         save_session_data(email, session_data)
         
@@ -789,7 +820,11 @@ def logout():
 if __name__ == '__main__':
     all_sessions = load_persistent_sessions()
     for email in list(all_sessions.keys()):
-        stop_bot(email, clear_data=False, stop_reason="Disconnected (Auto-Retry)")
+        # لا نحذف البيانات إذا كانت حالة الإيقاف تشير إلى محاولة إعادة اتصال (Auto-Retry)
+        if all_sessions[email].get('stop_reason') == "Disconnected (Auto-Retry)":
+             stop_bot(email, clear_data=False, stop_reason="Disconnected (Auto-Retry)")
+        else:
+             stop_bot(email, clear_data=True, stop_reason="Stopped Manually")
         
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
