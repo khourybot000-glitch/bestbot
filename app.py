@@ -129,7 +129,9 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
             except: pass
             del active_ws[email]
 
-    if email in is_contract_open: is_contract_open[email] = False
+    # 💡 يتم ضبط is_contract_open فقط إذا كنا نغلق البوت تمامًا أو لم يكن هناك عقود مفتوحة
+    if clear_data or not current_data.get('open_contract_ids'): 
+        if email in is_contract_open: is_contract_open[email] = False
 
     if clear_data:
         if stop_reason in ["SL Reached: Consecutive losses", "TP Reached", "API Buy Error", "Displayed"]:
@@ -155,7 +157,7 @@ def find_most_frequent_digit(digits_list):
     
     max_count = max(all_digits_counts.values())
     
-    # إرجاع أول رقم وجد لديه هذا التكرار الأقصى
+    # إرجاع أول رقم وجد لديه هذا التكرار الأقصى (الأصغر قيمة)
     for digit in range(10):
         if all_digits_counts[digit] == max_count:
             return digit
@@ -226,14 +228,13 @@ def start_new_single_trade(email, contract_type, prediction):
     
     if is_base_stake:
         entry_tag = f"Base Stake Entry (Step 0)"
-        # 💡 مسح قائمة التيكات بعد الدخول بالرهان الأساسي (لإعادة جمع 20 جديدة)
+        # مسح قائمة التيكات بعد الدخول بالرهان الأساسي
         current_data['last_digits_history'] = [] 
-        # 💡 حفظ الرقم النهائي المستخدم في الرهان الأساسي 
+        # حفظ الرقم النهائي المستخدم في الرهان الأساسي 
         current_data['last_trade_prediction'] = prediction 
     else:
         entry_tag = f"Delayed Martingale Step {current_data['consecutive_losses']} (Using New Analysis)"
-        # 💡 لا يتم مسح التيكات هنا
-        # 💡 لا يتم حفظ الرقم هنا لأنه تم تحديده بالتحليل الجديد في on_message_wrapper
+        # لا يتم مسح التيكات هنا
 
     
     print(f"🧠 [{entry_tag} - {contract_type}] Digit: {prediction} | Stake: {round(stake, 2):.2f}.")
@@ -292,8 +293,6 @@ def apply_martingale_logic(email):
         
         print(f"🔄 [LOSS] PnL: {total_profit_loss:.2f}. Consecutive: {current_data['consecutive_losses']}. Next Stake calculated: {round(new_stake, 2):.2f}. Awaiting next **:00/:30** entry with **NEW ANALYSIS**.")
         
-        # 💡 لا يتم مسح التيكات هنا، للسماح بإعادة تحليلها في وقت الدخول التالي.
-        
     # ✅ حالة الربح (Win) - العودة إلى الشرط الزمني/20 تيك
     else: 
         current_data['total_wins'] += 1 if total_profit_loss > 0 else 0 
@@ -304,12 +303,12 @@ def apply_martingale_logic(email):
         entry_result_tag = "WIN" if total_profit_loss > 0 else "DRAW/SPLIT"
         print(f"✅ [ENTRY RESULT] {entry_result_tag}. PnL: {total_profit_loss:.2f}. Stake reset to base: {base_stake_used:.2f}. **Awaiting new 20-tick cycle and :00/:30 time slot.**")
         
-        # 💡 مسح قائمة التيكات لإعادة جمع 20 تيك جديدة والانتظار للوقت
+        # مسح قائمة التيكات لإعادة جمع 20 تيك جديدة
         current_data['last_digits_history'] = [] 
-        current_data['last_trade_prediction'] = -1 # مسح القيمة المحفوظة
+        current_data['last_trade_prediction'] = -1 
 
 
-    # مسح بيانات العقد (يتم بعد الخسارة أو الربح)
+    # مسح بيانات العقد
     current_data['current_entry_id'] = None
     current_data['open_contract_ids'] = []
     current_data['contract_profits'] = {}
@@ -337,6 +336,7 @@ def handle_contract_settlement(email, contract_id, profit_loss):
         
     save_session_data(email, current_data)
     
+    # نطبق منطق المضاعفة/الانتهاء فقط عندما لا يكون هناك عقود مفتوحة أخرى
     if not current_data['open_contract_ids']:
         apply_martingale_logic(email)
 
@@ -357,10 +357,9 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         "current_stake": stake, "stop_reason": "Running", "last_entry_time": 0,
         "last_entry_price": 0.0, "last_tick_data": None, "currency": currency,
         "account_type": account_type, "last_valid_tick_price": 0.0,
-        "current_entry_id": None, "open_contract_ids": [], "contract_profits": {},
-        "last_two_digits": [9, 9],
-        "last_digits_history": [],
-        "last_trade_prediction": -1
+        "current_entry_id": None, 
+        # 💡 يجب أن تبقى open_contract_ids و contract_profits كما هي عند الاستئناف
+        "contract_profits": {},
     })
     save_session_data(email, session_data)
 
@@ -380,18 +379,21 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 running_data['is_running'] = True
                 save_session_data(email, running_data)
                 print(f"✅ [PROCESS] Connection established for {email}.")
-                is_contract_open[email] = False
                 
-                # منطق استرداد العقود المفتوحة بعد انقطاع الاتصال
+                # 💡 التعديل الحاسم: نضبط is_contract_open بناءً على وجود عقود مفتوحة للتتبع
                 if current_data['open_contract_ids']:
+                    is_contract_open[email] = True # نتركها مفتوحة وننتظر التسوية
                     print(f"🔍 [RECOVERY CHECK] Found {len(current_data['open_contract_ids'])} contracts pending settlement. RE-SUBSCRIBING...")
                     for contract_id in current_data['open_contract_ids']:
                         if contract_id:
+                            # إعادة الاشتراك لمتابعة العقد العالق
                             ws_app.send(json.dumps({
                                 "proposal_open_contract": 1, 
                                 "contract_id": contract_id, 
                                 "subscribe": 1  
                             }))
+                else:
+                    is_contract_open[email] = False # لا يوجد شيء للمتابعة، جاهزون للدخول الجديد
 
             def on_message_wrapper(ws_app, message):
                 data = json.loads(message)
@@ -403,11 +405,11 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 if msg_type == 'tick':
                     try:
                         current_price = float(data['tick']['quote'])
-                        tick_time_epoch = int(data['tick']['epoch']) # استخراج وقت التيك
+                        tick_time_epoch = int(data['tick']['epoch'])
                     except (KeyError, ValueError):
                         return
                         
-                    T1 = int(str(current_price)[-1]) # الرقم النهائي (Last Digit)
+                    T1 = int(str(current_price)[-1]) 
                     
                     # ************* منطق التحقق من التوقيت *************
                     dt_object = datetime.fromtimestamp(tick_time_epoch, tz=timezone.utc)
@@ -426,7 +428,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     current_data['last_tick_data'] = data['tick']
                     
                     
-                    # 2. التحقق من شرط الدخول (20 تيك مجمعة + شرط التوقيت)
+                    # 2. التحقق من شرط الدخول
                     if not is_contract_open.get(email):
                         
                         is_base_stake = (current_data['current_stake'] == current_data['base_stake'])
@@ -435,27 +437,21 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                             
                             if len(current_data['last_digits_history']) == TICK_SAMPLE_SIZE:
                                 
-                                # 💡 التعديل هنا لضمان إعادة التحليل في كلتا الحالتين
                                 target_prediction = find_most_frequent_digit(current_data['last_digits_history'])
                                 
                                 if is_base_stake:
-                                    # BASE ENTRY: (Analysis + Reset Tick History)
                                     print(f"📊 [BASE ENTRY READY] {current_second}s | Digits collected. Most frequent digit: {target_prediction}. Entering DIGITDIFF.")
                                 else:
-                                    # MARTINGALE ENTRY: (Analysis + NO Reset Tick History)
                                     print(f"📊 [MARTINGALE ENTRY READY] {current_second}s | Digits collected. Re-analyzed digit: {target_prediction}. Entering DIGITDIFF.")
 
-                                # 3. EXECUTE THE TRADE 
                                 start_new_single_trade(email, contract_type="DIGITDIFF", prediction=target_prediction)
                                 
-                                current_data = get_session_data(email) # Reload data after trade execution
+                                current_data = get_session_data(email)
                                 
                             else:
-                                # حالة التخطي لعدم اكتمال التيكات
                                 print(f"❌ [SKIPPING ENTRY] Time ({current_second}s) reached, but still collecting digits... ({len(current_data['last_digits_history'])}/{TICK_SAMPLE_SIZE})")
                         
                         else:
-                            # حالة الانتظار لوقت الدخول
                             if len(current_data['last_digits_history']) < TICK_SAMPLE_SIZE:
                                 print(f"❌ [COLLECTING & WAITING] Current second is {current_second}. Waiting for :00 or :30. Digits: ({len(current_data['last_digits_history'])}/{TICK_SAMPLE_SIZE})")
                             else:
@@ -464,15 +460,19 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     else:
                         print("❌ [FLOW CHECK] Contract IS Open. Skipping entry.")
                         
-                    save_session_data(email, current_data) # حفظ بعد كل تيك وتحديث التحليل
+                    save_session_data(email, current_data)
 
                 elif msg_type == 'buy':
                     contract_id = data['buy']['contract_id']
-                    current_data['open_contract_ids'].append(contract_id)
-                    save_session_data(email, current_data)
+                    # 💡 نستخدم set لإضافة المعرف ونضمن عدم تكراره (على الرغم من أن القائمة تُمسح قبل الشراء)
+                    if contract_id not in current_data['open_contract_ids']:
+                        current_data['open_contract_ids'].append(contract_id)
+                        is_contract_open[email] = True 
+                        save_session_data(email, current_data)
+                        
+                        # الاشتراك لمتابعة العقد
+                        ws_app.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
                     
-                    # الاشتراك لمتابعة العقد
-                    ws_app.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
                 
                 elif 'error' in data:
                     error_message = data['error'].get('message', 'Unknown Error')
@@ -488,15 +488,27 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
 
                 elif msg_type == 'proposal_open_contract':
                     contract = data['proposal_open_contract']
+                    contract_id = contract.get('contract_id')
+                    
+                    # 💡 المعالجة الرئيسية: إذا تم بيع العقد (تسويته)
                     if contract.get('is_sold') == 1:
-                        contract_id = contract['contract_id']
-                        handle_contract_settlement(email, contract_id, contract['profit'])
+                        if contract_id:
+                            # معالجة النتيجة وحذف المعرف من قائمة الانتظار
+                            handle_contract_settlement(email, contract_id, contract['profit'])
                         
-                        if 'subscription_id' in data: ws_app.send(json.dumps({"forget": data['subscription_id']}))
+                        # طلب النسيان (لإيقاف متابعة هذا العقد بعد تسويته)
+                        if 'subscription_id' in data: 
+                            ws_app.send(json.dumps({"forget": data['subscription_id']}))
+                    
+                    # 💡 المعالجة الثانوية (للتأكد من أننا نتابع عقداً مفتوحاً بعد إعادة الاتصال)
+                    elif contract.get('is_valid_to_sell') == 1 and contract_id and contract_id in current_data['open_contract_ids']:
+                        # إذا تلقينا رسالة عن عقد مفتوح نعيد التأكيد على أنه مفتوح
+                        is_contract_open[email] = True
+                        print(f"🔍 [RECOVERY] Contract {contract_id} status confirmed open.")
 
             def on_close_wrapper(ws_app, code, msg):
                 print(f"⚠ [PROCESS] WS closed for {email}. RECONNECTING IMMEDIATELY.")
-                is_contract_open[email] = False 
+                # لا نغير حالة is_contract_open هنا. نعتمد على on_open_wrapper لمعرفة إذا كان العقد لا يزال مفتوحاً أم لا.
 
             def on_error_wrapper(ws_app, err):
                 print(f"❌ [WS Critical Error {email}] {err}") 
@@ -622,7 +634,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = 'Digit Differ (R_100 - Base Entry: Most Frequent Digit in Last ' + tick_sample_size|string + ' Ticks AND Time :00/:30 / Martingale: DELAYED to next :00/:30 using NEW ANALYSIS - x' + martingale_multiplier|string + ' Martingale, Max ' + max_consecutive_losses|string + ' Losses, ' + duration|string + ' Tick)' %}
+    {% set strategy = 'Digit Differ (R_100 - Base Entry: Most Frequent Digit in Last ' + tick_sample_size|string + ' Ticks AND Time :00/:30 / Martingale: DELAYED with NEW ANALYSIS - x' + martingale_multiplier|string + ' Martingale, Max ' + max_consecutive_losses|string + ' Losses, ' + duration|string + ' Tick)' %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
@@ -785,6 +797,7 @@ def logout():
 if __name__ == '__main__':
     all_sessions = load_persistent_sessions()
     for email in list(all_sessions.keys()):
+        # نوقف العمليات مع الاحتفاظ بالبيانات إذا كانت غير "Stopped Manually"
         stop_bot(email, clear_data=False, stop_reason="Disconnected (Auto-Retry)")
         
     port = int(os.environ.get("PORT", 5000))
