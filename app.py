@@ -64,7 +64,7 @@ DEFAULT_SESSION_STATE = {
     "last_digits_history": []    # قائمة لتخزين آخر 6 رقم نهائي
 }
 
-# --- Persistence functions (لم يتم تعديلها) ---
+# --- Persistence functions (وظائف حفظ واسترجاع الحالة) ---
 def load_persistent_sessions():
     if not os.path.exists(ACTIVE_SESSIONS_FILE): return {}
     try:
@@ -131,7 +131,7 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
 # --- End of Persistence and Control functions ---
 
 # ==========================================================
-# TRADING BOT FUNCTIONS
+# TRADING BOT FUNCTIONS (دوال منطق التداول)
 # ==========================================================
 
 def find_most_frequent_digit(digits_list):
@@ -156,7 +156,6 @@ def calculate_martingale_stake(base_stake, current_step, multiplier):
     """ منطق المضاعفة: ضرب الرهان الأساسي في معامل المضاعفة (x19) لعدد الخطوات """
     if current_step == 0: 
         return base_stake
-    # مضاعفة x19
     return base_stake * (multiplier ** current_step)
 
 
@@ -168,12 +167,9 @@ def apply_martingale_logic(email):
     if not current_data.get('is_running'): return
 
     if not current_data['contract_profits']:
-        print("❌ [MARTINGALE ERROR] No contract result found.")
         return
 
-    # بما أننا نتداول صفقة واحدة، نأخذ النتيجة الوحيدة
     total_profit_loss = list(current_data['contract_profits'].values())[0]
-
     current_data['current_profit'] += total_profit_loss
     
     # 🛑 1. التحقق من Take Profit (TP)
@@ -242,32 +238,27 @@ def handle_contract_settlement(email, contract_id, profit_loss):
         apply_martingale_logic(email)
 
 
-# دالة متزامنة جديدة لإرسال واستقبال رسالة واحدة (للتاريخ أو الشراء أو التسوية)
-def sync_send_and_recv(ws, request_data, expect_msg_type, timeout=5):
+def sync_send_and_recv(ws, request_data, expect_msg_type, timeout=10):
     """ يرسل طلب وينتظر الرد المتوقع في إطار زمني محدد. """
     try:
         ws.settimeout(timeout)
         ws.send(json.dumps(request_data))
         
-        # Keep receiving until the expected message type is found
         while True:
             response = json.loads(ws.recv())
             
-            # في حال وجود خطأ في الرسالة المستلمة، نعيدها لمعالجتها
             if 'error' in response:
+                print(f"❌ [API Error] Received error for {expect_msg_type} request: {response['error'].get('message', 'Unknown API Error')}")
                 return response 
                 
-            # إرجاع الرسالة المتوقعة
             if response.get('msg_type') == expect_msg_type:
                 return response
-            
-            # تجاهل الرسائل الأخرى (مثل tick, time, authorize) إذا لم تكن هي الرد المتوقع
             
     except websocket.WebSocketTimeoutException:
         print(f"❌ [WS Timeout] Timed out waiting for {expect_msg_type}.")
         return {'error': {'message': f"Connection Timeout waiting for {expect_msg_type}"}}
     except Exception as e:
-        # print(f"❌ [SYNC ERROR] Failed to send/receive: {e}")
+        print(f"❌ [SYNC ERROR] Failed to send/receive: {e}. Check network.")
         return {'error': {'message': f"Connection Error: {e}"}}
 
 
@@ -310,14 +301,13 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             
             print(f"⏳ [TIMER] Waiting {wait_time:.1f} seconds for the next entry window (00 or 30).")
             time.sleep(wait_time if wait_time > 0.5 else 0.5)
-            continue # تخطي باقي الحلقة
+            continue 
 
         # --- بداية دورة الاتصال والمعالجة (للدخول أو الاستعادة) ---
         
         ws = None
         try:
             print(f"🔗 [PROCESS] Attempting to CONNECT...")
-            # إنشاء اتصال متزامن (مع مهلة قصيرة)
             ws = websocket.create_connection(WSS_URL, timeout=10) 
             
             # أ. الترخيص
@@ -331,7 +321,6 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 contract_id = current_data['open_contract_ids'][0]
                 print(f"🔍 [RECOVERY] Contract ID {contract_id} pending settlement. Resubscribing...")
                 
-                # إعادة الاشتراك لإجبار API على إرسال نتيجة التسوية فوراً
                 settlement_response = sync_send_and_recv(
                     ws, 
                     {"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}, 
@@ -340,7 +329,6 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 
                 if 'error' in settlement_response:
                     print(f"❌ [RECOVERY ERROR] Cannot retrieve contract status: {settlement_response['error']['message']}")
-                    # في حالة فشل الاستعادة الحرجة، نتوقف
                     stop_bot(email, clear_data=True, stop_reason="Critical Recovery Failure")
                     break
 
@@ -349,38 +337,43 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     handle_contract_settlement(email, contract_id, contract_info['profit'])
                     print("✅ [RECOVERY] Contract settled successfully. Logic applied.")
                     
-                    # إرسال Forget لإلغاء الاشتراك (رغم أن API يغلقه بعد is_sold: 1)
                     if 'subscription_id' in settlement_response:
                         ws.send(json.dumps({"forget": settlement_response['subscription_id']}))
                 else:
-                    # في صفقة 1-تيك، يجب أن تكون مغلقة. إذا لم تكن كذلك، ننتظر ونحاول مجدداً
                     print("⚠ [RECOVERY] Contract still open (unexpected). Will retry settlement next loop.")
                 
-                continue # ننتقل لبداية الحلقة لإعادة الفحص أو الانتظار
+                continue 
 
 
             # --- منطق التداول العادي (لا يوجد عقود مفتوحة) ---
 
-            # 2. جلب 6 تيكات تاريخية
+            # 2. جلب 6 تيكات تاريخية (تم حذف "subscribe": 0)
             history_request = {
                 "ticks_history": SYMBOL,
                 "end": "latest",
-                "count": TICK_SAMPLE_SIZE, # هنا تم استخدام القيمة الجديدة 6
-                "subscribe": 0,
+                "count": TICK_SAMPLE_SIZE, # القيمة 6
                 "style": "ticks"
             }
-            history_response = sync_send_and_recv(ws, history_request, "history")
+            history_response = sync_send_and_recv(ws, history_request, "history", timeout=10)
             
             if 'error' in history_response:
                 print(f"❌ [HISTORY ERROR] Failed to get ticks history: {history_response['error']['message']}")
-                continue # نغلق الاتصال وننتظر النافذة التالية
+                continue 
             
+            # **--- التحقق المُعزز لجودة البيانات ---**
+            if not history_response.get('history') or 'prices' not in history_response['history']:
+                print("❌ [DATA ERROR] Received history response is missing 'prices' array. Skipping entry.")
+                continue
+
             prices = history_response['history']['prices']
+            if len(prices) < TICK_SAMPLE_SIZE:
+                 print(f"❌ [DATA ERROR] Received only {len(prices)} ticks, expected {TICK_SAMPLE_SIZE}. Skipping entry.")
+                 continue
+            
             last_digits = [int(str(float(p))[-1]) for p in prices if p is not None]
             
             # تحديث الحالة للتحليل/العرض
             current_data['last_digits_history'] = last_digits
-            # لا حاجة لـ last_valid_tick_price في هذا المنطق، لكن نحتفظ بها
             current_data['last_valid_tick_price'] = float(prices[-1]) if prices else 0.0
             save_session_data(email, current_data)
 
@@ -388,7 +381,6 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             if len(last_digits) == TICK_SAMPLE_SIZE:
                 target_prediction = find_most_frequent_digit(last_digits)
                 
-                # فحص Max Losses SL قبل التداول
                 if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES:
                     stop_bot(email, clear_data=True, stop_reason="SL Reached: Max Consecutive Losses reached.")
                     continue
@@ -407,7 +399,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 }
                 
                 print(f"🧠 [SINGLE ENTRY] Digit: {target_prediction} | Stake: {round(stake, 2):.2f}. Sending BUY request...")
-                buy_response = sync_send_and_recv(ws, trade_request, "buy", timeout=15) # مهلة أطول للشراء
+                buy_response = sync_send_and_recv(ws, trade_request, "buy", timeout=15)
                 
                 if 'error' in buy_response:
                     stop_bot(email, clear_data=True, stop_reason=f"API Buy Error: {buy_response['error']['message']}")
@@ -417,28 +409,26 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 contract_id = buy_response['buy']['contract_id']
                 current_data['open_contract_ids'] = [contract_id]
                 current_data['current_entry_id'] = time.time()
-                current_data['last_digits_history'] = [] # إعداد للمرة التالية
+                current_data['last_digits_history'] = []
                 save_session_data(email, current_data)
                 
-                # الاشتراك في العقد للحصول على نتيجة التسوية فوراً
                 print(f"⏳ [SETTLEMENT] Waiting for contract {contract_id} settlement...")
                 settlement_response = sync_send_and_recv(
                     ws, 
                     {"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}, 
                     "proposal_open_contract",
-                    timeout=15 # مهلة التسوية
+                    timeout=15 
                 )
                 
                 if 'error' in settlement_response:
                     print(f"❌ [SETTLEMENT ERROR] {settlement_response['error']['message']}. Will attempt recovery next loop.")
-                    continue # نترك العقد مفتوحاً في open_contract_ids للمحاولة في الدورة التالية
+                    continue
                     
                 # 6. معالجة التسوية
                 contract_info = settlement_response['proposal_open_contract']
                 if contract_info.get('is_sold') == 1:
                     handle_contract_settlement(email, contract_id, contract_info['profit'])
                     
-                    # إلغاء الاشتراك (للتأكد فقط)
                     if 'subscription_id' in settlement_response:
                         ws.send(json.dumps({"forget": settlement_response['subscription_id']}))
                 else:
@@ -461,7 +451,9 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
 
     print(f"🛑 [PROCESS] Bot process loop ended for {email}.")
 
-# --- (FLASK APP SETUP AND ROUTES - لم يتم تعديلها باستثناء إزالة الإشارات إلى active_ws) ---
+# --------------------------------------------------------------------------------------------------
+
+# --- FLASK APP SETUP AND ROUTES (لوحة التحكم) ---
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
