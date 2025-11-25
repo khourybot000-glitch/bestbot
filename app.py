@@ -17,7 +17,7 @@ WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"          
 DURATION = 1              
 DURATION_UNIT = "t"       
-TICK_SAMPLE_SIZE = 6           
+TICK_SAMPLE_SIZE = 6           # 💡 تم التعديل إلى 6 تيكات
 MAX_CONSECUTIVE_LOSSES = 2    
 MARTINGALE_MULTIPLIER = 19.0  
 CONTRACT_TYPE = "DIGITDIFF"
@@ -35,7 +35,7 @@ is_contract_open = {}
 PROCESS_LOCK = Lock() 
 TRADE_LOCK = Lock() 
 
-# 💡 طلبات الرصيد المُعرّفة
+# 💡 طلبات الرصيد المُعرّفة (تم تبسيط الـ ID لضمان التوافق)
 PRE_TRADE_BALANCE_REQ_ID = "PRE_TRADE_BALANCE"
 TIMED_SETTLEMENT_REQ_ID = "TIMED_SETTLEMENT_CHECK"
 DASHBOARD_BALANCE_REQ_ID = "DASHBOARD_BALANCE_CHECK"
@@ -53,10 +53,10 @@ DEFAULT_SESSION_STATE = {
     
     "pre_trade_balance": 0.0,    
     "current_stake_recovery": 0.0,
-    "latest_balance": 0.0, # 💡 جديد: لعرض الرصيد في الواجهة
+    "latest_balance": 0.0, # لعرض الرصيد في الواجهة
 }
 
-# --- Persistence functions ---
+# --- Persistence functions (لم يتم تغيير منطق حفظ/تحميل البيانات) ---
 
 def load_persistent_sessions():
     if not os.path.exists(ACTIVE_SESSIONS_FILE): return {}
@@ -106,11 +106,8 @@ def load_allowed_users():
             return {line.strip().lower() for line in f if line.strip()}
     except: return set()
         
-# 💡 تم تعديل دالة stop_bot لحذف البيانات عند TP/SL
 def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
-    """
-    يوقف عملية البوت، و ينهي اتصال WebSocket، و يحذف البيانات من الملفات بناءً على الطلب.
-    """
+    """ يوقف عملية البوت، وينهي اتصال WebSocket، ويحذف البيانات بناءً على stop_reason. """
     global is_contract_open, active_processes
     current_data = get_session_data(email)
     
@@ -136,13 +133,12 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
         if email in is_contract_open: is_contract_open[email] = False
 
     if clear_data:
-        # نبقي البيانات فقط لأخطاء الـ API وحالة 'Displayed' (أي خطأ تم عرضه)
-        if stop_reason in ["API Buy Error", "Displayed"]:
-            print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}). Data kept for display.")
-        else:
-            # يتم الحذف في حالتي TP Reached و SL Reached: Consecutive losses
+        # يتم الحذف في حالتي TP Reached و SL Reached
+        if stop_reason not in ["API Buy Error", "Displayed"]:
             delete_session_data(email)
             print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}) and session data cleared from file.")
+        else:
+             print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}). Data kept for display.")
     else:
         print(f"⚠ [INFO] WS closed for {email}. Attempting immediate reconnect.")
 
@@ -197,25 +193,30 @@ def send_single_trade_order(email, stake, currency, contract_type, prediction):
         return False
         
 # -------------------------------------------------------------------
-# BALANCE CHECK FUNCTIONS
+# BALANCE CHECK FUNCTIONS (تم تبسيط الـ ID لضمان التوافق)
 # -------------------------------------------------------------------
 
 def send_pre_trade_balance_request(email, ws_app, purpose=PRE_TRADE_BALANCE_REQ_ID):
     """ إرسال طلب للحصول على الرصيد قبل الشراء أو لتحديث الواجهة. """
     try:
+        # 💡 تم تبسيط هوية الطلب لضمان التوافق مع الاستجابة
+        request_id = f"{purpose}_{email}" 
+        
         ws_app.send(json.dumps({
             "balance": 1, 
-            # نستخدم الـ purpose لتحديد نوع الطلب
-            "req_id": f"{purpose}_{email}_{int(time.time())}" 
+            "req_id": request_id 
         })) 
-    except: pass
+        print(f"🔗 [DEBUG] Sent Balance Request with ID: {request_id}")
+    except Exception as e: 
+        print(f"❌ [REQUEST ERROR] Failed to send balance request for {email}: {e}")
 
-def send_settlement_balance_request(ws_app):
+def send_settlement_balance_request(email, ws_app):
     """ إرسال طلب لمرة واحدة للحصول على الرصيد لأغراض التسوية بعد انتهاء الصفقة (8 ثوانٍ). """
     try:
+        request_id = f"{TIMED_SETTLEMENT_REQ_ID}_{email}"
         ws_app.send(json.dumps({
             "balance": 1, 
-            "req_id": f"{TIMED_SETTLEMENT_REQ_ID}_{int(time.time())}"
+            "req_id": request_id
         })) 
     except: pass 
 
@@ -250,13 +251,11 @@ def handle_contract_settlement_by_balance(email, current_balance):
     apply_martingale_logic(email)
 
 def schedule_settlement_check(email, ws_app):
-    """
-    يؤجل إرسال طلب فحص الرصيد لمدة 8 ثوانٍ.
-    """
+    """ يؤجل إرسال طلب فحص الرصيد لمدة 8 ثوانٍ. """
     def deferred_check():
         current_data = get_session_data(email)
         if current_data['open_contract_ids']:
-            send_settlement_balance_request(ws_app)
+            send_settlement_balance_request(email, ws_app)
             
     t = Timer(8.0, deferred_check)
     t.start()
@@ -267,26 +266,33 @@ def handle_balance_response_on_message(email, data, req_id):
     """ معالجة استجابة الرصيد: حفظه قبل الصفقة أو استخدامه لتسوية الصفقة أو عرضه في الواجهة. """
     current_data = get_session_data(email)
     
+    # هوية الطلب المتوقعة
+    expected_pre_trade_id = f"{PRE_TRADE_BALANCE_REQ_ID}_{email}"
+    expected_timed_settlement_id = f"{TIMED_SETTLEMENT_REQ_ID}_{email}"
+    expected_dashboard_id = f"{DASHBOARD_BALANCE_REQ_ID}_{email}"
+    
     try:
         current_balance = float(data['balance']['balance'])
         
-        # 💡 التحديث الأساسي: دائماً نحفظ الرصيد الأخير للواجهة
+        # دائماً نحفظ الرصيد الأخير للواجهة
         current_data['latest_balance'] = current_balance
         
-        if req_id.startswith(PRE_TRADE_BALANCE_REQ_ID):
+        if req_id == expected_pre_trade_id:
             current_data['pre_trade_balance'] = current_balance
-            save_session_data(email, current_data)
             print(f"💰 [INFO] PRE-TRADE balance recorded: {current_balance:.2f} {current_data.get('currency', 'USD')}.")
-            return
-
-        if req_id.startswith(TIMED_SETTLEMENT_REQ_ID):
+            
+        elif req_id == expected_timed_settlement_id:
             if current_data['open_contract_ids']:
                 handle_contract_settlement_by_balance(email, current_balance)
-            return
             
-        if req_id.startswith(DASHBOARD_BALANCE_REQ_ID):
+        elif req_id == expected_dashboard_id:
             print(f"💰 [INFO] Dashboard Balance updated: {current_balance:.2f} {current_data.get('currency', 'USD')}.")
-            save_session_data(email, current_data)
+
+        else:
+            # رسالة رصيد غير محددة (غالباً تلقائية) - يتم تحديث الواجهة فقط
+            print(f"⚠️ [BALANCE RECEIVED] Received balance: {current_balance:.2f}, but with UNKNOWN req_id: {req_id}. Updating Dashboard only.")
+
+        save_session_data(email, current_data)
 
     except Exception as e:
         print(f"❌ [BALANCE HANDLE ERROR] Could not process balance response ({req_id}): {e}")
@@ -336,7 +342,7 @@ def apply_martingale_logic(email):
         current_data['current_stake'] = base_stake_used
         
         entry_result_tag = "WIN" if total_profit_loss > 0 else "DRAW/SPLIT"
-        print(f"✅ [ENTRY RESULT] {entry_result_tag}. PnL: {total_profit_loss:.2f}. Stake reset to base: {base_stake_used:.2f}. **Awaiting new 20-tick cycle and :00/:30 time slot.**")
+        print(f"✅ [ENTRY RESULT] {entry_result_tag}. PnL: {total_profit_loss:.2f}. Stake reset to base: {base_stake_used:.2f}. **Awaiting new {TICK_SAMPLE_SIZE}-tick cycle and :00/:30 time slot.**")
         
         current_data['last_digits_history'] = [] 
         current_data['last_trade_prediction'] = -1 
@@ -452,17 +458,15 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
 
             def on_open_wrapper(ws_app):
                 current_data = get_session_data(email) 
+                # 1. إرسال التفويض أولاً
                 ws_app.send(json.dumps({"authorize": current_data['api_token']}))
-                ws_app.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
                 
-                # 💡 طلب الرصيد فور الاتصال لعرضه في الواجهة
-                send_pre_trade_balance_request(email, ws_app, purpose=DASHBOARD_BALANCE_REQ_ID)
+                # 💡 طلب التيكس والرصيد تم نقله إلى دالة on_message بعد التأكد من التفويض
                 
                 running_data = get_session_data(email)
                 running_data['is_running'] = True
                 save_session_data(email, running_data)
-                print(f"✅ [PROCESS] Connection established for {email}.")
-                
+                print(f"✅ [PROCESS] Connection established for {email}. Awaiting authorization confirmation...")
 
             def on_message_wrapper(ws_app, message):
                 data = json.loads(message)
@@ -470,8 +474,31 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 
                 current_data = get_session_data(email)
                 if not current_data.get('is_running'): return
+
+                # 💡 معالجة التفويض أولاً (لحسن سير العمل)
+                if msg_type == 'authorize':
+                    if data.get('error'):
+                        error_msg = data['error'].get('message', 'Authorization failed')
+                        print(f"❌ [AUTHORIZE FAIL] Token failed: {error_msg}")
+                        stop_bot(email, clear_data=True, stop_reason=f"Token Failed: {error_msg}")
+                        return
                     
-                if msg_type == 'tick':
+                    # --- التفويض ناجح ---
+                    print(f"✅ [AUTHORIZE SUCCESS] Token validated. Requesting data...")
+                    
+                    # 1. طلب التيكس
+                    ws_app.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
+                    # 2. طلب الرصيد الأولي (للوحة التحكم)
+                    send_pre_trade_balance_request(email, ws_app, purpose=DASHBOARD_BALANCE_REQ_ID)
+                    
+                    # 3. تحديث العملة ونوع الحساب
+                    account_info = data.get('authorize', {})
+                    current_data['currency'] = account_info.get('currency', 'USD')
+                    current_data['account_type'] = account_info.get('account_type', 'demo')
+                    save_session_data(email, current_data)
+                    return
+                        
+                elif msg_type == 'tick':
                     try:
                         current_price = float(data['tick']['quote'])
                         tick_time_epoch = int(data['tick']['epoch'])
@@ -503,8 +530,15 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 
                 elif msg_type == 'balance':
                     req_id = data.get('req_id', '')
-                    if req_id.startswith(PRE_TRADE_BALANCE_REQ_ID) or req_id.startswith(TIMED_SETTLEMENT_REQ_ID) or req_id.startswith(DASHBOARD_BALANCE_REQ_ID):
-                        handle_balance_response_on_message(email, data, req_id)
+                    
+                    # 💡 التعامل مع رسائل الرصيد التلقائية ورسائل الطلب
+                    if not req_id and data.get('balance'):
+                         # رسالة رصيد تلقائية (غالباً بعد التفويض أو صفقة)
+                        handle_balance_response_on_message(email, data, "AUTO_BALANCE_UPDATE")
+                        return
+
+                    if req_id:
+                         handle_balance_response_on_message(email, data, req_id)
                 
                 elif 'error' in data:
                     error_message = data['error'].get('message', 'Unknown Error')
@@ -568,6 +602,7 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
 app.config['SESSION_PERMANENT'] = False
 
+# ... (Auth Form HTML) ...
 AUTH_FORM = """
 <!doctype html>
 <title>Login</title>
@@ -593,36 +628,37 @@ AUTH_FORM = """
 </form>
 """
 
-CONTROL_FORM = """
+# ... (Control Form HTML) ...
+CONTROL_FORM = f"""
 <!doctype html>
 <title>Control Panel</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-    body {
+    body {{
         font-family: Arial, sans-serif;
         padding: 10px;
         max-width: 600px;
         margin: auto;
         direction: ltr;
         text-align: left;
-    }
-    h1 {
+    }}
+    h1 {{
         color: #007bff;
         font-size: 1.8em;
         border-bottom: 2px solid #eee;
         padding-bottom: 10px;
-    }
-    .status-running {
+    }}
+    .status-running {{
         color: green;
         font-weight: bold;
         font-size: 1.3em;
-    }
-    .status-stopped {
+    }}
+    .status-stopped {{
         color: red;
         font-weight: bold;
         font-size: 1.3em;
-    }
-    input[type="text"], input[type="number"], select {
+    }}
+    input[type="text"], input[type="number"], select {{
         width: 98%;
         padding: 10px;
         margin-top: 5px;
@@ -631,8 +667,8 @@ CONTROL_FORM = """
         border-radius: 4px;
         box-sizing: border-box;
         text-align: left;
-    }
-    form button {
+    }}
+    form button {{
         padding: 12px 20px;
         border: none;
         border-radius: 5px;
@@ -640,46 +676,46 @@ CONTROL_FORM = """
         font-size: 1.1em;
         margin-top: 15px;
         width: 100%;
-    }
+    }}
 </style>
 <h1>Bot Control Panel | User: {{ email }}</h1>
 <hr>
 
-{% with messages = get_flashed_messages(with_categories=true) %}
-    {% if messages %}
-        {% for category, message in messages %}
-            <p style="color:{{ 'green' if category == 'success' else ('blue' if category == 'info' else 'red') }};">{{ message }}</p>
-        {% endfor %}
+{{ '{{' }} with messages = get_flashed_messages(with_categories=true) }}
+    {{ '{{' }} if messages }}
+        {{ '{{' }} for category, message in messages }}
+            <p style="color:{{ 'green' if category == 'success' else ('blue' if category == 'info' else 'red') }};">{{ '{{' }} message }}</p>
+        {{ '{{' }} endfor }}
         
-        {% if session_data and session_data.stop_reason and session_data.stop_reason != "Running" and session_data.stop_reason != "Stopped Manually" and session_data.stop_reason != "Disconnected (Auto-Retry)" %}
-            <p style="color:red; font-weight:bold;">Last Reason: {{ session_data.stop_reason }}</p>
-        {% endif %}
-    {% endif %}
-{% endwith %}
+        {{ '{{' }} if session_data and session_data.stop_reason and session_data.stop_reason != "Running" and session_data.stop_reason != "Stopped Manually" and session_data.stop_reason != "Disconnected (Auto-Retry)" }}
+            <p style="color:red; font-weight:bold;">Last Reason: {{ '{{' }} session_data.stop_reason }}</p>
+        {{ '{{' }} endif }}
+    {{ '{{' }} endif }}
+{{ '{{' }} endwith }}
 
 
-{% if session_data and session_data.is_running %}
-    {% set strategy = 'Digit Differ (R_100 - Base Entry: Most Frequent Digit in Last ' + tick_sample_size|string + ' Ticks AND Time :00/:30 / Martingale: DELAYED with NEW ANALYSIS - x' + martingale_multiplier|string + ' Martingale, Max ' + max_consecutive_losses|string + ' Losses, ' + duration|string + ' Tick) - SETTLEMENT BY BALANCE ONLY' %}
+{{ '{{' }} if session_data and session_data.is_running }}
+    {{ '{{' }} set strategy = 'Digit Differ (R_100 - Base Entry: Most Frequent Digit in Last ' + tick_sample_size|string + ' Ticks AND Time :00/:30 / Martingale: DELAYED with NEW ANALYSIS - x' + martingale_multiplier|string + ' Martingale, Max ' + max_consecutive_losses|string + ' Losses, ' + duration|string + ' Tick) - SETTLEMENT BY BALANCE ONLY' }}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
-    <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
+    <p>Account Type: {{ '{{' }} session_data.account_type.upper() }} | Currency: {{ '{{' }} session_data.currency }}</p>
     
-    <p style="font-weight: bold; color: blue;">💰 Current Balance: {{ session_data.currency }} {{ session_data.latest_balance|round(2) }}</p>
+    <p style="font-weight: bold; color: blue;">💰 Current Balance: {{ '{{' }} session_data.currency }} {{ '{{' }} session_data.latest_balance|round(2) }}</p>
     
-    <p>Net Profit: {{ session_data.currency }} {{ session_data.current_profit|round(2) }}</p>
-    <p>Current Stake: {{ session_data.currency }} {{ session_data.current_stake|round(2) }}</p>
-    <p>Consecutive Losses: {{ session_data.consecutive_losses }} / {{ max_consecutive_losses }}</p>
-    <p style="font-weight: bold; color: green;">Total Wins: {{ session_data.total_wins }} | Total Losses: {{ session_data.total_losses }}</p>
-    <p style="font-weight: bold; color: purple;">Collected Digits: {{ session_data.last_digits_history|length }} / {{ tick_sample_size }}</p>
-    <p style="font-weight: bold; color: #007bff;">Current Strategy: {{ strategy }}</p>
-    <p style="font-weight: bold; color: #ff5733;">Contracts Open: {{ session_data.open_contract_ids|length }}</p>
+    <p>Net Profit: {{ '{{' }} session_data.currency }} {{ '{{' }} session_data.current_profit|round(2) }}</p>
+    <p>Current Stake: {{ '{{' }} session_data.currency }} {{ '{{' }} session_data.current_stake|round(2) }}</p>
+    <p>Consecutive Losses: {{ '{{' }} session_data.consecutive_losses }} / {{ '{{' }} max_consecutive_losses }}</p>
+    <p style="font-weight: bold; color: green;">Total Wins: {{ '{{' }} session_data.total_wins }} | Total Losses: {{ '{{' }} session_data.total_losses }}</p>
+    <p style="font-weight: bold; color: purple;">Collected Digits: {{ '{{' }} session_data.last_digits_history|length }} / {{ '{{' }} tick_sample_size }}</p>
+    <p style="font-weight: bold; color: #007bff;">Current Strategy: {{ '{{' }} strategy }}</p>
+    <p style="font-weight: bold; color: #ff5733;">Contracts Open: {{ '{{' }} session_data.open_contract_ids|length }}</p>
     
-    <form method="POST" action="{{ url_for('stop_route') }}">
+    <form method="POST" action="{{ '{{' }} url_for('stop_route') }}">
         <button type="submit" style="background-color: red; color: white;">🛑 Stop Bot</button>
     </form>
-{% else %}
+{{ '{{' }} else }}
     <p class="status-stopped">🛑 Bot is Stopped. Enter settings to start a new session.</p>
-    <form method="POST" action="{{ url_for('start_bot') }}">
+    <form method="POST" action="{{ '{{' }} url_for('start_bot') }}">
 
         <label for="account_type">Account Type:</label><br>
         <select id="account_type" name="account_type" required>
@@ -688,25 +724,25 @@ CONTROL_FORM = """
         </select><br>
 
         <label for="token">Deriv API Token:</label><br>
-        <input type="text" id="token" name="token" required value="{{ session_data.api_token if session_data else '' }}" {% if session_data and session_data.api_token and session_data.is_running is not none %}readonly{% endif %}><br>
+        <input type="text" id="token" name="token" required value="{{ '{{' }} session_data.api_token if session_data else '' }}" {{ '{{' }} 'readonly' if session_data and session_data.api_token and session_data.is_running is not none else '' }}><br>
         
         <label for="stake">Base Stake (USD/tUSDT):</label><br>
-        <input type="number" id="stake" name="stake" value="{{ session_data.base_stake|round(2) if session_data else 0.35 }}" step="0.01" min="0.35" required><br>
+        <input type="number" id="stake" name="stake" value="{{ '{{' }} session_data.base_stake|round(2) if session_data else 0.35 }}" step="0.01" min="0.35" required><br>
         
         <label for="tp">TP Target (USD/tUSDT):</label><br>
-        <input type="number" id="tp" name="tp" value="{{ session_data.tp_target|round(2) if session_data else 10.0 }}" step="0.01" required><br>
+        <input type="number" id="tp" name="tp" value="{{ '{{' }} session_data.tp_target|round(2) if session_data else 10.0 }}" step="0.01" required><br>
         
         <button type="submit" style="background-color: green; color: white;">🚀 Start Bot</button>
     </form>
-{% endif %}
+{{ '{{' }} endif }}
 <hr>
-<a href="{{ url_for('logout') }}" style="display: block; text-align: center; margin-top: 15px; font-size: 1.1em;">Logout</a>
+<a href="{{ '{{' }} url_for('logout') }}" style="display: block; text-align: center; margin-top: 15px; font-size: 1.1em;">Logout</a>
 
 <script>
     function autoRefresh() {
-        var isRunning = {{ 'true' if session_data and session_data.is_running else 'false' }};
+        var isRunning = {{ '{{' }} 'true' if session_data and session_data.is_running else 'false' }};
         
-        if (isRunning) {
+        if (isRunning === 'true') {
             setTimeout(function() {
                 window.location.reload();
             }, 1000); // 1000 milliseconds = 1 second
@@ -820,7 +856,6 @@ def logout():
 if __name__ == '__main__':
     all_sessions = load_persistent_sessions()
     for email in list(all_sessions.keys()):
-        # لا نحذف البيانات إذا كانت حالة الإيقاف تشير إلى محاولة إعادة اتصال (Auto-Retry)
         if all_sessions[email].get('stop_reason') == "Disconnected (Auto-Retry)":
              stop_bot(email, clear_data=False, stop_reason="Disconnected (Auto-Retry)")
         else:
