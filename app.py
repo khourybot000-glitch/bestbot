@@ -17,7 +17,7 @@ WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"          
 DURATION = 1              
 DURATION_UNIT = "t"       
-TICK_SAMPLE_SIZE = 6           # تم التعديل إلى 6 تيكات
+TICK_SAMPLE_SIZE = 6           
 MAX_CONSECUTIVE_LOSSES = 2    
 MARTINGALE_MULTIPLIER = 19.0  
 CONTRACT_TYPE = "DIGITDIFF"
@@ -133,7 +133,6 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
         if email in is_contract_open: is_contract_open[email] = False
 
     if clear_data:
-        # يتم الحذف في حالتي TP Reached و SL Reached
         if stop_reason not in ["API Buy Error", "Displayed"]:
             delete_session_data(email)
             print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}) and session data cleared from file.")
@@ -199,7 +198,6 @@ def send_single_trade_order(email, stake, currency, contract_type, prediction):
 def send_pre_trade_balance_request(email, ws_app, purpose=PRE_TRADE_BALANCE_REQ_ID):
     """ إرسال طلب للحصول على الرصيد قبل الشراء أو لتحديث الواجهة. """
     try:
-        # تم تبسيط هوية الطلب لضمان التوافق مع الاستجابة
         request_id = f"{purpose}_{email}" 
         
         ws_app.send(json.dumps({
@@ -266,7 +264,6 @@ def handle_balance_response_on_message(email, data, req_id):
     """ معالجة استجابة الرصيد: حفظه قبل الصفقة أو استخدامه لتسوية الصفقة أو عرضه في الواجهة. """
     current_data = get_session_data(email)
     
-    # هوية الطلب المتوقعة
     expected_pre_trade_id = f"{PRE_TRADE_BALANCE_REQ_ID}_{email}"
     expected_timed_settlement_id = f"{TIMED_SETTLEMENT_REQ_ID}_{email}"
     expected_dashboard_id = f"{DASHBOARD_BALANCE_REQ_ID}_{email}"
@@ -274,7 +271,6 @@ def handle_balance_response_on_message(email, data, req_id):
     try:
         current_balance = float(data['balance']['balance'])
         
-        # دائماً نحفظ الرصيد الأخير للواجهة
         current_data['latest_balance'] = current_balance
         
         if req_id == expected_pre_trade_id:
@@ -292,7 +288,6 @@ def handle_balance_response_on_message(email, data, req_id):
              print(f"💰 [INFO] Auto Balance Updated: {current_balance:.2f} {current_data.get('currency', 'USD')}.")
 
         else:
-            # رسالة رصيد غير محددة 
             print(f"⚠️ [BALANCE RECEIVED] Received balance: {current_balance:.2f}, but with UNKNOWN req_id: {req_id}. Updating Dashboard only.")
 
         save_session_data(email, current_data)
@@ -399,9 +394,9 @@ def start_new_single_trade(email, contract_type, prediction):
         if current_data['pre_trade_balance'] > 0.0:
             balance_recorded = True
             break
-        time.sleep(0.1) # انتظار قصير جداً بين الفحص والآخر
+        time.sleep(0.1) 
 
-    current_data = get_session_data(email) # قراءة البيانات المحدثة
+    current_data = get_session_data(email) 
     
     # 3. التحقق النهائي: إذا لم يتم التسجيل، نلغي الصفقة
     if not balance_recorded:
@@ -461,10 +456,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
 
             def on_open_wrapper(ws_app):
                 current_data = get_session_data(email) 
-                # 1. إرسال التفويض أولاً
                 ws_app.send(json.dumps({"authorize": current_data['api_token']}))
-                
-                # طلب التيكس والرصيد تم نقله إلى دالة on_message بعد التأكد من التفويض
                 
                 running_data = get_session_data(email)
                 running_data['is_running'] = True
@@ -478,7 +470,6 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 current_data = get_session_data(email)
                 if not current_data.get('is_running'): return
 
-                # معالجة التفويض أولاً (لحسن سير العمل)
                 if msg_type == 'authorize':
                     if data.get('error'):
                         error_msg = data['error'].get('message', 'Authorization failed')
@@ -486,15 +477,11 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                         stop_bot(email, clear_data=True, stop_reason=f"Token Failed: {error_msg}")
                         return
                     
-                    # --- التفويض ناجح ---
                     print(f"✅ [AUTHORIZE SUCCESS] Token validated. Requesting data...")
                     
-                    # 1. طلب التيكس
                     ws_app.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
-                    # 2. طلب الرصيد الأولي (للوحة التحكم)
                     send_pre_trade_balance_request(email, ws_app, purpose=DASHBOARD_BALANCE_REQ_ID)
                     
-                    # 3. تحديث العملة ونوع الحساب
                     account_info = data.get('authorize', {})
                     current_data['currency'] = account_info.get('currency', 'USD')
                     current_data['account_type'] = account_info.get('account_type', 'demo')
@@ -531,16 +518,13 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 elif msg_type == 'buy':
                     pass 
                 
-                # معالجة رسائل الرصيد التلقائية (بدون req_id)
                 elif msg_type == 'balance':
                     req_id = data.get('req_id', '') 
                     
-                    # 1. إذا كانت الرسالة تلقائية (لا تحمل req_id)، نقوم بمعالجتها كـ 'AUTO_UPDATE'
                     if not req_id:
                         handle_balance_response_on_message(email, data, "AUTO_BALANCE_UPDATE")
                         return
 
-                    # 2. إذا كانت تحمل req_id، نعالجها كطلب محدد
                     if req_id:
                          handle_balance_response_on_message(email, data, req_id)
                          return
@@ -607,7 +591,6 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
 app.config['SESSION_PERMANENT'] = False
 
-# ... (Auth Form HTML) ...
 AUTH_FORM = """
 <!doctype html>
 <title>Login</title>
@@ -633,7 +616,6 @@ AUTH_FORM = """
 </form>
 """
 
-# ... (Control Form HTML) ...
 CONTROL_FORM = f"""
 <!doctype html>
 <title>Control Panel</title>
@@ -745,8 +727,7 @@ CONTROL_FORM = f"""
 
 <script>
     function autoRefresh() {
-        // 💡 تم إصلاح الخطأ التركيبي هنا
-        var isRunning = "{{ '{{' }} 'true' if session_data and session_data.is_running else 'false' }}"; 
+        var isRunning = "{{ 'true' if session_data and session_data.is_running else 'false' }}"; 
         
         if (isRunning === 'true') {
             setTimeout(function() {
