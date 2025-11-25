@@ -17,7 +17,7 @@ WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"          
 DURATION = 1              
 DURATION_UNIT = "t"       
-TICK_SAMPLE_SIZE = 6           # 💡 تم التعديل إلى 6 تيكات
+TICK_SAMPLE_SIZE = 6           # تم التعديل إلى 6 تيكات
 MAX_CONSECUTIVE_LOSSES = 2    
 MARTINGALE_MULTIPLIER = 19.0  
 CONTRACT_TYPE = "DIGITDIFF"
@@ -35,7 +35,7 @@ is_contract_open = {}
 PROCESS_LOCK = Lock() 
 TRADE_LOCK = Lock() 
 
-# 💡 طلبات الرصيد المُعرّفة (تم تبسيط الـ ID لضمان التوافق)
+# طلبات الرصيد المُعرّفة
 PRE_TRADE_BALANCE_REQ_ID = "PRE_TRADE_BALANCE"
 TIMED_SETTLEMENT_REQ_ID = "TIMED_SETTLEMENT_CHECK"
 DASHBOARD_BALANCE_REQ_ID = "DASHBOARD_BALANCE_CHECK"
@@ -56,7 +56,7 @@ DEFAULT_SESSION_STATE = {
     "latest_balance": 0.0, # لعرض الرصيد في الواجهة
 }
 
-# --- Persistence functions (لم يتم تغيير منطق حفظ/تحميل البيانات) ---
+# --- Persistence functions ---
 
 def load_persistent_sessions():
     if not os.path.exists(ACTIVE_SESSIONS_FILE): return {}
@@ -193,13 +193,13 @@ def send_single_trade_order(email, stake, currency, contract_type, prediction):
         return False
         
 # -------------------------------------------------------------------
-# BALANCE CHECK FUNCTIONS (تم تبسيط الـ ID لضمان التوافق)
+# BALANCE CHECK FUNCTIONS 
 # -------------------------------------------------------------------
 
 def send_pre_trade_balance_request(email, ws_app, purpose=PRE_TRADE_BALANCE_REQ_ID):
     """ إرسال طلب للحصول على الرصيد قبل الشراء أو لتحديث الواجهة. """
     try:
-        # 💡 تم تبسيط هوية الطلب لضمان التوافق مع الاستجابة
+        # تم تبسيط هوية الطلب لضمان التوافق مع الاستجابة
         request_id = f"{purpose}_{email}" 
         
         ws_app.send(json.dumps({
@@ -288,8 +288,11 @@ def handle_balance_response_on_message(email, data, req_id):
         elif req_id == expected_dashboard_id:
             print(f"💰 [INFO] Dashboard Balance updated: {current_balance:.2f} {current_data.get('currency', 'USD')}.")
 
+        elif req_id == "AUTO_BALANCE_UPDATE":
+             print(f"💰 [INFO] Auto Balance Updated: {current_balance:.2f} {current_data.get('currency', 'USD')}.")
+
         else:
-            # رسالة رصيد غير محددة (غالباً تلقائية) - يتم تحديث الواجهة فقط
+            # رسالة رصيد غير محددة 
             print(f"⚠️ [BALANCE RECEIVED] Received balance: {current_balance:.2f}, but with UNKNOWN req_id: {req_id}. Updating Dashboard only.")
 
         save_session_data(email, current_data)
@@ -359,7 +362,7 @@ def apply_martingale_logic(email):
     
     is_contract_open[email] = False
 
-# 💡 تم تعديل دالة start_new_single_trade لآلية الانتظار المؤكد (Polling Loop)
+# دالة start_new_single_trade لآلية الانتظار المؤكد (Polling Loop)
 def start_new_single_trade(email, contract_type, prediction):
     global is_contract_open
     
@@ -386,7 +389,7 @@ def start_new_single_trade(email, contract_type, prediction):
         is_contract_open[email] = False
         return
 
-    # 💡 الانتظار المؤكد (Polling Loop) حتى وصول الرصيد
+    # الانتظار المؤكد (Polling Loop) حتى وصول الرصيد
     start_wait_time = time.time()
     balance_recorded = False
     
@@ -461,7 +464,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 # 1. إرسال التفويض أولاً
                 ws_app.send(json.dumps({"authorize": current_data['api_token']}))
                 
-                # 💡 طلب التيكس والرصيد تم نقله إلى دالة on_message بعد التأكد من التفويض
+                # طلب التيكس والرصيد تم نقله إلى دالة on_message بعد التأكد من التفويض
                 
                 running_data = get_session_data(email)
                 running_data['is_running'] = True
@@ -475,7 +478,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 current_data = get_session_data(email)
                 if not current_data.get('is_running'): return
 
-                # 💡 معالجة التفويض أولاً (لحسن سير العمل)
+                # معالجة التفويض أولاً (لحسن سير العمل)
                 if msg_type == 'authorize':
                     if data.get('error'):
                         error_msg = data['error'].get('message', 'Authorization failed')
@@ -528,17 +531,19 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 elif msg_type == 'buy':
                     pass 
                 
+                # معالجة رسائل الرصيد التلقائية (بدون req_id)
                 elif msg_type == 'balance':
-                    req_id = data.get('req_id', '')
+                    req_id = data.get('req_id', '') 
                     
-                    # 💡 التعامل مع رسائل الرصيد التلقائية ورسائل الطلب
-                    if not req_id and data.get('balance'):
-                         # رسالة رصيد تلقائية (غالباً بعد التفويض أو صفقة)
+                    # 1. إذا كانت الرسالة تلقائية (لا تحمل req_id)، نقوم بمعالجتها كـ 'AUTO_UPDATE'
+                    if not req_id:
                         handle_balance_response_on_message(email, data, "AUTO_BALANCE_UPDATE")
                         return
 
+                    # 2. إذا كانت تحمل req_id، نعالجها كطلب محدد
                     if req_id:
                          handle_balance_response_on_message(email, data, req_id)
+                         return
                 
                 elif 'error' in data:
                     error_message = data['error'].get('message', 'Unknown Error')
@@ -740,7 +745,8 @@ CONTROL_FORM = f"""
 
 <script>
     function autoRefresh() {
-        var isRunning = {{ '{{' }} 'true' if session_data and session_data.is_running else 'false' }};
+        // 💡 تم إصلاح الخطأ التركيبي هنا
+        var isRunning = "{{ '{{' }} 'true' if session_data and session_data.is_running else 'false' }}"; 
         
         if (isRunning === 'true') {
             setTimeout(function() {
