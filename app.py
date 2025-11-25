@@ -35,7 +35,6 @@ is_contract_open = {}
 PROCESS_LOCK = Lock() 
 TRADE_LOCK = Lock() 
 
-# طلبات الرصيد المُعرّفة
 PRE_TRADE_BALANCE_REQ_ID = "PRE_TRADE_BALANCE"
 TIMED_SETTLEMENT_REQ_ID = "TIMED_SETTLEMENT_CHECK"
 DASHBOARD_BALANCE_REQ_ID = "DASHBOARD_BALANCE_CHECK"
@@ -53,7 +52,7 @@ DEFAULT_SESSION_STATE = {
     
     "pre_trade_balance": 0.0,    
     "current_stake_recovery": 0.0,
-    "latest_balance": 0.0, # لعرض الرصيد في الواجهة
+    "latest_balance": 0.0,
 }
 
 # --- Persistence functions ---
@@ -107,7 +106,6 @@ def load_allowed_users():
     except: return set()
         
 def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
-    """ يوقف عملية البوت، وينهي اتصال WebSocket، ويحذف البيانات بناءً على stop_reason. """
     global is_contract_open, active_processes
     current_data = get_session_data(email)
     
@@ -196,7 +194,6 @@ def send_single_trade_order(email, stake, currency, contract_type, prediction):
 # -------------------------------------------------------------------
 
 def send_pre_trade_balance_request(email, ws_app, purpose=PRE_TRADE_BALANCE_REQ_ID):
-    """ إرسال طلب للحصول على الرصيد قبل الشراء أو لتحديث الواجهة. """
     try:
         request_id = f"{purpose}_{email}" 
         
@@ -209,7 +206,6 @@ def send_pre_trade_balance_request(email, ws_app, purpose=PRE_TRADE_BALANCE_REQ_
         print(f"❌ [REQUEST ERROR] Failed to send balance request for {email}: {e}")
 
 def send_settlement_balance_request(email, ws_app):
-    """ إرسال طلب لمرة واحدة للحصول على الرصيد لأغراض التسوية بعد انتهاء الصفقة (8 ثوانٍ). """
     try:
         request_id = f"{TIMED_SETTLEMENT_REQ_ID}_{email}"
         ws_app.send(json.dumps({
@@ -219,9 +215,6 @@ def send_settlement_balance_request(email, ws_app):
     except: pass 
 
 def handle_contract_settlement_by_balance(email, current_balance):
-    """
-    تحديد نتيجة الصفقة ومتابعة منطق المضاعفة بناءً على مقارنة الرصيد.
-    """
     current_data = get_session_data(email)
     
     if not current_data['open_contract_ids'] or current_data['pre_trade_balance'] <= 0.0:
@@ -249,7 +242,6 @@ def handle_contract_settlement_by_balance(email, current_balance):
     apply_martingale_logic(email)
 
 def schedule_settlement_check(email, ws_app):
-    """ يؤجل إرسال طلب فحص الرصيد لمدة 8 ثوانٍ. """
     def deferred_check():
         current_data = get_session_data(email)
         if current_data['open_contract_ids']:
@@ -261,7 +253,6 @@ def schedule_settlement_check(email, ws_app):
     
 
 def handle_balance_response_on_message(email, data, req_id):
-    """ معالجة استجابة الرصيد: حفظه قبل الصفقة أو استخدامه لتسوية الصفقة أو عرضه في الواجهة. """
     current_data = get_session_data(email)
     
     expected_pre_trade_id = f"{PRE_TRADE_BALANCE_REQ_ID}_{email}"
@@ -357,7 +348,6 @@ def apply_martingale_logic(email):
     
     is_contract_open[email] = False
 
-# دالة start_new_single_trade لآلية الانتظار المؤكد (Polling Loop)
 def start_new_single_trade(email, contract_type, prediction):
     global is_contract_open
     
@@ -375,7 +365,6 @@ def start_new_single_trade(email, contract_type, prediction):
     current_data['last_trade_prediction'] = prediction 
     current_data['current_stake_recovery'] = stake
     
-    # 1. طلب الرصيد
     ws_app = active_ws.get(email)
     if ws_app:
         send_pre_trade_balance_request(email, ws_app, purpose=PRE_TRADE_BALANCE_REQ_ID)
@@ -384,11 +373,9 @@ def start_new_single_trade(email, contract_type, prediction):
         is_contract_open[email] = False
         return
 
-    # الانتظار المؤكد (Polling Loop) حتى وصول الرصيد
     start_wait_time = time.time()
     balance_recorded = False
     
-    # ننتظر حتى 5 ثوانٍ كحد أقصى لتأكيد حفظ الرصيد
     while time.time() - start_wait_time < 5.0: 
         current_data = get_session_data(email) 
         if current_data['pre_trade_balance'] > 0.0:
@@ -398,7 +385,6 @@ def start_new_single_trade(email, contract_type, prediction):
 
     current_data = get_session_data(email) 
     
-    # 3. التحقق النهائي: إذا لم يتم التسجيل، نلغي الصفقة
     if not balance_recorded:
         print("❌ [TRADE ABORT] Failed to record Pre-Trade Balance in time (5.0s timeout). Aborting trade.")
         is_contract_open[email] = False
@@ -727,7 +713,8 @@ CONTROL_FORM = f"""
 
 <script>
     function autoRefresh() {
-        var isRunning = "{{ 'true' if session_data and session_data.is_running else 'false' }}"; 
+        // تم استخدام 'let' بدلاً من 'var' لتجنب الخطأ التركيبي في Python F-string
+        let isRunning = "{{ 'true' if session_data and session_data.is_running else 'false' }}"; 
         
         if (isRunning === 'true') {
             setTimeout(function() {
