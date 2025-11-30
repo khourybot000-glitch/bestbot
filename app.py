@@ -23,7 +23,7 @@ ACTIVE_SESSIONS_FILE = "active_sessions.json"
 
 # 💡 COMPOUND ENTRY CRITERIA
 ENTRY_SECONDS = [0, 10, 20, 30, 40, 50] 
-ENTRY_DIGIT = 9                
+ENTRY_DIGIT = 7                
 BASE_CONTRACT_TYPE = "DIGITDIFF" 
 BASE_BARRIER = 7               
 MARTINGALE_BARRIER = 7         
