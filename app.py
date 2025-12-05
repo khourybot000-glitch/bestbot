@@ -15,18 +15,18 @@ from collections import Counter
 # BOT CONSTANT SETTINGS (R_100 | Single Digit Diff | Conditional Martingale)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
-SYMBOL = "R_100"       
-DURATION = 1           # مدة الصفقة 1 تيك
-DURATION_UNIT = "t"    
+SYMBOL = "R_100" 
+DURATION = 4             # مدة الصفقة 5 تيك (تم التعديل)
+DURATION_UNIT = "t"   
 
-# 💡 إعدادات التحليل (نحتاج تيك واحد فقط)
-TICK_SAMPLE_SIZE = 1           
-MIN_REPETITION_COUNT = 0       
+# 💡 إعدادات التحليل 
+TICK_SAMPLE_SIZE = 1    
+MIN_REPETITION_COUNT = 0    
 
 # إعدادات المضاعفة
-MAX_CONSECUTIVE_LOSSES = 2     
-MARTINGALE_MULTIPLIER = 14.0   
-MAX_MARTINGALE_STEP = 1        
+MAX_CONSECUTIVE_LOSSES = 2   
+MARTINGALE_MULTIPLIER = 14.0  
+MAX_MARTINGALE_STEP = 1     
 
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
@@ -43,11 +43,11 @@ TRADE_LOCK = Lock()
 
 DEFAULT_SESSION_STATE = {
     "api_token": "",
-    "base_stake": 0.35,            
+    "base_stake": 1.0,              
     "tp_target": 10.0,
     "is_running": False,
     "current_profit": 0.0,
-    "current_stake": 0.35,             
+    "current_stake": 1.0,            
     "consecutive_losses": 0,
     "current_step": 0,
     "total_wins": 0,
@@ -60,9 +60,9 @@ DEFAULT_SESSION_STATE = {
     "account_type": "demo",
     
     "last_valid_tick_price": 0.0,
-    "current_entry_id": None,              
-    "open_contract_ids": [],               
-    "contract_profits": {},                
+    "current_entry_id": None,             
+    "open_contract_ids": [],              
+    "contract_profits": {},               
     "last_digits_history": [9] * TICK_SAMPLE_SIZE, 
     "last_barrier_digit": None 
 }
@@ -183,14 +183,14 @@ def send_single_trade_order(email, stake, currency, contract_type, barrier):
             "basis": "stake",
             "contract_type": contract_type, 
             "currency": currency,
-            "duration": DURATION,
+            "duration": DURATION, # تم التعديل إلى 5
             "duration_unit": DURATION_UNIT,
             "symbol": SYMBOL,
             "barrier": barrier 
         }
     }
     try:
-        print(f"✅ [DEBUG] Sending BUY request for {contract_type} Barrier {barrier} at {round(stake, 2):.2f}...")
+        print(f"✅ [DEBUG] Sending BUY request for {contract_type} Barrier {barrier} at {round(stake, 2):.2f} (Duration: {DURATION} ticks)...")
         ws_app.send(json.dumps(trade_request))
         return True
     except Exception as e:
@@ -231,11 +231,11 @@ def apply_martingale_logic(email):
             return
             
         current_data['current_step'] = min(current_data['current_step'] + 1, MAX_MARTINGALE_STEP)
-            
+        
         new_stake = calculate_martingale_stake(base_stake_used, current_data['current_step'], MARTINGALE_MULTIPLIER)
         current_data['current_stake'] = new_stake
         
-        print(f"🔄 [LOSS - MARTINGALE] PnL: {total_profit_loss:.2f}. Con. Loss: {current_data['consecutive_losses']}/{MAX_CONSECUTIVE_LOSSES}. Step: {current_data['current_step']}/{MAX_MARTINGALE_STEP}. Next Stake calculated: {round(new_stake, 2):.2f}. (Waiting for new signal: @ 00 Sec).")
+        print(f"🔄 [LOSS - MARTINGALE] PnL: {total_profit_loss:.2f}. Con. Loss: {current_data['consecutive_losses']}/{MAX_CONSECUTIVE_LOSSES}. Step: {current_data['current_step']}/{MAX_MARTINGALE_STEP}. Next Stake calculated: {round(new_stake, 2):.2f}. (Waiting for new signal: Digit 5).")
         
     # ✅ حالة الربح (Win)
     else: 
@@ -284,15 +284,15 @@ def start_new_diff_trade(email, repeated_digit):
     currency_to_use = current_data['currency']
     
     if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES:
-          stop_bot(email, clear_data=False, stop_reason=f"SL Reached: Consecutive losses") 
-          return
+         stop_bot(email, clear_data=False, stop_reason=f"SL Reached: Consecutive losses") 
+         return
     
     
     if repeated_digit is not None: 
-        # repeated_digit هنا هو التيك T الذي وصل عند الثانية 00
+        # repeated_digit هنا هو 5
         barrier_to_use = repeated_digit 
         entry_mode_tag = "Base Stake" if current_data['consecutive_losses'] == 0 else f"Martingale Step {current_data['current_step']}"
-        entry_source = f"{entry_mode_tag} (Signal: Tick @ 00 Sec)"
+        entry_source = f"{entry_mode_tag} (Signal: Tick Digit 5)"
     else:
         return # يجب أن يكون هناك إشارة
 
@@ -301,7 +301,7 @@ def start_new_diff_trade(email, repeated_digit):
     current_data['contract_profits'] = {}
     
     contract_type = "DIGITDIFF"
-    barrier = barrier_to_use
+    barrier = barrier_to_use # barrier هو 5
     
     print(f"🧠 [SINGLE ENTRY - {entry_mode_tag}] Source: {entry_source}. Stake: {round(stake, 2):.2f}. Barrier: {barrier}. (Diff {barrier}).")
     
@@ -349,7 +349,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         current_stake = calculate_martingale_stake(stake, step, MARTINGALE_MULTIPLIER)
         session_data['current_stake'] = current_stake
         session_data['current_step'] = step
-        print(f"🔍 [RECOVERY] Resuming in Martingale mode (Step {step}). Stake: {current_stake:.2f}. Waiting for signal.")
+        print(f"🔍 [RECOVERY] Resuming in Martingale mode (Step {step}). Stake: {current_stake:.2f}. Waiting for signal (Digit 5).")
     else:
         session_data['last_barrier_digit'] = None 
 
@@ -407,28 +407,28 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     current_data['last_digits_history'][0] = T_new 
                     
                     
-                    # 2. التحقق من شرط الدخول (عند الثانية 00)
+                    # 2. التحقق من شرط الدخول (عندما يكون الرقم الأخير 5)
                     if not is_contract_open.get(email) and current_data['consecutive_losses'] < MAX_CONSECUTIVE_LOSSES:
                         
                         barrier_to_use = None
                         
                         # حساب الثانية الحالية من وقت التيك (المقسوم على 60)
-                        seconds = tick_time_epoch % 60
-                        
-                        # 💡 الشرط الجديد: إذا كانت الثانية 00 (بداية الدقيقة)
-                        if seconds == 58:
+                        # seconds = tick_time_epoch % 60 # تم إلغاء شرط الوقت
+
+                        # 💡 الشرط الجديد: إذا كان الرقم الأخير 5
+                        if T_new == 7:
                             
-                            # الإشارة موجودة، الحاجز هو الرقم الأخير للتيك نفسه (T_new)
-                            barrier_to_use = T_new
+                            # الإشارة موجودة، الحاجز هو 5
+                            barrier_to_use = 7
                             
-                            print(f"✅ [SIGNAL - 00 SEC] T: {T_new}. Entering Diff {T_new} at epoch {tick_time_epoch}.")
+                            print(f"✅ [SIGNAL - DIGIT 5] T: {T_new}. Entering Diff 5 at epoch {tick_time_epoch}.")
                         
                         if barrier_to_use is not None:
-                            # الدخول بالـ Stake الحالي (سواء الأساسي أو المضاعف) والحاجز الجديد (T_new)
+                            # الدخول بالـ Stake الحالي (سواء الأساسي أو المضاعف) والحاجز 5
                             start_new_diff_trade(email, repeated_digit=barrier_to_use)
                             current_data = get_session_data(email) 
                             
-                    save_session_data(email, current_data) 
+                    save_session_data(email, current_data)
 
                 elif msg_type == 'buy':
                     contract_id = data['buy']['contract_id']
@@ -563,7 +563,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = 'Conditional Martingale (x' + martingale_multiplier|string + ') | Base/Martingale Entry: DIGITDIFF on (Tick @ 00 Sec) | Barrier: Last Digit' %}
+    {% set strategy = 'Conditional Martingale (x' + martingale_multiplier|string + ') | Entry: DIGITDIFF (5 Ticks) on Tick Digit 5 | Barrier: 5' %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
@@ -739,8 +739,8 @@ def start_bot():
                 flash('Bot is already running. Please stop it manually first.', 'info')
                 return redirect(url_for('index'))
             else:
-                 # تنظيف أي عملية غير حية عالقة
-                del active_processes[email]
+                   # تنظيف أي عملية غير حية عالقة
+                 del active_processes[email]
 
     try:
         account_type = request.form['account_type']
@@ -760,7 +760,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    strategy_desc = 'Conditional Martingale (x14.0) | Base/Martingale Entry: DIGITDIFF on (Tick @ 00 Sec) | Barrier: Last Digit.'
+    strategy_desc = f'Conditional Martingale (x{MARTINGALE_MULTIPLIER}) | Entry: DIGITDIFF ({DURATION} Ticks) on Tick Digit 5 | Barrier: 5.'
     flash(f'Bot started successfully. Strategy: {strategy_desc}', 'success')
     return redirect(url_for('index'))
 
@@ -788,11 +788,11 @@ def logout():
 
 
 if __name__ == '__main__':
+    # عند البدء، نوقف أي عملية سابقة عالقة ونمسح بياناتها
     all_sessions = load_persistent_sessions()
     for email in list(all_sessions.keys()):
-        # عند البدء، نوقف أي عملية سابقة ونمسح بياناتها مباشرة
         delete_session_data(email)
         stop_bot(email, clear_data=False, stop_reason="Disconnected (Auto-Retry)")
         
     port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host='0.0.0.0', port=port, deb
