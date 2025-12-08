@@ -9,7 +9,7 @@ from flask import Flask, request, render_template_string, redirect, url_for, ses
 from datetime import datetime, timezone
 
 # ==========================================================
-# BOT CONSTANT SETTINGS (UPDATED FOR 2 TICKS ANALYSIS & DURATION)
+# BOT CONSTANT SETTINGS (UPDATED FOR 2 TICKS ANALYSIS: T1=2, T2=9)
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929" 
 SYMBOL = "R_100"        
@@ -183,7 +183,7 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
         save_session_data(email, current_data) 
 
 # ==========================================================
-# TRADING BOT FUNCTIONS (Updated Duration)
+# TRADING BOT FUNCTIONS 
 # ==========================================================
 
 def calculate_martingale_stake(base_stake, current_step):
@@ -201,7 +201,7 @@ def send_trade_order(email, stake, contract_type, currency_code):
     
     rounded_stake = round(stake, 2)
     
-    # تحديث مدة الصفقة إلى 2 تيك
+    # مدة الصفقة: 2 تيك
     if contract_type == "DIGITOVER":
         contract_param = {
             "duration": DURATION,  # DURATION = 2
@@ -267,10 +267,10 @@ def check_pnl_limits(email, profit_loss, trade_type):
             contract_type_to_use = "DIGITOVER" 
             
             current_data['current_stake'] = new_stake
-            current_data['pending_martingale'] = True # تفعيل المضاعفة (التي ستدخل مباشرة بعد تحقق الشرط 2 تيك)
+            current_data['pending_martingale'] = True 
             current_data['martingale_stake'] = new_stake
             current_data['martingale_type'] = contract_type_to_use
-            print(f"⚠️ [MARTINGALE PENDING] Loss detected. Next trade: {contract_type_to_use} 2 @ {new_stake:.2f}. Awaiting 2 Ticks < 3 only.")
+            print(f"⚠️ [MARTINGALE PENDING] Loss detected. Next trade: {contract_type_to_use} 2 @ {new_stake:.2f}. Awaiting T1=2 & T2=9 condition.")
         else:
             current_data['current_stake'] = current_data['base_stake']
             current_data['pending_martingale'] = False
@@ -296,7 +296,7 @@ def check_pnl_limits(email, profit_loss, trade_type):
     return current_data['pending_martingale'] 
 
 # ==========================================================
-# UTILITY FUNCTIONS FOR 2-TICK ANALYSIS (MODIFIED)
+# UTILITY FUNCTIONS FOR 2-TICK ANALYSIS (MODIFIED FOR T1=2, T2=9)
 # ==========================================================
 
 def get_target_digit(price):
@@ -321,7 +321,7 @@ def get_target_digit(price):
 
 def get_signal_2_tick_analysis(tick_history):
     """
-    يحدد الإشارة الأولية: T1 < 3 و T2 < 3.
+    يحدد الإشارة: T1 = 2 و T2 = 9.
     """
     
     # يجب أن يكون لدينا 2 تيكات على الأقل
@@ -335,11 +335,11 @@ def get_signal_2_tick_analysis(tick_history):
     # T2: الأحدث (index -1)
     digit_t2 = get_target_digit(tick_history[-1]['price'])
     
-    # الشرط 1: T1 أصغر من 3 (0, 1, 2)
-    cond_t1 = (digit_t1 in [0, 1, 2])
+    # الشرط 1: T1 يساوي 2
+    cond_t1 = (digit_t1 == 2)
     
-    # الشرط 2: T2 أصغر من 3 (0, 1, 2)
-    cond_t2 = (digit_t2 in [0, 1, 2])
+    # الشرط 2: T2 يساوي 9
+    cond_t2 = (digit_t2 == 9)
     
     # الإشارة تتحقق عند تحقق الشرطين
     if cond_t1 and cond_t2: 
@@ -348,7 +348,7 @@ def get_signal_2_tick_analysis(tick_history):
         return None
 
 # ==========================================================
-# CORE BOT LOGIC (MODIFIED on_message_wrapper for direct entry)
+# CORE BOT LOGIC (Remains similar to the 2-tick direct entry logic)
 # ==========================================================
 
 def bot_core_logic(email, token, stake, tp, account_type, currency_code):
@@ -441,11 +441,12 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
             
             # تحديث الـ stake المستخدم فعلياً
             current_data['current_stake'] = stake_to_use
+            current_data['pending_martingale'] = False # تم تنفيذ المضاعفة، إعادة تعيين
             
             save_session_data(email, current_data)
 
             send_trade_order(email, stake_to_use, contract_type_to_use, currency_code)
-            print(f"🚀 [TRADE EXECUTION] Executed upon 2 Ticks < 3 confirmation. Duration: {DURATION} Ticks.")
+            print(f"🚀 [TRADE EXECUTION] Executed upon T1=2 & T2=9 condition. Duration: {DURATION} Ticks.")
         
         def on_message_wrapper(ws_app, message):
             data = json.loads(message)
@@ -485,20 +486,18 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                         save_session_data(email, current_data) 
                         return
                     
-                    # 🟢 تحقق الإشارة: T1 < 3 و T2 < 3
+                    # 🟢 تحقق الإشارة: T1 = 2 و T2 = 9
                     contract_type_to_use = get_signal_2_tick_analysis(current_data['tick_history'])
                     
                     if contract_type_to_use == "DIGITOVER":
                         # 🚀 تحقق الشرط، ننفذ مباشرة
                         
                         if current_data['pending_martingale']:
-                            # في حالة المضاعفة، الرهان ونوع العقد جاهزان بالفعل
-                            print("⚠️ [MARTINGALE] Condition met (2 Ticks < 3). Executing Martingale trade.")
+                            print("⚠️ [MARTINGALE] Condition met (T1=2 & T2=9). Executing Martingale trade.")
                         else:
-                            # في الحالة الأساسية، نستخدم الرهان الأساسي
                             current_data['current_stake'] = current_data['base_stake']
                             current_data['current_trade_state']['type'] = contract_type_to_use
-                            print(f"⚠️ [BASE SIGNAL] Condition met (2 Ticks < 3). Executing Base trade.")
+                            print(f"⚠️ [BASE SIGNAL] Condition met (T1=2 & T2=9). Executing Base trade.")
                             
                         execute_trade(email, current_data)
                     else:
@@ -562,7 +561,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
 
 
 # ==========================================================
-# FLASK APP SETUP AND ROUTES (LOGIN, START, STOP, CONTROL)
+# FLASK APP SETUP AND ROUTES (No changes needed)
 # ==========================================================
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
@@ -672,24 +671,24 @@ CONTROL_FORM = """
 <hr>
 
 {% with messages = get_flashed_messages(with_categories=true) %}
-    {% if messages %}
-        {% for category, message in messages %}
-            <p style="color:{{ 'green' if category == 'success' else ('blue' if category == 'info' else 'red') }};">{{ message }}</p>
-        {% endfor %}
-    {% endif %}
+    {% if messages %}
+        {% for category, message in messages %}
+            <p style="color:{{ 'green' if category == 'success' else ('blue' if category == 'info' else 'red') }};">{{ message }}</p>
+        {% endfor %}
+    {% endif %}
 {% endwith %}
 
 {% if session_data and session_data.stop_reason and session_data.stop_reason != "Running" and session_data.stop_reason != "Stopped Manually" %}
-    <p style="color:red; font-weight:bold;">Last Session Ended: {{ session_data.stop_reason }}</p>
+    <p style="color:red; font-weight:bold;">Last Session Ended: {{ session_data.stop_reason }}</p>
 {% endif %}
 
 
 {% if session_data and session_data.is_running %}
-    {% set martingale_mode = 'Martingale (Max 2 Steps) Awaiting 2 Ticks < 3 Confirmation ONLY after a loss' %}
-    {% set strategy = 'DIGIT OVER 2 (' + DURATION|string + ' Ticks) | Analysis: CONSECUTIVE (2 Ticks) | Entry: (T1 < 3 & T2 < 3) | Market: ' + SYMBOL + ' | Martingale x' + martingale_multiplier|string + ' (Max ' + max_consecutive_losses|string + ' Losses, Max Step ' + max_martingale_step|string + ')' %}
-    
-    <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
-    <div class="data-box">
+    {% set martingale_mode = 'Martingale (Max 2 Steps) Awaiting T1=2 & T2=9 Condition' %}
+    {% set strategy = 'DIGIT OVER 2 (' + DURATION|string + ' Ticks) | Analysis: SEQUENTIAL (2 Ticks) | Entry: (T1=2 & T2=9) | Market: ' + SYMBOL + ' | Martingale x' + martingale_multiplier|string + ' (Max ' + max_consecutive_losses|string + ' Losses, Max Step ' + max_martingale_step|string + ')' %}
+    
+    <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
+    <div class="data-box">
         <p>Account Type: <b>{{ session_data.account_type.upper() }}</b> | Currency: <b>{{ session_data.currency }}</b></p>
         <p>Net Profit: <b>{{ session_data.currency }} {{ session_data.current_profit|round(2) }}</b></p>
         
@@ -711,47 +710,47 @@ CONTROL_FORM = """
 
         <p>Current Stake: <b>{{ session_data.currency }} {{ session_data.current_stake|round(2) }}</b></p>
         <p style="font-weight: bold; color: {% if session_data.consecutive_losses > 0 %}red{% else %}green{% endif %};">
-        Consecutive Losses: <b>{{ session_data.consecutive_losses }}</b> / {{ max_consecutive_losses }} 
-        (Last Direction: <b>{{ session_data.last_losing_trade_type }} 2</b>)
-        </p>
-        <p style="font-weight: bold; color: green;">Total Wins: {{ session_data.total_wins }} | Total Losses: {{ session_data.total_losses }}</p>
-        <p style="font-weight: bold; color: #007bff;">Current Strategy: {{ strategy }}</p>
+        Consecutive Losses: <b>{{ session_data.consecutive_losses }}</b> / {{ max_consecutive_losses }} 
+        (Last Direction: <b>{{ session_data.last_losing_trade_type }} 2</b>)
+        </p>
+        <p style="font-weight: bold; color: green;">Total Wins: {{ session_data.total_wins }} | Total Losses: {{ session_data.total_losses }}</p>
+        <p style="font-weight: bold; color: #007bff;">Current Strategy: {{ strategy }}</p>
         {% if session_data.open_contract_id %}
             <p style="font-weight: bold; color: blue;">⚠️ Contract ID: {{ session_data.open_contract_id|string|truncate(8, True, '...') }} (Recovery Active)</p>
         {% endif %}
     </div>
-    
-    <form method="POST" action="{{ url_for('stop_route') }}">
-        <button type="submit" style="background-color: red; color: white;">🛑 Stop Bot</button>
-    </form>
+    
+    <form method="POST" action="{{ url_for('stop_route') }}">
+        <button type="submit" style="background-color: red; color: white;">🛑 Stop Bot</button>
+    </form>
 {% else %}
-    <p class="status-stopped">🛑 Bot is Stopped. Enter settings to start a new session.</p>
-    
-    <form method="POST" action="{{ url_for('stop_route') }}">
-        <button type="submit" style="background-color: #ff5733; color: white;">🧹 Force Stop & Clear Session</button>
-        <input type="hidden" name="force_stop" value="true">
-    </form>
-    <hr>
-    
-    <form method="POST" action="{{ url_for('start_bot') }}">
+    <p class="status-stopped">🛑 Bot is Stopped. Enter settings to start a new session.</p>
+    
+    <form method="POST" action="{{ url_for('stop_route') }}">
+        <button type="submit" style="background-color: #ff5733; color: white;">🧹 Force Stop & Clear Session</button>
+        <input type="hidden" name="force_stop" value="true">
+    </form>
+    <hr>
+    
+    <form method="POST" action="{{ url_for('start_bot') }}">
 
-        <label for="account_type">Account Type:</label><br>
-        <select id="account_type" name="account_type" required>
-            <option value="demo" {% if session_data.account_type == 'demo' %}selected{% endif %}>Demo (USD)</option>
-            <option value="live" {% if session_data.account_type == 'live' %}selected{% endif %}>Live (tUSDT)</option>
-        </select><br>
+        <label for="account_type">Account Type:</label><br>
+        <select id="account_type" name="account_type" required>
+            <option value="demo" {% if session_data.account_type == 'demo' %}selected{% endif %}>Demo (USD)</option>
+            <option value="live" {% if session_data.account_type == 'live' %}selected{% endif %}>Live (tUSDT)</option>
+        </select><br>
 
-        <label for="token">Deriv API Token:</label><br>
-        <input type="text" id="token" name="token" required value="{{ session_data.api_token if session_data else '' }}"><br>
-        
-        <label for="stake">Base Stake (USD/tUSDT):</label><br>
-        <input type="number" id="stake" name="stake" value="{{ session_data.base_stake|round(2) if session_data else 0.35 }}" step="0.01" min="0.35" required><br>
-        
-        <label for="tp">TP Target (USD/tUSDT):</label><br>
-        <input type="number" id="tp" name="tp" value="{{ session_data.tp_target|round(2) if session_data else 10.0 }}" step="0.01" required><br>
-        
-        <button type="submit" style="background-color: green; color: white;">🚀 Start Bot</button>
-    </form>
+        <label for="token">Deriv API Token:</label><br>
+        <input type="text" id="token" name="token" required value="{{ session_data.api_token if session_data else '' }}"><br>
+        
+        <label for="stake">Base Stake (USD/tUSDT):</label><br>
+        <input type="number" id="stake" name="stake" value="{{ session_data.base_stake|round(2) if session_data else 0.35 }}" step="0.01" min="0.35" required><br>
+        
+        <label for="tp">TP Target (USD/tUSDT):</label><br>
+        <input type="number" id="tp" name="tp" value="{{ session_data.tp_target|round(2) if session_data else 10.0 }}" step="0.01" required><br>
+        
+        <button type="submit" style="background-color: green; color: white;">🚀 Start Bot</button>
+    </form>
 {% endif %}
 <hr>
 <a href="{{ url_for('logout') }}" style="display: block; text-align: center; margin-top: 15px; font-size: 1.1em;">Logout</a>
@@ -759,18 +758,18 @@ CONTROL_FORM = """
 <script>
     var SYMBOL = "{{ SYMBOL }}";
     var DURATION = {{ DURATION }};
-    function autoRefresh() {
-        var isRunning = {{ 'true' if session_data and session_data.is_running else 'false' }};
-        var refreshInterval = 1000; // 1000ms = 1 second
-        
-        if (isRunning) {
-            setTimeout(function() {
-                window.location.reload();
-            }, refreshInterval);
-        }
-    }
+    function autoRefresh() {
+        var isRunning = {{ 'true' if session_data and session_data.is_running else 'false' }};
+        var refreshInterval = 1000; // 1000ms = 1 second
+        
+        if (isRunning) {
+            setTimeout(function() {
+                window.location.reload();
+            }, refreshInterval);
+        }
+    }
 
-    autoRefresh();
+    autoRefresh();
 </script>
 """
 
