@@ -287,7 +287,7 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
     
     entry_msg = f"MARTINGALE STEP {current_data['current_step']}" if is_martingale else "BASE SIGNAL"
     
-    t1_d2_entry = current_data['entry_t1_d2'] if current_data['entry_t1_d2'] is not none else 'N/A'
+    t1_d2_entry = current_data['entry_t1_d2'] if current_data['entry_t1_d2'] is not None else 'N/A'
     t4_d2_entry = current_data['last_entry_d2']
     
     print(f"\n💰 [TRADE START] T1 D2: {t1_d2_entry} | T4 D2: {t4_d2_entry} | Total Stake: {current_data['current_total_stake']:.2f} ({entry_msg}) | Balance Ref: {current_data['before_trade_balance']:.2f} {currency_code}")
@@ -337,7 +337,6 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
     final_check.start()
     final_check_processes[email] = final_check
     print(f"✅ [TRADE START] Final check process started in background.")
-
 
 
 def check_pnl_limits_by_balance(email, after_trade_balance): 
@@ -666,9 +665,6 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
         if not current_data.get('is_running'):
             break
 
-        # 💡 **تم حذف** التحقق من مؤقت الـ 8 ثواني من هنا. يتم التعامل معه الآن في final_check_process.
-        # هذا يضمن أن حلقة الـ WebSocket لا تتعطل أبداً.
-        
         # 🌟 محاولة إعادة الاتصال بـ WebSocket إذا كان غير متصل
         if active_ws.get(email) is None:
             print(f"🔗 [PROCESS] Attempting to connect for {email} to {WSS_URL_UNIFIED}...")
@@ -734,8 +730,10 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                     }
                     current_data['last_tick_data'] = tick_data
                     
+                    # 1. تحديث تاريخ التيك (يجب أن يحدث دائماً)
                     current_data['tick_history'].append(tick_data)
                     
+                    # تحديث لعرض البيانات
                     if len(current_data['tick_history']) >= TICK_HISTORY_SIZE:
                         current_data['display_t1_price'] = current_data['tick_history'][0]['price'] 
                         current_data['display_t4_price'] = current_data['tick_history'][-1]['price'] 
@@ -750,44 +748,59 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                         is_time_gap_respected = time_since_last_entry_ms > 100 
                         
                         if not is_time_gap_respected:
-                            if len(current_data['tick_history']) > TICK_HISTORY_SIZE:
-                                current_data['tick_history'] = current_data['tick_history'][:-1]
+                            # إذا كان الوقت قصيراً جداً، نحذف التيك الأخير الذي أضفناه وننتظر
+                            current_data['tick_history'].pop() 
                             save_session_data(email, current_data) 
                             return
                         
-                        if len(current_data['tick_history']) >= TICK_HISTORY_SIZE:
+                        # استخراج الرقم العشري الثاني للتيك الأخير
+                        tick_T_latest_price = current_data['tick_history'][-1]['price'] 
+                        digits_T_latest = get_target_digits(tick_T_latest_price)
+                        digit_T_latest_D2 = digits_T_latest[1] if len(digits_T_latest) >= 2 else 'N/A'
+                        
+                        
+                        if current_data['pending_delayed_entry']:
                             
-                            tick_T_latest_price = current_data['tick_history'][-1]['price'] 
-                            digits_T_latest = get_target_digits(tick_T_latest_price)
-                            digit_T_latest_D2 = digits_T_latest[1] if len(digits_T_latest) >= 2 else 'N/A'
+                            # **المرحلة الثانية: انتظار D2=9 للدخول**
                             
-                            if current_data['pending_delayed_entry']:
+                            is_entry_condition_met = (digit_T_latest_D2 == 9)
+                            
+                            if is_entry_condition_met:
+                                print(f"🚀 [DELAYED ENTRY MET] T D2=9 met. Executing trade (Step: {current_data['current_step']}).")
                                 
-                                is_entry_condition_met = (digit_T_latest_D2 == 9)
+                                is_martingale = current_data['current_step'] > 0
+                                execute_multi_trade(email, current_data, is_martingale=is_martingale)
                                 
-                                if is_entry_condition_met:
-                                    print(f"🚀 [DELAYED ENTRY MET] T D2=9 met. Executing trade (Step: {current_data['current_step']}).")
-                                    
-                                    is_martingale = current_data['current_step'] > 0
-                                    execute_multi_trade(email, current_data, is_martingale=is_martingale)
-                                    
-                                    current_data['pending_delayed_entry'] = False 
-                                    current_data['entry_t1_d2'] = None
-                                    current_data['tick_history'] = [] 
-                                    
-                                else:
-                                    current_data['tick_history'].pop(0) 
+                                # تصفير حالة الانتظار المؤجل والسجل بعد الدخول
+                                current_data['pending_delayed_entry'] = False 
+                                current_data['entry_t1_d2'] = None
+                                current_data['tick_history'] = [] 
+                                
+                            else:
+                                # التعديل الحاسم: إذا لم يكن D2=9، لا نفعل شيئاً (ننتظر التيك التالي)
+                                # هذا يحل مشكلة التعليق في مرحلة الانتظار المؤجل.
+                                pass 
+                                
 
-                            elif len(current_data['tick_history']) == TICK_HISTORY_SIZE:
+                        elif len(current_data['tick_history']) >= TICK_HISTORY_SIZE:
+                            
+                            # **المرحلة الأولى: البحث عن الإشارة الأولية (T1 D2=9 & T4 D2=4/5)**
+                            
+                            # التأكد من أن السجل هو 4 فقط لضمان التحليل الصحيح
+                            if len(current_data['tick_history']) > TICK_HISTORY_SIZE:
+                                # حذف أقدم تيك لتثبيت حجم السجل عند 4
+                                current_data['tick_history'].pop(0) 
+
+                            initial_t1_d2 = get_initial_signal_check(current_data['tick_history'])
+                            
+                            if initial_t1_d2 is not False:
+                                current_data['pending_delayed_entry'] = True
+                                current_data['entry_t1_d2'] = initial_t1_d2 
                                 
-                                initial_t1_d2 = get_initial_signal_check(current_data['tick_history'])
+                                print(f"🔔 INITIAL SIGNAL FOUND: T1 D2=9 & T4 D2={digit_T_latest_D2}. Starting rolling delay wait for T D2=9...")
                                 
-                                if initial_t1_d2 is not False:
-                                    current_data['pending_delayed_entry'] = True
-                                    current_data['entry_t1_d2'] = initial_t1_d2 
-                                    
-                                    print(f"🔔 INITIAL SIGNAL FOUND: T1 D2=9 & T4 D2={digit_T_latest_D2}. Starting rolling delay wait for T D2=9...")
-                                    
+                            else:
+                                # إذا لم تتحقق الإشارة الأولية، نحذف أقدم تيك ونستمر
                                 current_data['tick_history'].pop(0) 
                     
                     save_session_data(email, current_data) 
