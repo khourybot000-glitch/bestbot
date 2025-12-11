@@ -70,16 +70,16 @@ DEFAULT_SESSION_STATE = {
     "display_t4_price": 0.0, 
     "last_entry_d2": None, 
     "current_total_stake": 0.0, 
-    # 💡 حقل جديد: لعرض الرصيد الحالي
+    # 💡 حقل الرصيد الحالي
     "current_balance": 0.0, 
-    # 💡 حقل جديد: مفتاح لبدء العمل بعد الحصول على الرصيد
+    # 💡 مفتاح لبدء العمل بعد الحصول على الرصيد
     "is_balance_received": False,  
     # 💡 حقول التأخير المتدحرج
     "pending_delayed_entry": False, 
     "entry_t1_d2": None, 
 }
 
-# (.... Persistent State Management Functions - لقفل الملفات وضمان عدم تعارض العمليات ....)
+# (.... Persistent State Management Functions - لا تغيير ....)
 def get_file_lock(f):
     """ يطبق قفل كتابة حصري على الملف """
     try:
@@ -495,7 +495,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
         "last_entry_d2": None,
         "current_total_stake": session_data.get("current_total_stake", stake * len(TRADE_CONFIGS)),
         "current_balance": session_data.get("current_balance", 0.0), 
-        "is_balance_received": False, # 💡 عند بدء الاتصال، نعيد تعيينها لانتظار التحديث
+        "is_balance_received": False, 
         "pending_delayed_entry": session_data.get("pending_delayed_entry", False),
         "entry_t1_d2": session_data.get("entry_t1_d2", None),
     })
@@ -519,8 +519,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
         def on_open_wrapper(ws_app):
             ws_app.send(json.dumps({"authorize": current_data['api_token']})) 
             
-            # 💡 التعديل 1: طلب الرصيد مع الاشتراك (أول طلب بعد التخويل)
-            ws_app.send(json.dumps({"balance": 1, "account": current_data['account_type'], "subscribe": 1}))
+            # 💡 التعديل 1: تم حذف طلب الرصيد من هنا. سيتم طلبه بعد نجاح التخويل في on_message.
             
             running_data = get_session_data(email)
             
@@ -547,7 +546,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
             running_data['is_running'] = True
             running_data['is_balance_received'] = False # التأكد من الانتظار
             save_session_data(email, running_data)
-            print(f"✅ [PROCESS] Connection established for {email}. Waiting for initial balance...")
+            print(f"✅ [PROCESS] Connection established for {email}. Waiting for authorization...")
             
         
         def execute_multi_trade(email, current_data, is_martingale=False):
@@ -579,13 +578,13 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                 current_data['current_balance'] = float(current_balance)
                 current_data['currency'] = currency 
                 
-                # 💡 التعديل 2: إذا لم نكن قد استقبلنا الرصيد بعد، نرسل طلب التيكات
+                # 💡 التعديل 3: إذا لم نكن قد استقبلنا الرصيد بعد، نرسل طلب التيكات ونبدأ العمل
                 if current_data['is_balance_received'] == False:
                     
                     current_data['is_balance_received'] = True
-                    save_session_data(email, current_data) # حفظ الحالة الجديدة
+                    save_session_data(email, current_data) 
                     
-                    # الآن وقد حصلنا على الرصيد، نطلب التيكات ونبدأ العمل
+                    # نطلب التيكات ونبدأ العمل فقط بعد حصولنا على الرصيد الأولي
                     ws_app.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
                     print(f"💰 [BALANCE RECEIVED] Initial Balance: {current_data['current_balance']:.2f} {currency}. Starting tick subscription...")
                 
@@ -727,6 +726,16 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
 
             elif msg_type == 'authorize':
                 print(f"✅ [AUTH {email}] Success. Account: {data['authorize']['loginid']}")
+                
+                # 💡 التعديل 2: نطلب الرصيد فقط بعد نجاح التخويل
+                # هذا يحل مشكلة التعليق: نضمن أننا مخولون قبل طلب بيانات الحساب
+                ws_app.send(json.dumps({
+                    "balance": 1, 
+                    "account": current_data['account_type'], 
+                    "subscribe": 1
+                }))
+                print(f"💰 [REQUEST] Authorization successful. Requesting balance update...")
+
 
         def on_close_wrapper(ws_app, code, msg):
             print(f"❌ [WS Close {email}] Code: {code}, Message: {msg}")
