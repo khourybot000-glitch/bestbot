@@ -16,9 +16,9 @@ SYMBOL = "R_100"
 DURATION = 2            
 DURATION_UNIT = "t"     
 # 🌟 خطوتي مضاعفة كحد أقصى (تعديل: 2)
-MARTINGALE_STEPS = 2    
+MARTINGALE_STEPS = 1    
 # 🌟 3 خسائر متتالية (SL) (تعديل: 3)
-MAX_CONSECUTIVE_LOSSES = 3 
+MAX_CONSECUTIVE_LOSSES = 2 
 RECONNECT_DELAY = 1      
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json" 
