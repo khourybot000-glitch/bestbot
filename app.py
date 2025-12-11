@@ -37,6 +37,7 @@ manager = multiprocessing.Manager()
 
 active_ws = {} 
 is_contract_open = manager.dict() 
+final_check_processes = manager.dict() # لتتبع عمليات التحقق النهائية
 
 TRADE_STATE_DEFAULT = TRADE_CONFIGS 
 
@@ -67,7 +68,7 @@ DEFAULT_SESSION_STATE = {
     "display_t4_price": 0.0, 
     "last_entry_d2": None, 
     "current_total_stake": 0.0, 
-    "current_balance": 0.0, 
+    "current_balance": 0.0,
     "is_balance_received": False,  
     "pending_delayed_entry": False, 
     "entry_t1_d2": None, 
@@ -176,6 +177,7 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
     """
     global is_contract_open 
     global flask_local_processes 
+    global final_check_processes
 
     current_data = get_session_data(email)
     current_data["is_running"] = False
@@ -195,6 +197,7 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
         except Exception as e:
             print(f"❌ [ERROR] Could not close WS for {email}: {e}")
             
+    # إنهاء عملية البوت الرئيسية
     if email in flask_local_processes:
         try:
             process = flask_local_processes[email]
@@ -202,9 +205,22 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
                 process.terminate() 
                 process.join(timeout=2) 
             del flask_local_processes[email] 
-            print(f"🛑 [INFO] Process for {email} forcefully terminated.")
+            print(f"🛑 [INFO] Main process for {email} forcefully terminated.")
         except Exception as e:
-            print(f"❌ [ERROR] Could not terminate process for {email}: {e}")
+            print(f"❌ [ERROR] Could not terminate main process for {email}: {e}")
+            
+    # إنهاء عملية التحقق النهائية إذا كانت قيد التشغيل
+    if email in final_check_processes:
+        try:
+            process = final_check_processes[email]
+            if process.is_alive():
+                process.terminate() 
+                process.join(timeout=2) 
+            del final_check_processes[email] 
+            print(f"🛑 [INFO] Final check process for {email} forcefully terminated.")
+        except Exception as e:
+            print(f"❌ [ERROR] Could not terminate final check process for {email}: {e}")
+
             
     if email in is_contract_open:
         is_contract_open[email] = False 
@@ -243,6 +259,8 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
     يرسل أوامر شراء متعددة (صفقتين) في نفس اللحظة.
     """
     global is_contract_open 
+    global final_check_processes # نحتاج هذه القائمة لبدء العملية الفرعية
+    
     if email not in active_ws or active_ws[email] is None: return
     ws_app = active_ws[email]
     
@@ -269,7 +287,7 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
     
     entry_msg = f"MARTINGALE STEP {current_data['current_step']}" if is_martingale else "BASE SIGNAL"
     
-    t1_d2_entry = current_data['entry_t1_d2'] if current_data['entry_t1_d2'] is not None else 'N/A'
+    t1_d2_entry = current_data['entry_t1_d2'] if current_data['entry_t1_d2'] is not none else 'N/A'
     t4_d2_entry = current_data['last_entry_d2']
     
     print(f"\n💰 [TRADE START] T1 D2: {t1_d2_entry} | T4 D2: {t4_d2_entry} | Total Stake: {current_data['current_total_stake']:.2f} ({entry_msg}) | Balance Ref: {current_data['before_trade_balance']:.2f} {currency_code}")
@@ -310,6 +328,16 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
          
     # حفظ الحالة بعد إرسال الأوامر وتحديد الرصيد المرجعي
     save_session_data(email, current_data) 
+    
+    # 🚨 **التعديل الجديد:** بدء عملية التحقق النهائي المنفصلة
+    final_check = multiprocessing.Process(
+        target=final_check_process, 
+        args=(email, current_data['api_token'], current_data['last_entry_time'])
+    )
+    final_check.start()
+    final_check_processes[email] = final_check
+    print(f"✅ [TRADE START] Final check process started in background.")
+
 
 
 def check_pnl_limits_by_balance(email, after_trade_balance): 
@@ -317,10 +345,12 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
     تتحقق من النتيجة عبر مقارنة الرصيد قبل وبعد الصفقة وتطبق منطق المضاعفة/التوقف.
     """
     global is_contract_open 
-
+    
     current_data = get_session_data(email)
-    if not current_data.get('is_running'): 
-        is_contract_open[email] = False
+    
+    # التأكد من عدم معالجة نتائج صفقة قديمة بعد إيقاف البوت
+    if not current_data.get('is_running') and current_data.get('stop_reason') != "Running": 
+        print(f"⚠️ [PNL] Bot stopped. Ignoring check for {email}.")
         return
         
     before_trade_balance = current_data.get('before_trade_balance', 0.0)
@@ -331,7 +361,7 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
         total_profit_loss = after_trade_balance - before_trade_balance 
         print(f"** [PNL Calc] After Balance: {after_trade_balance:.2f} - Before Balance: {before_trade_balance:.2f} = PL: {total_profit_loss:.2f}")
     else:
-        # حالة أمان إذا لم يتم تحديد الرصيد المرجعي (لا يجب أن تحدث الآن)
+        # حالة أمان إذا لم يتم تحديد الرصيد المرجعي
         print("⚠️ [PNL WARNING] Before trade balance is 0.0. Assuming loss equivalent to stake for safety.")
         total_profit_loss = -last_total_stake 
 
@@ -394,10 +424,9 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
 
     if stop_triggered:
         stop_bot(email, clear_data=True, stop_reason=stop_triggered) 
-        is_contract_open[email] = False 
         return 
         
-    is_contract_open[email] = False 
+    # ملاحظة: is_contract_open يتم تعيينه إلى False في عملية التحقق النهائية (final_check_process)
 
 # ==========================================================
 # UTILITY FUNCTIONS FOR PRICE MOVEMENT ANALYSIS (لا تغيير)
@@ -524,6 +553,54 @@ def get_balance_sync(token):
 
     except Exception as e:
         return None, f"Connection/Request Failed: {e}"
+        
+# ==========================================================
+# 🚨 الدالة الجديدة: عملية التحقق النهائي المنفصلة
+# ==========================================================
+
+def final_check_process(email, token, start_time_ms):
+    """
+    عملية منفصلة للانتظار والتحقق من الرصيد النهائي بعد 8 ثواني.
+    """
+    global is_contract_open
+    global final_check_processes
+    
+    time_to_wait = 8000 # 8 ثواني بالمللي ثانية
+    
+    # 1. الانتظار
+    time_since_start = (time.time() * 1000) - start_time_ms
+    sleep_time = max(0, (time_to_wait - time_since_start) / 1000)
+    
+    print(f"😴 [FINAL CHECK] Separate process sleeping for {sleep_time:.2f} seconds...")
+    time.sleep(sleep_time)
+    
+    # 2. جلب الرصيد بشكل متزامن
+    final_balance, error = get_balance_sync(token)
+    
+    if final_balance is not None:
+        # 3. تطبيق منطق PNL (نستخدم الدالة الموجودة)
+        check_pnl_limits_by_balance(email, final_balance)
+        
+        # 4. تحديث الرصيد وحالة is_contract_open
+        current_data = get_session_data(email)
+        current_data['current_balance'] = final_balance
+        save_session_data(email, current_data) 
+        
+        if email in is_contract_open:
+            is_contract_open[email] = False
+        
+        print(f"✅ [FINAL CHECK] Result confirmed. New Balance: {final_balance:.2f}. Process finished.")
+        
+    else:
+        print(f"❌ [FINAL CHECK] Failed to get final balance: {error}. Resetting contract status.")
+        # في حالة الفشل، نضمن إلغاء التعليق
+        if email in is_contract_open:
+            is_contract_open[email] = False
+    
+    # حذف العملية من قائمة التتبع بعد الانتهاء
+    if email in final_check_processes:
+        del final_check_processes[email]
+
 
 # ==========================================================
 # CORE BOT LOGIC 
@@ -544,7 +621,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
 
     session_data = get_session_data(email)
     
-    # 🌟 جلب الرصيد بشكل متزامن لمرة واحدة قبل البدء (مثل ما طلبته)
+    # 🌟 جلب الرصيد بشكل متزامن لمرة واحدة قبل البدء
     try:
         initial_balance, currency_returned = get_initial_balance_sync(token) 
         
@@ -556,7 +633,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
             
             # 💡 ضمان حفظ الرصيد الأولي كمرجع قبل الدخول في أي صفقة
             session_data['before_trade_balance'] = initial_balance 
-            save_session_data(email, session_data) # <--- 🚨 حفظ البيانات هنا لضمان التزامن
+            save_session_data(email, session_data) 
             
             print(f"💰 [SYNC BALANCE] Initial balance retrieved: {initial_balance:.2f} {session_data['currency']}. Account type: {session_data['account_type'].upper()}")
             
@@ -589,47 +666,8 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
         if not current_data.get('is_running'):
             break
 
-        # 💡 عملية التحقق من مؤقت الـ 8 ثواني بعد الصفقة
-        if is_contract_open.get(email) is True and current_data.get('last_entry_time') != 0:
-            current_time_ms = time.time() * 1000
-            time_since_entry_ms = current_time_ms - current_data['last_entry_time']
-            
-            if time_since_entry_ms > 8000: 
-                print("⏳ [8 SEC TIMER] Trade timeout reached. Checking final balance...")
-                
-                # 1. إغلاق الـ WebSocket للسماح بالاتصال المتزامن
-                if active_ws.get(email):
-                    try:
-                        print("    [WS CLOSE] Closing active WebSocket...")
-                        active_ws[email].close() 
-                        active_ws[email] = None 
-                    except Exception as ex:
-                        print(f"⚠️ [WS CLOSE] Error closing WS: {ex}")
-                    
-                time.sleep(1) # انتظار بسيط لضمان إغلاق الاتصال
-
-                current_data = get_session_data(email) 
-                token_to_use = current_data['api_token']
-                
-                # 2. جلب الرصيد النهائي بشكل متزامن (بنفس طريقة الجلب الأولي)
-                final_balance, error = get_balance_sync(token_to_use)
-                
-                if final_balance is not None:
-                    # 3. حساب PNL وتطبيق منطق المضاعفة/التوقف
-                    check_pnl_limits_by_balance(email, final_balance)
-                    
-                    # 4. تحديث الرصيد الحالي ليكون الرصيد النهائي للصفقة السابقة
-                    current_data = get_session_data(email) # إعادة الجلب بعد تحديث PNL
-                    current_data['current_balance'] = final_balance
-                    is_contract_open[email] = False
-                    save_session_data(email, current_data) # <--- حفظ الرصيد النهائي كأحدث رصيد
-                    
-                    print(f"✅ [BALANCE CHECK] Result confirmed. New Balance: {final_balance:.2f}.")
-                    
-                else:
-                    print(f"❌ [BALANCE CHECK] Failed to get final balance: {error}")
-                    
-                continue 
+        # 💡 **تم حذف** التحقق من مؤقت الـ 8 ثواني من هنا. يتم التعامل معه الآن في final_check_process.
+        # هذا يضمن أن حلقة الـ WebSocket لا تتعطل أبداً.
         
         # 🌟 محاولة إعادة الاتصال بـ WebSocket إذا كان غير متصل
         if active_ws.get(email) is None:
@@ -675,10 +713,11 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                     current_balance = data['balance']['balance']
                     currency = data['balance']['currency']
                     
+                    # لا نعتمد على تحديث الرصيد لتحديد نتيجة الصفقة، ولكن نحفظه كأحدث رصيد
                     current_data['current_balance'] = float(current_balance)
                     current_data['currency'] = currency 
                     
-                    # 🚨 حفظ البيانات فوراً لضمان التزامن مع send_trade_orders
+                    # 🚨 حفظ البيانات فوراً لضمان التزامن 
                     save_session_data(email, current_data) 
                 
                 elif msg_type == 'tick':
@@ -1138,7 +1177,6 @@ def login_route():
 def logout():
     email = session.pop('email', None)
     if email:
-        # stop_bot(email, clear_data=False, stop_reason="Logged Out") # Keep data for next login
         pass
     flash("You have been logged out.", 'info')
     return redirect(url_for('login_route'))
@@ -1226,8 +1264,5 @@ if __name__ == '__main__':
             f.write('{}')
     if not os.path.exists(USER_IDS_FILE):
         load_allowed_users() # Creates the default file
-
-    # Reload running bots on startup (optional, currently disabled for simplicity)
-    # The current design ensures that if a bot was running, it is stopped by the cleanup above.
 
     app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
