@@ -4,25 +4,22 @@ import websocket
 import multiprocessing 
 import os 
 import sys 
-import fcntl # يستخدم لقفل الملفات في بيئات التشغيل الشبيهة بـ Linux
+import fcntl 
 from flask import Flask, request, render_template_string, redirect, url_for, session, flash
 from datetime import datetime, timezone
 
 # ==========================================================
-# BOT CONSTANT SETTINGS (Setup for R_100 T1 D2=9 & T4 D2=4/5 -> T4 D2=9 | OVER5 & UNDER4 | 2 Ticks)
+# BOT CONSTANT SETTINGS
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929" 
 SYMBOL = "R_100"        
 DURATION = 2            
 DURATION_UNIT = "t"     
-# 🛑 خطوة مضاعفة واحدة فقط (صفقتين كحد أقصى)
 MARTINGALE_STEPS = 1    
-# 🛑 يتوقف بعد خسارتين متتاليتين
 MAX_CONSECUTIVE_LOSSES = 2 
 RECONNECT_DELAY = 1      
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json" 
-# 🌟 تحليل 4 تيكات
 TICK_HISTORY_SIZE = 4   
 MARTINGALE_MULTIPLIER = 6.0 
 CANDLE_TICK_SIZE = 0   
@@ -70,16 +67,14 @@ DEFAULT_SESSION_STATE = {
     "display_t4_price": 0.0, 
     "last_entry_d2": None, 
     "current_total_stake": 0.0, 
-    # 💡 حقل الرصيد الحالي
     "current_balance": 0.0, 
-    # 💡 مفتاح لبدء العمل بعد الحصول على الرصيد
     "is_balance_received": False,  
-    # 💡 حقول التأخير المتدحرج
     "pending_delayed_entry": False, 
     "entry_t1_d2": None, 
 }
 
 # (.... Persistent State Management Functions - لا تغيير ....)
+
 def get_file_lock(f):
     """ يطبق قفل كتابة حصري على الملف """
     try:
@@ -180,7 +175,6 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
     current_data["is_running"] = False
     current_data["stop_reason"] = stop_reason 
     
-    # مسح العقود المفتوحة حتى لو لم يكن الإيقاف قسرياً، لمنع التعليق
     if not clear_data: 
         current_data["open_contract_ids"] = []
     
@@ -190,8 +184,8 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
         try:
             process = flask_local_processes[email]
             if process.is_alive():
-                process.terminate() # إيقاف العملية بالقوة
-                process.join(timeout=2) # الانتظار لثوانٍ معدودة
+                process.terminate() 
+                process.join(timeout=2) 
             del flask_local_processes[email] 
             print(f"🛑 [INFO] Process for {email} forcefully terminated.")
         except Exception as e:
@@ -222,11 +216,9 @@ def calculate_martingale_stake(base_stake, current_step):
     if current_step == 0:
         return base_stake
     
-    # يتم تطبيق المضاعف بشكل أُسي لخطوات المضاعفة (الحد الأقصى 1)
     if current_step <= MARTINGALE_STEPS: 
         return base_stake * (MARTINGALE_MULTIPLIER ** current_step) 
     
-    # إذا تجاوزنا خطوة المضاعفة، نعود للرهان الأساسي
     else:
         return base_stake
 
@@ -241,7 +233,6 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
     
     current_data = get_session_data(email)
     
-    # الرهان الجديد بناءً على الخطوة الحالية
     stake_per_contract = calculate_martingale_stake(base_stake, current_data['current_step'])
     rounded_stake = round(stake_per_contract, 2)
     
@@ -250,7 +241,6 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
     current_data['last_entry_price'] = current_data['last_tick_data']['price'] if current_data.get('last_tick_data') else 0.0
     current_data['last_entry_time'] = time.time() * 1000
     
-    # يتم تتبع D2 للتيك الأحدث (T4)
     entry_digits = get_target_digits(current_data['last_entry_price'])
     current_data['last_entry_d2'] = entry_digits[1] if len(entry_digits) > 1 else 'N/A'
     
@@ -258,14 +248,12 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
     
     entry_msg = f"MARTINGALE STEP {current_data['current_step']}" if is_martingale else "BASE SIGNAL"
     
-    # عرض D2 لـ T1 (من سجل الانتظار) و T4 (الدخول)
     t1_d2_entry = current_data['entry_t1_d2'] if current_data['entry_t1_d2'] is not None else 'N/A'
     t4_d2_entry = current_data['last_entry_d2']
     
     print(f"\n💰 [TRADE START] T1 D2: {t1_d2_entry} | T4 D2: {t4_d2_entry} | Total Stake: {current_data['current_total_stake']:.2f} ({entry_msg})")
 
 
-    # إرسال الطلبين
     for config in trade_configs:
         contract_type = config['type']
         target_digit = config['target_digit']
@@ -337,9 +325,7 @@ def check_pnl_limits(email, contract_results):
         current_data['consecutive_losses'] += 1
         current_data['current_step'] += 1
         
-        # التحقق من MARTINGALE_STEPS (1 خطوة)
         if current_data['current_step'] <= MARTINGALE_STEPS:
-            # تفعيل وضع انتظار المضاعفة 
             new_stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
             
             current_data['current_stake'] = new_stake
@@ -348,7 +334,6 @@ def check_pnl_limits(email, contract_results):
             current_data['current_total_stake'] = new_stake * len(TRADE_CONFIGS)
             current_data['martingale_config'] = TRADE_CONFIGS 
             
-            # إعادة تفعيل وضع الانتظار المتدحرج للبحث عن الإشارة
             current_data['pending_delayed_entry'] = False 
             current_data['entry_t1_d2'] = None
             current_data['tick_history'] = [] 
@@ -356,7 +341,6 @@ def check_pnl_limits(email, contract_results):
             print(f"🚨 [MARTINGALE DELAYED] Overall Loss Detected. Pending Step {current_data['current_step']} @ Stake per contract: {new_stake:.2f} (Total: {current_data['current_total_stake']:.2f}). Waiting for T1 D2=9 & T4 D2=4/5 signal...")
 
         else:
-            # تجاوز عدد خطوات المضاعفة (العودة إلى الرهان الأساسي للدخول التالي)
             current_data['current_stake'] = current_data['base_stake']
             current_data['pending_martingale'] = False
             current_data['current_total_stake'] = current_data['base_stake'] * len(TRADE_CONFIGS)
@@ -364,11 +348,10 @@ def check_pnl_limits(email, contract_results):
             current_data['consecutive_losses'] = 0
 
         
-        # التحقق من MAX_CONSECUTIVE_LOSSES (2 خسارة)
         if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES: 
             stop_triggered = f"SL Reached ({MAX_CONSECUTIVE_LOSSES} Consecutive Losses)"
             
-    current_data['tick_history'] = [] # مسح السجل لبدء سلسلة تحليل جديدة 
+    current_data['tick_history'] = [] 
         
     save_session_data(email, current_data) 
     
@@ -391,14 +374,12 @@ def get_target_digits(price):
     يستخرج الأرقام العشرية من سعر التيك. (نحن مهتمون بالرقم الثاني D2)
     """
     try:
-        # تنسيق السعر لضمان 3 خانات عشرية على الأقل لـ R_100
         formatted_price = "{:.3f}".format(float(price)) 
         
         if '.' in formatted_price:
             parts = formatted_price.split('.')
-            decimal_part = parts[1] # الجزء العشري
+            decimal_part = parts[1] 
             
-            # تحويل كل حرف إلى رقم
             digits = [int(d) for d in decimal_part if d.isdigit()]
             return digits
         
@@ -408,7 +389,6 @@ def get_target_digits(price):
         print(f"Error calculating target digits: {e}")
         return [0] 
 
-# T1 D2=9 و T4 D2=4 أو 5
 def get_initial_signal_check(tick_history):
     """
     يتحقق من الإشارة الأولية بناءً على تحليل T1 (أقدم) و T4 (الأحدث).
@@ -417,32 +397,69 @@ def get_initial_signal_check(tick_history):
     if len(tick_history) != 4:
         return False
     
-    # تحديد التيكات (T1=index 0, T4=index 3)
-    tick_T1_price = tick_history[0]['price'] # التيك الأقدم 
-    tick_T4_price = tick_history[3]['price'] # التيك الأحدث 
+    tick_T1_price = tick_history[0]['price'] 
+    tick_T4_price = tick_history[3]['price'] 
     
-    # استخلاص الأرقام العشرية
     digits_T1 = get_target_digits(tick_T1_price)
     digits_T4 = get_target_digits(tick_T4_price)
     
-    # التحقق من وجود D2 (الرقم الثاني بعد الفاصلة)
     if len(digits_T1) < 2 or len(digits_T4) < 2:
         return False
         
-    # D2 هو العنصر رقم [1]
     digit_T1_D2 = digits_T1[1] 
     digit_T4_D2 = digits_T4[1] 
     
-    # 2. شرط T1: الرقم الثاني يجب أن يكون 9
     condition_T1_is_9 = (digit_T1_D2 == 9)
-    
-    # 3. شرط T4: الرقم الثاني يجب أن يكون 4 أو 5
     condition_T4_is_4_or_5 = (digit_T4_D2 == 4 or digit_T4_D2 == 5)
     
     if condition_T1_is_9 and condition_T4_is_4_or_5:
-        return digit_T1_D2 # نرجع قيمة 9 لتخزينها
+        return digit_T1_D2 
     else:
         return False
+
+# ==========================================================
+# NEW SYNC BALANCE RETRIEVAL FUNCTION
+# ==========================================================
+
+def get_initial_balance_sync(token):
+    """
+    يتصل مرة واحدة بشكل متزامن لسحب الرصيد الأولي بعد التخويل.
+    """
+    global WSS_URL_UNIFIED
+    try:
+        ws = websocket.WebSocket()
+        ws.connect(WSS_URL_UNIFIED, timeout=5)
+
+        # 1. التخويل
+        ws.send(json.dumps({"authorize": token}))
+        auth_response = json.loads(ws.recv()) 
+
+        if 'error' in auth_response:
+            ws.close()
+            return None, "Authorization Failed", None
+
+        # 2. طلب الرصيد (بدون حقل account)
+        req = {"balance": 1, "subscribe": 1} # 💡 طلب الرصيد بدون حقل account
+        ws.send(json.dumps(req))
+        
+        # 3. انتظار رد الرصيد بشكل متزامن
+        balance_response = json.loads(ws.recv())
+        ws.close()
+        
+        if balance_response.get('msg_type') == 'balance':
+            # استخراج نوع الحساب الفعلي الذي جاء في الرد
+            login_id = balance_response.get('balance', {}).get('loginid')
+            account_type_actual = login_id.split('-')[0].lower() if login_id and '-' in login_id else 'unknown'
+
+            balance = balance_response.get('balance', {}).get('balance')
+            currency = balance_response.get('balance', {}).get('currency')
+            return float(balance), currency, account_type_actual
+            
+        return None, "Balance response invalid", None
+
+    except Exception as e:
+        return None, f"Connection/Request Failed: {e}", None
+
 
 # ==========================================================
 # CORE BOT LOGIC 
@@ -458,7 +475,6 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
 
     active_ws[email] = None 
     
-    # ... (تحميل بيانات الجلسة وتحديثها)
     if email not in is_contract_open:
         is_contract_open[email] = False
     else:
@@ -468,8 +484,33 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
         else:
             is_contract_open[email] = False
 
-
     session_data = get_session_data(email)
+    
+    # 🌟 NEW: جلب الرصيد بشكل متزامن لمرة واحدة قبل البدء
+    try:
+        initial_balance, currency, account_type_actual = get_initial_balance_sync(token) 
+        
+        if initial_balance is not None:
+            session_data['current_balance'] = initial_balance
+            session_data['currency'] = currency
+            session_data['is_balance_received'] = True
+            
+            if account_type_actual:
+                 session_data['account_type'] = account_type_actual
+                 
+            print(f"💰 [SYNC BALANCE] Initial balance retrieved: {initial_balance:.2f} {currency}. Account type: {session_data['account_type']}")
+            
+        else:
+            print(f"⚠️ [SYNC BALANCE] Could not retrieve initial balance. Currency: {currency}")
+            stop_bot(email, stop_reason="Balance Retrieval Failed")
+            return
+            
+    except Exception as e:
+        print(f"❌ FATAL ERROR during sync balance retrieval: {e}")
+        stop_bot(email, stop_reason="Balance Retrieval Failed")
+        return
+
+    # تحديث البيانات بناءً على الجلسة الجديدة والبيانات التي تم جلبها
     session_data.update({
         "api_token": token, "base_stake": stake, "tp_target": tp,
         "is_running": True, "current_stake": session_data.get("current_stake", stake), 
@@ -480,8 +521,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
         "last_tick_data": None,
         "tick_history": session_data.get("tick_history", []), 
         "open_contract_ids": session_data.get("open_contract_ids", []), 
-        "account_type": account_type,
-        "currency": currency_code,
+        # account_type and currency are now set by the sync call
         "current_profit": session_data.get("current_profit", 0.0),
         "current_step": session_data.get("current_step", 0),
         "consecutive_losses": session_data.get("consecutive_losses", 0),
@@ -494,10 +534,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
         "display_t4_price": 0.0, 
         "last_entry_d2": None,
         "current_total_stake": session_data.get("current_total_stake", stake * len(TRADE_CONFIGS)),
-        "current_balance": session_data.get("current_balance", 0.0), 
-        "is_balance_received": False, 
-        "pending_delayed_entry": session_data.get("pending_delayed_entry", False),
-        "entry_t1_d2": session_data.get("entry_t1_d2", None),
+        # is_balance_received is True here
     })
     
     if session_data['current_step'] > 0 and not session_data['pending_martingale']: 
@@ -519,7 +556,9 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
         def on_open_wrapper(ws_app):
             ws_app.send(json.dumps({"authorize": current_data['api_token']})) 
             
-            # 💡 التعديل 1: تم حذف طلب الرصيد من هنا. سيتم طلبه بعد نجاح التخويل في on_message.
+            # 💡 التعديل 4: نطلب التيكات هنا مباشرة، لأن الرصيد تم جلبه بالفعل بشكل متزامن.
+            ws_app.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
+            print(f"✅ [TICK REQUEST] Tick subscription requested after sync balance check.")
             
             running_data = get_session_data(email)
             
@@ -527,13 +566,11 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
             if contract_ids:
                 print(f"🔄 [RECOVERY] Attempting to follow {len(contract_ids)} lost contracts.")
                 for contract_id in contract_ids:
-                    # طلب الاشتراك في العقد المفتوح
                     ws_app.send(json.dumps({
                         "proposal_open_contract": 1, 
                         "contract_id": contract_id, 
                         "subscribe": 1
                     }))
-                    # طلب حالة العقد مرة واحدة للتأكد
                     ws_app.send(json.dumps({
                         "proposal_open_contract": 1, 
                         "contract_id": contract_id,
@@ -544,17 +581,15 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                 is_contract_open[email] = False
 
             running_data['is_running'] = True
-            running_data['is_balance_received'] = False # التأكد من الانتظار
+            running_data['is_balance_received'] = True # لأننا حصلنا عليه في البداية
             save_session_data(email, running_data)
             print(f"✅ [PROCESS] Connection established for {email}. Waiting for authorization...")
             
         
         def execute_multi_trade(email, current_data, is_martingale=False):
             base_stake_to_use = current_data['base_stake']
-            
             currency_code = current_data['currency']
             trade_configs_to_use = TRADE_CONFIGS
-            
             send_trade_orders(email, base_stake_to_use, trade_configs_to_use, currency_code, is_martingale=is_martingale)
             
 
@@ -571,6 +606,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                 ws_app.close() 
                 return
             
+            # 💡 التعديل 5: فقط تحديث الرصيد عند وصول تحديث (لا حاجة لطلب التيكات هنا)
             if msg_type == 'balance':
                 current_balance = data['balance']['balance']
                 currency = data['balance']['currency']
@@ -578,22 +614,13 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                 current_data['current_balance'] = float(current_balance)
                 current_data['currency'] = currency 
                 
-                # 💡 التعديل 3: إذا لم نكن قد استقبلنا الرصيد بعد، نرسل طلب التيكات ونبدأ العمل
-                if current_data['is_balance_received'] == False:
-                    
-                    current_data['is_balance_received'] = True
-                    save_session_data(email, current_data) 
-                    
-                    # نطلب التيكات ونبدأ العمل فقط بعد حصولنا على الرصيد الأولي
-                    ws_app.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
-                    print(f"💰 [BALANCE RECEIVED] Initial Balance: {current_data['current_balance']:.2f} {currency}. Starting tick subscription...")
+                # لم نعد نستخدم is_balance_received لبدء التيكات
                 
             
             elif msg_type == 'tick':
                 
-                # 💡 التحقق: تجاهل أي تيكات تصل قبل استقبال الرصيد
+                # 💡 التعديل 6: لم يعد هذا التحقق ضرورياً، لكن نتركه كـ SafeGuard
                 if current_data['is_balance_received'] == False:
-                    # print("⚠️ Ignoring tick: Waiting for initial balance...")
                     return 
                     
                 current_timestamp = int(data['tick']['epoch'])
@@ -605,18 +632,15 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                 }
                 current_data['last_tick_data'] = tick_data
                 
-                # تحديث سجل التيكات
                 current_data['tick_history'].append(tick_data)
                 
-                # 🌟 تحديث قيم T1 و T4 للعرض
                 if len(current_data['tick_history']) >= TICK_HISTORY_SIZE:
-                    current_data['display_t1_price'] = current_data['tick_history'][0]['price'] # T1 هو الأقدم (index 0)
-                    current_data['display_t4_price'] = current_data['tick_history'][-1]['price'] # التيك الأحدث 
+                    current_data['display_t1_price'] = current_data['tick_history'][0]['price'] 
+                    current_data['display_t4_price'] = current_data['tick_history'][-1]['price'] 
                 else:
                     current_data['display_t1_price'] = 0.0 
                     current_data['display_t4_price'] = current_price 
                 
-                # منطق الدخول (سواء كان أساسي أو مضاعف)
                 if is_contract_open.get(email) is False:
                     
                     current_time_ms = time.time() * 1000
@@ -624,55 +648,44 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                     is_time_gap_respected = time_since_last_entry_ms > 100 
                     
                     if not is_time_gap_respected:
-                        # ⚠️ إذا كان هناك تيك جديد وصل بسرعة، نتجاهله لتجنب التكرار
                         if len(current_data['tick_history']) > TICK_HISTORY_SIZE:
                              current_data['tick_history'] = current_data['tick_history'][:-1]
                         save_session_data(email, current_data) 
                         return
                     
-                    # 1. إذا كان حجم السجل 4 أو أكثر
                     if len(current_data['tick_history']) >= TICK_HISTORY_SIZE:
                         
-                        # التيك الأحدث هو التيك الذي سيتم فحصه (T4)
                         tick_T_latest_price = current_data['tick_history'][-1]['price'] 
                         digits_T_latest = get_target_digits(tick_T_latest_price)
                         digit_T_latest_D2 = digits_T_latest[1] if len(digits_T_latest) >= 2 else 'N/A'
                         
-                        # A) في حالة الانتظار (نحن ننتظر T D2=9)
                         if current_data['pending_delayed_entry']:
                             
                             is_entry_condition_met = (digit_T_latest_D2 == 9)
                             
                             if is_entry_condition_met:
-                                # 🚀 شروط الدخول تحققت
                                 print(f"🚀 [DELAYED ENTRY MET] T D2=9 met. Executing trade (Step: {current_data['current_step']}).")
                                 
                                 is_martingale = current_data['current_step'] > 0
                                 execute_multi_trade(email, current_data, is_martingale=is_martingale)
                                 
-                                # إعادة التعيين والتحرك للخطوة التالية
                                 current_data['pending_delayed_entry'] = False 
                                 current_data['entry_t1_d2'] = None
-                                current_data['tick_history'] = [] # مسح السجل بعد الدخول
+                                current_data['tick_history'] = [] 
                                 
                             else:
-                                # لم يتحقق شرط T D2=9: ندحرج السجل 
                                 current_data['tick_history'].pop(0) 
 
-                        # B) في حالة البحث عن الإشارة الأولية 
                         elif len(current_data['tick_history']) == TICK_HISTORY_SIZE:
                             
-                            # نتحقق من T1 D2=9 و T4 D2=4/5 فقط عندما يكون حجم السجل 4 بالضبط.
                             initial_t1_d2 = get_initial_signal_check(current_data['tick_history'])
                             
                             if initial_t1_d2 is not False:
-                                # 🔔 الإشارة الأولية تحققت (T1 D2=9, T4 D2=4/5)، نبدأ الانتظار
                                 current_data['pending_delayed_entry'] = True
-                                current_data['entry_t1_d2'] = initial_t1_d2 # لحفظ T1 D2=9
+                                current_data['entry_t1_d2'] = initial_t1_d2 
                                 
                                 print(f"🔔 INITIAL SIGNAL FOUND: T1 D2=9 & T4 D2={digit_T_latest_D2}. Starting rolling delay wait for T D2=9...")
                                 
-                            # ندحرج السجل استعداداً للتيك التالي (سواء وجدنا إشارة أولية أم لا)
                             current_data['tick_history'].pop(0) 
                 
                 save_session_data(email, current_data) 
@@ -683,7 +696,6 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                 current_data = get_session_data(email)
                 current_data['open_contract_ids'].append(contract_id) 
                 
-                # نرسل طلب متابعة العقد فوراً
                 ws_app.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
                 
                 save_session_data(email, current_data)
@@ -693,17 +705,14 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                 contract_id = str(contract.get('contract_id'))
                 
                 if contract.get('is_sold') == 1:
-                    # العقد اكتمل
                     profit_loss = contract.get('profit', 0.0)
                     contract_type = contract.get('contract_type')
                     
-                    # 🌟 تخزين النتيجة
                     contract_results_map[contract_id] = {
                         "profit": profit_loss, 
                         "type": contract_type
                     }
                     
-                    # حذف العقد المكتمل من القائمة المفتوحة
                     current_data = get_session_data(email)
                     if contract_id in current_data['open_contract_ids']:
                         current_data['open_contract_ids'].remove(contract_id)
@@ -712,29 +721,16 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                     if 'subscription_id' in data: 
                         ws_app.send(json.dumps({"forget": data['subscription_id']}))
 
-                    # 🌟 التحقق إذا اكتملت جميع العقود
                     if not current_data['open_contract_ids']:
-                        
                         results_list = list(contract_results_map.values())
-                        
-                        # تطبيق منطق المضاعفة/التوقف
                         check_pnl_limits(email, results_list)
-                        
-                        # مسح الخريطة بعد معالجة الدورة
                         contract_results_map = {} 
                         is_contract_open[email] = False
 
             elif msg_type == 'authorize':
-                print(f"✅ [AUTH {email}] Success. Account: {data['authorize']['loginid']}")
+                print(f"✅ [AUTH {email}] Success. Account: {data['authorize']['loginid']}. Balance check complete (Pre-fetched).")
+                # 💡 التعديل 7: لا حاجة لطلب الرصيد أو التيكات هنا
                 
-                # 💡 التعديل 2: نطلب الرصيد فقط بعد نجاح التخويل
-                # هذا يحل مشكلة التعليق: نضمن أننا مخولون قبل طلب بيانات الحساب
-                ws_app.send(json.dumps({
-                    "balance": 1, 
-                    "account": current_data['account_type'], 
-                    "subscribe": 1
-                }))
-                print(f"💰 [REQUEST] Authorization successful. Requesting balance update...")
 
 
         def on_close_wrapper(ws_app, code, msg):
@@ -773,7 +769,7 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
 app.config['SESSION_PERMANENT'] = False 
 
-# (.... LOGIN_FORM - no change ....)
+
 LOGIN_FORM = """
 <!doctype html>
 <title>Login</title>
@@ -989,7 +985,7 @@ CONTROL_FORM = """
             <p style="font-weight: bold; color: blue;">⚠️ {{ session_data.open_contract_ids|length }} Contracts Open (Recovery Active)</p>
         {% endif %}
         
-        {# 💡 إضافة حالة انتظار الرصيد #}
+        {# 💡 لم يعد هذا ضرورياً بعد التعديل، لكن نتركه كـ SafeGuard #}
         {% if not session_data.is_balance_received %}
             <p style="font-weight: bold; color: orange;">⏳ Waiting for Initial Balance Data from Server...</p>
         {% endif %}
@@ -1035,9 +1031,8 @@ CONTROL_FORM = """
     var DURATION = {{ DURATION }};
     var TICK_HISTORY_SIZE = {{ TICK_HISTORY_SIZE }}; 
     function autoRefresh() {
-        // التحديث التلقائي يعمل فقط إذا كانت حالة التشغيل حقيقية
         var isRunning = {{ 'true' if session_data and session_data.is_running else 'false' }};
-        var refreshInterval = 1000; // 1000ms = 1 second
+        var refreshInterval = 1000; 
         
         if (isRunning) {
             setTimeout(function() {
@@ -1079,7 +1074,6 @@ def control_panel():
     
     is_proc_running = email in flask_local_processes and flask_local_processes[email].is_alive()
     
-    # 🌟 تنظيف حالة التشغيل إذا كانت العملية الفرعية قد ماتت
     if session_data.get('is_running') and not is_proc_running:
         print(f"🔄 [RECOVERY] Process {email} found dead, resetting state to stopped.")
         session_data['is_running'] = False
@@ -1106,7 +1100,6 @@ def start_bot():
     
     email = session['email']
     
-    # 1. إيقاف العملية السابقة قبل البدء لضمان التنظيف
     stop_bot(email, clear_data=False, stop_reason="Restarting...") 
     
     token = request.form.get('token').strip()
@@ -1117,30 +1110,25 @@ def start_bot():
         flash('Invalid Stake or TP value.', 'error')
         return redirect(url_for('control_panel'))
         
-    account_type = request.form.get('account_type', 'demo')
-    
-    currency_code = "USD" if account_type == 'demo' else "tUSDT" 
+    account_type_input = request.form.get('account_type', 'demo') # قيمة الحقل المختار من النموذج
+    currency_code = "USD" if account_type_input == 'demo' else "tUSDT" 
 
-    # 2. تحديث البيانات المخزنة فوراً
     data = get_session_data(email)
     
-    # إعادة تعيين الحالة بالقيم الافتراضية
     new_data = DEFAULT_SESSION_STATE.copy()
-    new_data.update(data) # نسخ البيانات الموجودة (مثل total_wins)
+    new_data.update(data) 
     
-    # إعادة تعيين إحصائيات التداول إلى البداية لجلسة جديدة
     new_data.update({
         "is_running": True, 
         "api_token": token,
         "base_stake": stake, 
         "tp_target": tp,
-        "account_type": account_type,
+        # نوع الحساب يتم تحديثه من خلال الدالة المتزامنة
+        "account_type": account_type_input, 
         "currency": currency_code,
         "current_stake": stake,
         "current_total_stake": stake * len(TRADE_CONFIGS),
         "stop_reason": "Running",
-        
-        # إعادة تعيين الإحصائيات الحساسة للبدء
         "current_profit": 0.0,
         "consecutive_losses": 0,
         "current_step": 0,
@@ -1150,20 +1138,20 @@ def start_bot():
         "current_balance": 0.0,
     })
     
-    # 💡 خطوة حاسمة: حفظ الحالة الجديدة قبل إنشاء العملية
+    # حفظ الحالة الأولية (بدون الرصيد) قبل بدء العملية
     save_session_data(email, new_data) 
 
-    # 3. بدء عملية البوت
+    # بدء عملية البوت
     proc = multiprocessing.Process(
         target=bot_core_logic, 
-        args=(email, token, stake, tp, account_type, currency_code)
+        # نمرر نوع الحساب الذي أدخله المستخدم، لكن سيتم تحديثه داخلياً من رد السيرفر
+        args=(email, token, stake, tp, account_type_input, currency_code) 
     )
     proc.start()
     
     flask_local_processes[email] = proc
     
-    flash('🚀 Bot started successfully!', 'success')
-    # 4. إعادة التوجيه يجب أن تكون آخر خطوة
+    flash('🚀 Bot started successfully! (Checking initial balance...)', 'success')
     return redirect(url_for('control_panel'))
 
 @app.route('/stop', methods=['POST'])
@@ -1187,7 +1175,6 @@ def stop_route():
 def logout():
     if 'email' in session:
         email = session['email']
-        # إيقاف العملية دون مسح البيانات
         stop_bot(email, clear_data=False, stop_reason="Logged Out") 
         session.pop('email', None)
         flash('👋 You have been logged out.', 'info')
@@ -1200,6 +1187,5 @@ if __name__ == '__main__':
     all_sessions = load_persistent_sessions()
     print(f"📝 Loaded {len(all_sessions)} persistent sessions.")
 
-    # تعطيل use_reloader لتجنب تشغيل العمليات مرتين عند وضع debug=False
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
