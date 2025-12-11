@@ -57,7 +57,7 @@ DEFAULT_SESSION_STATE = {
     "last_entry_price": 0.0,      
     "last_tick_data": None,       
     "tick_history": [],
-    "open_contract_ids": [], 
+    "open_contract_ids": [], # لم نعد نستخدمه ولكن نتركه كمرجع
     "account_type": "demo", 
     "currency": "USD",
     "pending_martingale": False, 
@@ -71,6 +71,7 @@ DEFAULT_SESSION_STATE = {
     "is_balance_received": False,  
     "pending_delayed_entry": False, 
     "entry_t1_d2": None, 
+    "before_trade_balance": 0.0, # 💡 NEW: الرصيد قبل دخول الصفقة
 }
 
 # (.... Persistent State Management Functions - لا تغيير ....)
@@ -233,25 +234,27 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
     
     current_data = get_session_data(email)
     
+    # 💡 التعديل 1: حفظ الرصيد الحالي كمرجع BEFORE_TRADE_BALANCE
+    current_data['before_trade_balance'] = current_data['current_balance'] 
+    
     stake_per_contract = calculate_martingale_stake(base_stake, current_data['current_step'])
     rounded_stake = round(stake_per_contract, 2)
     
     current_data['current_stake'] = rounded_stake 
     current_data['current_total_stake'] = rounded_stake * len(trade_configs) 
     current_data['last_entry_price'] = current_data['last_tick_data']['price'] if current_data.get('last_tick_data') else 0.0
-    current_data['last_entry_time'] = time.time() * 1000
     
     entry_digits = get_target_digits(current_data['last_entry_price'])
     current_data['last_entry_d2'] = entry_digits[1] if len(entry_digits) > 1 else 'N/A'
     
-    current_data['open_contract_ids'] = [] 
+    current_data['open_contract_ids'] = [] # لا نعتمد على الـ ID لكن نتركه
     
     entry_msg = f"MARTINGALE STEP {current_data['current_step']}" if is_martingale else "BASE SIGNAL"
     
     t1_d2_entry = current_data['entry_t1_d2'] if current_data['entry_t1_d2'] is not None else 'N/A'
     t4_d2_entry = current_data['last_entry_d2']
     
-    print(f"\n💰 [TRADE START] T1 D2: {t1_d2_entry} | T4 D2: {t4_d2_entry} | Total Stake: {current_data['current_total_stake']:.2f} ({entry_msg})")
+    print(f"\n💰 [TRADE START] T1 D2: {t1_d2_entry} | T4 D2: {t4_d2_entry} | Total Stake: {current_data['current_total_stake']:.2f} ({entry_msg}) | Balance Ref: {current_data['before_trade_balance']:.2f} {currency_code}")
 
 
     for config in trade_configs:
@@ -275,6 +278,7 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
         }
         
         try:
+            # 💡 لا نطلب اشتراك في العقد (subscribe: 1) لأننا سنعتمد على الرصيد
             ws_app.send(json.dumps(trade_request))
             print(f"   [-- {label}] Sent {contract_type} (Barrier: {target_digit}) @ {rounded_stake:.2f} {currency_code}")
         except Exception as e:
@@ -282,15 +286,17 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
             pass
             
     is_contract_open[email] = True 
+    current_data['last_entry_time'] = time.time() * 1000 # وقت الدخول لتفعيل مؤقت الـ 8 ثواني
+    
     if is_martingale:
          current_data['pending_martingale'] = False
          
     save_session_data(email, current_data)
 
 
-def check_pnl_limits(email, contract_results): 
+def check_pnl_limits_by_balance(email, after_trade_balance): 
     """
-    تتحقق من نتائج الصفقتين المزدوجتين وتطبق منطق المضاعفة/التوقف.
+    تتحقق من النتيجة عبر مقارنة الرصيد قبل وبعد الصفقة وتطبق منطق المضاعفة/التوقف.
     """
     global is_contract_open 
 
@@ -298,11 +304,15 @@ def check_pnl_limits(email, contract_results):
     if not current_data.get('is_running'): 
         is_contract_open[email] = False
         return
-
-    total_profit_loss = sum(result['profit'] for result in contract_results)
-    overall_loss = total_profit_loss < 0
+        
+    before_trade_balance = current_data.get('before_trade_balance', 0.0)
     last_total_stake = current_data['current_total_stake'] 
-    current_data['current_profit'] += total_profit_loss
+
+    # 💡 التعديل 2: حساب الربح/الخسارة بناءً على فرق الرصيد
+    total_profit_loss = after_trade_balance - before_trade_balance 
+    overall_loss = total_profit_loss < 0 
+    
+    current_data['current_profit'] += total_profit_loss 
     
     stop_triggered = False
 
@@ -362,8 +372,8 @@ def check_pnl_limits(email, contract_results):
         is_contract_open[email] = False 
         return 
         
-    if current_data['current_step'] == 0 or current_data['pending_martingale']:
-        is_contract_open[email] = False 
+    # الصفقة انتهت، بغض النظر عن النتيجة، الآن يمكن الدخول بصفقة جديدة
+    is_contract_open[email] = False 
 
 # ==========================================================
 # UTILITY FUNCTIONS FOR PRICE MOVEMENT ANALYSIS 
@@ -418,12 +428,12 @@ def get_initial_signal_check(tick_history):
         return False
 
 # ==========================================================
-# NEW SYNC BALANCE RETRIEVAL FUNCTION
+# NEW SYNC BALANCE RETRIEVAL FUNCTIONS
 # ==========================================================
 
 def get_initial_balance_sync(token):
     """
-    يتصل مرة واحدة بشكل متزامن لسحب الرصيد الأولي بعد التخويل.
+    يتصل مرة واحدة بشكل متزامن لسحب الرصيد الأولي مع الاشتراك في التحديثات.
     """
     global WSS_URL_UNIFIED
     try:
@@ -436,10 +446,10 @@ def get_initial_balance_sync(token):
 
         if 'error' in auth_response:
             ws.close()
-            return None, "Authorization Failed", None
+            return None, "Authorization Failed"
 
-        # 2. طلب الرصيد (بدون حقل account)
-        req = {"balance": 1, "subscribe": 1} # 💡 طلب الرصيد بدون حقل account
+        # 2. طلب الرصيد (مع subscribe)
+        req = {"balance": 1, "subscribe": 1} 
         ws.send(json.dumps(req))
         
         # 3. انتظار رد الرصيد بشكل متزامن
@@ -447,19 +457,47 @@ def get_initial_balance_sync(token):
         ws.close()
         
         if balance_response.get('msg_type') == 'balance':
-            # استخراج نوع الحساب الفعلي الذي جاء في الرد
-            login_id = balance_response.get('balance', {}).get('loginid')
-            account_type_actual = login_id.split('-')[0].lower() if login_id and '-' in login_id else 'unknown'
-
             balance = balance_response.get('balance', {}).get('balance')
             currency = balance_response.get('balance', {}).get('currency')
-            return float(balance), currency, account_type_actual
+            return float(balance), currency
             
-        return None, "Balance response invalid", None
+        return None, "Balance response invalid"
 
     except Exception as e:
-        return None, f"Connection/Request Failed: {e}", None
+        return None, f"Connection/Request Failed: {e}"
 
+def get_balance_sync(token):
+    """
+    يتصل مرة واحدة بشكل متزامن لسحب الرصيد الحالي (بدون اشتراك).
+    """
+    global WSS_URL_UNIFIED
+    try:
+        ws = websocket.WebSocket()
+        ws.connect(WSS_URL_UNIFIED, timeout=5)
+
+        # 1. التخويل
+        ws.send(json.dumps({"authorize": token}))
+        auth_response = json.loads(ws.recv()) 
+
+        if 'error' in auth_response:
+            ws.close()
+            return None, "Authorization Failed"
+
+        # 2. طلب الرصيد (لمرة واحدة)
+        req = {"balance": 1} # بدون subscribe
+        ws.send(json.dumps(req))
+        
+        balance_response = json.loads(ws.recv())
+        ws.close()
+        
+        if balance_response.get('msg_type') == 'balance':
+            balance = balance_response.get('balance', {}).get('balance')
+            return float(balance), None # نعود بالرصيد فقط
+
+        return None, "Balance response invalid"
+
+    except Exception as e:
+        return None, f"Connection/Request Failed: {e}"
 
 # ==========================================================
 # CORE BOT LOGIC 
@@ -471,37 +509,29 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
     global is_contract_open 
     global WSS_URL_UNIFIED
     
-    WSS_URL = WSS_URL_UNIFIED
-
     active_ws[email] = None 
     
     if email not in is_contract_open:
         is_contract_open[email] = False
     else:
-        data_from_file = get_session_data(email)
-        if data_from_file.get('open_contract_ids'):
-            is_contract_open[email] = True
-        else:
-            is_contract_open[email] = False
+        # إذا كان هناك صفقات مفتوحة، نعتبر أن العملية انتهت (سيتم التأكيد بالرصيد)
+        is_contract_open[email] = False 
 
     session_data = get_session_data(email)
     
     # 🌟 NEW: جلب الرصيد بشكل متزامن لمرة واحدة قبل البدء
     try:
-        initial_balance, currency, account_type_actual = get_initial_balance_sync(token) 
+        initial_balance, currency_returned = get_initial_balance_sync(token) 
         
         if initial_balance is not None:
             session_data['current_balance'] = initial_balance
-            session_data['currency'] = currency
+            session_data['currency'] = currency_returned 
             session_data['is_balance_received'] = True
             
-            if account_type_actual:
-                 session_data['account_type'] = account_type_actual
-                 
-            print(f"💰 [SYNC BALANCE] Initial balance retrieved: {initial_balance:.2f} {currency}. Account type: {session_data['account_type']}")
+            print(f"💰 [SYNC BALANCE] Initial balance retrieved: {initial_balance:.2f} {session_data['currency']}. Account type: {session_data['account_type'].upper()}")
             
         else:
-            print(f"⚠️ [SYNC BALANCE] Could not retrieve initial balance. Currency: {currency}")
+            print(f"⚠️ [SYNC BALANCE] Could not retrieve initial balance. Currency: {session_data['currency']}")
             stop_bot(email, stop_reason="Balance Retrieval Failed")
             return
             
@@ -520,8 +550,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
         "last_entry_price": 0.0,
         "last_tick_data": None,
         "tick_history": session_data.get("tick_history", []), 
-        "open_contract_ids": session_data.get("open_contract_ids", []), 
-        # account_type and currency are now set by the sync call
+        "open_contract_ids": [], # مسح أي صفقات معلقة قديمة
         "current_profit": session_data.get("current_profit", 0.0),
         "current_step": session_data.get("current_step", 0),
         "consecutive_losses": session_data.get("consecutive_losses", 0),
@@ -534,7 +563,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
         "display_t4_price": 0.0, 
         "last_entry_d2": None,
         "current_total_stake": session_data.get("current_total_stake", stake * len(TRADE_CONFIGS)),
-        # is_balance_received is True here
+        "before_trade_balance": session_data.get("before_trade_balance", initial_balance),
     })
     
     if session_data['current_step'] > 0 and not session_data['pending_martingale']: 
@@ -551,37 +580,64 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
         if not current_data.get('is_running'):
             break
 
-        print(f"🔗 [PROCESS] Attempting to connect for {email} to {WSS_URL}...")
+        # 💡 التعديل 3: التحقق من مؤقت الـ 8 ثواني هنا
+        if is_contract_open.get(email) is True and current_data.get('last_entry_time') != 0:
+            current_time_ms = time.time() * 1000
+            time_since_entry_ms = current_time_ms - current_data['last_entry_time']
+            
+            # إذا تجاوز 8 ثوانٍ والصفقة مفتوحة
+            if time_since_entry_ms > 8000: 
+                print("⏳ [8 SEC TIMER] Trade timeout reached. Checking final balance...")
+                
+                # إغلاق الـ Websocket الحالي (لإجبار ws.run_forever على التوقف)
+                if active_ws[email]:
+                    try:
+                         # يجب إغلاقها لتمكين العملية المتزامنة
+                        active_ws[email].close() 
+                    except Exception:
+                        pass
+                    
+                time.sleep(1) # ننتظر الإغلاق
+
+                current_data = get_session_data(email) # جلب أحدث البيانات
+                token_to_use = current_data['api_token']
+                
+                # جلب الرصيد النهائي بشكل متزامن
+                final_balance, error = get_balance_sync(token_to_use)
+                
+                if final_balance is not None:
+                    # 💡 تأكيد النتيجة عبر مقارنة الرصيد
+                    check_pnl_limits_by_balance(email, final_balance)
+                    
+                    # 💡 تحديث الرصيد الأخير
+                    current_data['current_balance'] = final_balance
+                    is_contract_open[email] = False
+                    save_session_data(email, current_data)
+                    
+                    print(f"✅ [BALANCE CHECK] Result confirmed. New Balance: {final_balance:.2f}.")
+                    
+                else:
+                    print(f"❌ [BALANCE CHECK] Failed to get final balance: {error}")
+                    
+                # نستمر في الحلقة ليعيد الاتصال مجدداً (لبدء صفقة جديدة)
+                continue # نعود لبداية الحلقة
+        
+
+        print(f"🔗 [PROCESS] Attempting to connect for {email} to {WSS_URL_UNIFIED}...")
 
         def on_open_wrapper(ws_app):
             ws_app.send(json.dumps({"authorize": current_data['api_token']})) 
             
-            # 💡 التعديل 4: نطلب التيكات هنا مباشرة، لأن الرصيد تم جلبه بالفعل بشكل متزامن.
+            # نطلب الاشتراك في التيكات
             ws_app.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
-            print(f"✅ [TICK REQUEST] Tick subscription requested after sync balance check.")
+            print(f"✅ [TICK REQUEST] Tick subscription requested.")
+            
+            # 💡 نطلب تحديث الرصيد (لأنه قد يكون تغير أثناء الانقطاع)
+            ws_app.send(json.dumps({"balance": 1, "subscribe": 1})) 
             
             running_data = get_session_data(email)
-            
-            contract_ids = running_data.get('open_contract_ids', [])
-            if contract_ids:
-                print(f"🔄 [RECOVERY] Attempting to follow {len(contract_ids)} lost contracts.")
-                for contract_id in contract_ids:
-                    ws_app.send(json.dumps({
-                        "proposal_open_contract": 1, 
-                        "contract_id": contract_id, 
-                        "subscribe": 1
-                    }))
-                    ws_app.send(json.dumps({
-                        "proposal_open_contract": 1, 
-                        "contract_id": contract_id,
-                    }))
-                    
-                is_contract_open[email] = True 
-            else:
-                is_contract_open[email] = False
-
             running_data['is_running'] = True
-            running_data['is_balance_received'] = True # لأننا حصلنا عليه في البداية
+            running_data['is_balance_received'] = True 
             save_session_data(email, running_data)
             print(f"✅ [PROCESS] Connection established for {email}. Waiting for authorization...")
             
@@ -593,10 +649,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
             send_trade_orders(email, base_stake_to_use, trade_configs_to_use, currency_code, is_martingale=is_martingale)
             
 
-        contract_results_map = {} 
-
         def on_message_wrapper(ws_app, message):
-            nonlocal contract_results_map
             data = json.loads(message)
             msg_type = data.get('msg_type')
             
@@ -606,20 +659,17 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                 ws_app.close() 
                 return
             
-            # 💡 التعديل 5: فقط تحديث الرصيد عند وصول تحديث (لا حاجة لطلب التيكات هنا)
+            # تحديث الرصيد عند وصول تحديث
             if msg_type == 'balance':
                 current_balance = data['balance']['balance']
                 currency = data['balance']['currency']
                 
+                # 💡 يتم تحديث الرصيد الحالي هنا، لكن النتيجة ستأتي من مؤقت الـ 8 ثواني
                 current_data['current_balance'] = float(current_balance)
                 current_data['currency'] = currency 
-                
-                # لم نعد نستخدم is_balance_received لبدء التيكات
-                
             
             elif msg_type == 'tick':
                 
-                # 💡 التعديل 6: لم يعد هذا التحقق ضرورياً، لكن نتركه كـ SafeGuard
                 if current_data['is_balance_received'] == False:
                     return 
                     
@@ -641,6 +691,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                     current_data['display_t1_price'] = 0.0 
                     current_data['display_t4_price'] = current_price 
                 
+                # 💡 إيقاف منطق البحث عن الإشارة إذا كانت صفقة مفتوحة بالفعل
                 if is_contract_open.get(email) is False:
                     
                     current_time_ms = time.time() * 1000
@@ -691,45 +742,15 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                 save_session_data(email, current_data) 
                                 
             elif msg_type == 'buy':
-                contract_id = str(data['buy']['contract_id'])
-                
-                current_data = get_session_data(email)
-                current_data['open_contract_ids'].append(contract_id) 
-                
-                ws_app.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
-                
-                save_session_data(email, current_data)
+                # 💡 لا نفعل شيئاً هنا سوى التأكيد، لا نطلب اشتراك في العقد
+                pass
                 
             elif msg_type == 'proposal_open_contract':
-                contract = data['proposal_open_contract']
-                contract_id = str(contract.get('contract_id'))
-                
-                if contract.get('is_sold') == 1:
-                    profit_loss = contract.get('profit', 0.0)
-                    contract_type = contract.get('contract_type')
-                    
-                    contract_results_map[contract_id] = {
-                        "profit": profit_loss, 
-                        "type": contract_type
-                    }
-                    
-                    current_data = get_session_data(email)
-                    if contract_id in current_data['open_contract_ids']:
-                        current_data['open_contract_ids'].remove(contract_id)
-                        save_session_data(email, current_data)
-                    
-                    if 'subscription_id' in data: 
-                        ws_app.send(json.dumps({"forget": data['subscription_id']}))
-
-                    if not current_data['open_contract_ids']:
-                        results_list = list(contract_results_map.values())
-                        check_pnl_limits(email, results_list)
-                        contract_results_map = {} 
-                        is_contract_open[email] = False
+                # 💡 نتجاهل هذه الرسالة الآن لأننا نعتمد على مقارنة الرصيد
+                pass
 
             elif msg_type == 'authorize':
                 print(f"✅ [AUTH {email}] Success. Account: {data['authorize']['loginid']}. Balance check complete (Pre-fetched).")
-                # 💡 التعديل 7: لا حاجة لطلب الرصيد أو التيكات هنا
                 
 
 
@@ -748,6 +769,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
             )
             active_ws[email] = ws
             ws.on_ping = on_ping_wrapper 
+            # تشغيل run_forever بدون ping_interval/timeout إذا كانت تسبب مشاكل
             ws.run_forever(ping_interval=20, ping_timeout=10) 
             
         except Exception as e:
@@ -944,24 +966,30 @@ CONTROL_FORM = """
     </div>
     
     <div class="data-box">
+        {# 💡 هنا نستخدم القيمة المحفوظة في الجلسة #}
         <p>Asset: <b>{{ SYMBOL }}</b> | Account: <b>{{ session_data.account_type.upper() }}</b></p>
         
         {# 💡 عرض الرصيد #}
         <p style="font-weight: bold; color: #17a2b8;">
             Current Balance: <b>{{ session_data.currency }} {{ session_data.current_balance|round(2) }}</b>
         </p>
+        <p style="font-weight: bold; color: #17a2b8;">
+            Balance BEFORE Trade: <b>{{ session_data.currency }} {{ session_data.before_trade_balance|round(2) }}</b>
+        </p>
 
         <p>Net Profit: <b>{{ session_data.currency }} {{ session_data.current_profit|round(2) }}</b></p>
         
-        <p style="font-weight: bold; color: {% if session_data.open_contract_ids %}#007bff{% else %}#555{% endif %};">
-            Open Contracts Status: 
-            <b>{% if session_data.open_contract_ids %}{{ session_data.open_contract_ids|length }}{% else %}0{% endif %} (Over 5 & Under 4)</b>
+        <p style="font-weight: bold; color: {% if session_data.current_total_stake %}#007bff{% else %}#555{% endif %};">
+            Open Contract Status: 
+            <b>{% if is_contract_open.get(email) %}Waiting 8s Check (Total Stake: {{ session_data.current_total_stake|round(2) }}){% else %}0 (Ready for Signal){% endif %}</b>
         </p>
         
         <p style="font-weight: bold; color: {% if session_data.pending_delayed_entry %}#ff9900{% elif session_data.current_step > 0 %}#ff5733{% else %}#555{% endif %};">
             Delay/Martingale Status: 
             <b>
-                {% if session_data.pending_delayed_entry %}
+                {% if is_contract_open.get(email) %}
+                    Awaiting 8s Balance Check (Entry Time: {{ session_data.last_entry_time|int }})
+                {% elif session_data.pending_delayed_entry %}
                     DELAYED ENTRY ACTIVE (T1 D2={{ session_data.entry_t1_d2 if session_data.entry_t1_d2 is not none else 'N/A' }}). Waiting for Current D2=9.
                     {% if session_data.current_step > 0 %}
                     (MARTINGALE STEP {{ session_data.current_step }})
@@ -981,11 +1009,7 @@ CONTROL_FORM = """
         </p>
         <p style="font-weight: bold; color: green;">Total Wins: {{ session_data.total_wins }} | Total Losses: {{ session_data.total_losses }}</p>
         <p style="font-weight: bold; color: #007bff;">Current Strategy: {{ strategy }}</p>
-        {% if session_data.open_contract_ids %}
-            <p style="font-weight: bold; color: blue;">⚠️ {{ session_data.open_contract_ids|length }} Contracts Open (Recovery Active)</p>
-        {% endif %}
         
-        {# 💡 لم يعد هذا ضرورياً بعد التعديل، لكن نتركه كـ SafeGuard #}
         {% if not session_data.is_balance_received %}
             <p style="font-weight: bold; color: orange;">⏳ Waiting for Initial Balance Data from Server...</p>
         {% endif %}
@@ -1032,9 +1056,17 @@ CONTROL_FORM = """
     var TICK_HISTORY_SIZE = {{ TICK_HISTORY_SIZE }}; 
     function autoRefresh() {
         var isRunning = {{ 'true' if session_data and session_data.is_running else 'false' }};
+        var isContractOpen = {{ 'true' if is_contract_open.get(email) else 'false' }};
         var refreshInterval = 1000; 
-        
+
         if (isRunning) {
+            // تحديث أسرع إذا كانت الصفقة مفتوحة للتأكد من تجاوز مؤقت الـ 8 ثواني في Python
+            if (isContractOpen) {
+                refreshInterval = 1000; 
+            } else {
+                refreshInterval = 2000; // تحديث أبطأ عند انتظار الإشارة
+            }
+            
             setTimeout(function() {
                 window.location.reload();
             }, refreshInterval);
@@ -1089,6 +1121,7 @@ def control_panel():
         'martingale_multiplier': MARTINGALE_MULTIPLIER,
         'max_consecutive_losses': MAX_CONSECUTIVE_LOSSES,
         'max_martingale_step': MARTINGALE_STEPS,
+        'is_contract_open': is_contract_open, # تمرير حالة الصفقة لتحديث الواجهة
     }
     
     return render_template_string(CONTROL_FORM, **context)
@@ -1110,7 +1143,7 @@ def start_bot():
         flash('Invalid Stake or TP value.', 'error')
         return redirect(url_for('control_panel'))
         
-    account_type_input = request.form.get('account_type', 'demo') # قيمة الحقل المختار من النموذج
+    account_type_input = request.form.get('account_type', 'demo') 
     currency_code = "USD" if account_type_input == 'demo' else "tUSDT" 
 
     data = get_session_data(email)
@@ -1123,7 +1156,6 @@ def start_bot():
         "api_token": token,
         "base_stake": stake, 
         "tp_target": tp,
-        # نوع الحساب يتم تحديثه من خلال الدالة المتزامنة
         "account_type": account_type_input, 
         "currency": currency_code,
         "current_stake": stake,
@@ -1136,15 +1168,15 @@ def start_bot():
         "pending_delayed_entry": False,
         "is_balance_received": False, 
         "current_balance": 0.0,
+        "before_trade_balance": 0.0, # تهيئة القيمة
     })
     
-    # حفظ الحالة الأولية (بدون الرصيد) قبل بدء العملية
+    # حفظ الحالة الأولية
     save_session_data(email, new_data) 
 
     # بدء عملية البوت
     proc = multiprocessing.Process(
         target=bot_core_logic, 
-        # نمرر نوع الحساب الذي أدخله المستخدم، لكن سيتم تحديثه داخلياً من رد السيرفر
         args=(email, token, stake, tp, account_type_input, currency_code) 
     )
     proc.start()
