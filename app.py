@@ -33,7 +33,7 @@ SYNC_SECONDS = []
 # 🌟 نوع الصفقة DIGITUNDER
 CONTRACT_TYPE = "DIGITUNDER" 
 # 🌟 الحاجز (Barrier) هو 8 
-TARGET_DIGIT = 8           
+TARGET_DIGIT = 7           
 
 # ==========================================================
 # BOT RUNTIME STATE 
