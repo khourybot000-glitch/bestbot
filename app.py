@@ -15,7 +15,7 @@ WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"        
 DURATION = 2            
 DURATION_UNIT = "t"     
-# 🛑 تحديث: خطوة مضاعفة واحدة فقط (صفقة أساسية + صفقة مضاعفة)
+# 🛑 تحديث: خطوة مضاعفة واحدة فقط (صفقتين كحد أقصى)
 MARTINGALE_STEPS = 1    
 # 🛑 تحديث: يتوقف بعد خسارتين متتاليتين
 MAX_CONSECUTIVE_LOSSES = 2 
@@ -33,7 +33,7 @@ TRADE_CONFIGS = [
 ]
 
 # ==========================================================
-# BOT RUNTIME STATE 
+# BOT RUNTIME STATE
 # ==========================================================
 flask_local_processes = {}
 manager = multiprocessing.Manager() 
@@ -70,6 +70,8 @@ DEFAULT_SESSION_STATE = {
     "display_t4_price": 0.0, 
     "last_entry_d2": None, 
     "current_total_stake": 0.0, 
+    # 💡 حقل جديد: لعرض الرصيد الحالي
+    "current_balance": 0.0, 
     # 💡 حقول التأخير المتدحرج
     "pending_delayed_entry": False, 
     "entry_t1_d2": None, 
@@ -158,12 +160,20 @@ def load_allowed_users():
         return set()
         
 def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"): 
+    """
+    يوقف العملية ويمسح البيانات المحفوظة بشكل مشروط.
+    """
     global is_contract_open 
     global flask_local_processes 
 
     current_data = get_session_data(email)
     current_data["is_running"] = False
     current_data["stop_reason"] = stop_reason 
+    
+    # 💡 التعديل: مسح العقود المفتوحة حتى لو لم يكن الإيقاف قسرياً، لمنع التعليق
+    if not clear_data: 
+        current_data["open_contract_ids"] = []
+    
     save_session_data(email, current_data) 
     
     if email in flask_local_processes:
@@ -474,6 +484,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
         "display_t4_price": 0.0, 
         "last_entry_d2": None,
         "current_total_stake": session_data.get("current_total_stake", stake * len(TRADE_CONFIGS)),
+        "current_balance": session_data.get("current_balance", 0.0), # القيمة المحفوظة
         # 💡 حقول التأخير المتدحرج
         "pending_delayed_entry": session_data.get("pending_delayed_entry", False),
         "entry_t1_d2": session_data.get("entry_t1_d2", None),
@@ -497,20 +508,31 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
 
         def on_open_wrapper(ws_app):
             ws_app.send(json.dumps({"authorize": current_data['api_token']})) 
+            
+            # 💡 التعديل 1: طلب الرصيد مع الاشتراك في التحديثات
+            ws_app.send(json.dumps({"balance": 1, "account": current_data['account_type'], "subscribe": 1}))
+            
             ws_app.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
             
             running_data = get_session_data(email)
             
             contract_ids = running_data.get('open_contract_ids', [])
             if contract_ids:
+                print(f"🔄 [RECOVERY] Attempting to follow {len(contract_ids)} lost contracts.")
                 for contract_id in contract_ids:
+                    # طلب الاشتراك في العقد المفتوح للحصول على تحديثات مستقبلية (إذا لم ينته)
                     ws_app.send(json.dumps({
                         "proposal_open_contract": 1, 
                         "contract_id": contract_id, 
                         "subscribe": 1
                     }))
+                    # طلب حالة العقد مرة واحدة (بدون اشتراك) لضمان الحصول على النتيجة إذا انتهى أثناء الانقطاع
+                    ws_app.send(json.dumps({
+                        "proposal_open_contract": 1, 
+                        "contract_id": contract_id,
+                    }))
+                    
                 is_contract_open[email] = True 
-                print(f"🔄 [RECOVERY] Attempting to follow {len(contract_ids)} lost contracts.")
             else:
                 is_contract_open[email] = False
 
@@ -540,8 +562,20 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
             if not current_data.get('is_running'):
                 ws_app.close() 
                 return
+            
+            # 💡 التعديل 2: معالجة رسائل الرصيد
+            if msg_type == 'balance':
+                current_balance = data['balance']['balance']
+                currency = data['balance']['currency']
                 
-            if msg_type == 'tick':
+                current_data['current_balance'] = float(current_balance)
+                current_data['currency'] = currency 
+                
+                # طباعة التحديث للتأكد من عمل الاشتراك
+                # print(f"💰 [BALANCE] Updated Balance: {current_data['current_balance']:.2f} {currency}")
+
+
+            elif msg_type == 'tick':
                 current_timestamp = int(data['tick']['epoch'])
                 current_price = float(data['tick']['quote'])
                 
@@ -890,6 +924,12 @@ CONTROL_FORM = """
     
     <div class="data-box">
         <p>Asset: <b>{{ SYMBOL }}</b> | Account: <b>{{ session_data.account_type.upper() }}</b></p>
+        
+        {# 💡 عرض الرصيد #}
+        <p style="font-weight: bold; color: #17a2b8;">
+            Current Balance: <b>{{ session_data.currency }} {{ session_data.current_balance|round(2) }}</b>
+        </p>
+
         <p>Net Profit: <b>{{ session_data.currency }} {{ session_data.current_profit|round(2) }}</b></p>
         
         <p style="font-weight: bold; color: {% if session_data.open_contract_ids %}#007bff{% else %}#555{% endif %};">
@@ -972,7 +1012,7 @@ CONTROL_FORM = """
             setTimeout(function() {
                 window.location.reload();
             }, refreshInterval);
-        }
+        }, refreshInterval);
     }
 
     autoRefresh();
@@ -1080,6 +1120,7 @@ def start_bot():
     data["total_losses"] = 0
     data["pending_martingale"] = False
     data["pending_delayed_entry"] = False # إعادة تعيين حالة التأخير
+    data["current_balance"] = 0.0 # إعادة تعيين الرصيد للعرض حتى يتم تحديثه من الـ WS
     
     save_session_data(email, data)
 
