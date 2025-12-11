@@ -398,6 +398,7 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
             current_data['current_total_stake'] = new_stake * len(TRADE_CONFIGS)
             current_data['martingale_config'] = TRADE_CONFIGS 
             
+            # 💡 يتم تصفيرها هنا لضمان بدء البحث عن الإشارة الأولية مجدداً
             current_data['pending_delayed_entry'] = False 
             current_data['entry_t1_d2'] = None
             current_data['tick_history'] = [] 
@@ -415,6 +416,12 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
         if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES: 
             stop_triggered = f"SL Reached ({MAX_CONSECUTIVE_LOSSES} Consecutive Losses)"
             
+    
+    # 🚨 التعديل الحاسم هنا: ضمان العودة إلى حالة البحث عن الإشارة الأولية بعد كل صفقة
+    current_data['pending_delayed_entry'] = False 
+    current_data['entry_t1_d2'] = None
+    
+    # مسح سجل التيكس لبدء جمع الإشارة الأولية (4 تيكات) من جديد
     current_data['tick_history'] = [] 
         
     save_session_data(email, current_data) 
@@ -772,13 +779,13 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                                 execute_multi_trade(email, current_data, is_martingale=is_martingale)
                                 
                                 # تصفير حالة الانتظار المؤجل والسجل بعد الدخول
+                                # ملاحظة: يتم تصفيرها مرة أخرى في check_pnl_limits_by_balance لضمان العودة للشرط الأول
                                 current_data['pending_delayed_entry'] = False 
                                 current_data['entry_t1_d2'] = None
                                 current_data['tick_history'] = [] 
                                 
                             else:
-                                # التعديل الحاسم: إذا لم يكن D2=9، لا نفعل شيئاً (ننتظر التيك التالي)
-                                # هذا يحل مشكلة التعليق في مرحلة الانتظار المؤجل.
+                                # إذا لم يكن D2=9، لا نفعل شيئاً (ننتظر التيك التالي)
                                 pass 
                                 
 
