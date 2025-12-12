@@ -24,13 +24,16 @@ TICK_HISTORY_SIZE = 2
 MARTINGALE_MULTIPLIER = 6.0 
 CANDLE_TICK_SIZE = 0   
 SYNC_SECONDS = [] 
+
+# 🌟 التعديل هنا: نعود إلى منطق DIGITOVER مع Target Digit = 2
 TRADE_CONFIGS = [ 
-    {"type": "DYNAMIC_ENTRY", "target_digit": 0, "label": "Higher/Lower_0.6"}, 
+    {"type": "DIGITOVER", "target_digit": 2, "label": "Over 2"}, 
 ]
 TARGET_D2_THRESHOLD = 0 # D2 يجب أن يساوي 0 للتيك الأخير (T2)
 
 # ==========================================================
 # BOT RUNTIME STATE 
+# (.... نفس المتغيرات العالمية والدوال المساعدة - لا تغيير ...)
 # ==========================================================
 flask_local_processes = {}
 manager = multiprocessing.Manager() 
@@ -77,11 +80,10 @@ DEFAULT_SESSION_STATE = {
 }
 
 # (.... Persistent State Management Functions - No Change ....)
-
 def get_file_lock(f):
     """ يطبق قفل كتابة حصري على الملف """
     try:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        fcntl.flock(f.fileno(), fntcl.LOCK_EX)
     except Exception:
         pass
 
@@ -257,14 +259,21 @@ def calculate_martingale_stake(base_stake, current_step):
 
 def send_trade_orders(email, base_stake, entry_config, currency_code, is_martingale=False):
     """
-    يرسل أوامر شراء بناءً على الإشارة الديناميكية.
+    يرسل أوامر شراء بناءً على الإشارة الديناميكية (DIGITOVER/DIGITUNDER).
     """
     global is_contract_open 
     global final_check_processes 
     
-    if email not in active_ws or active_ws[email] is None: return
+    # 🚨 الفحص الأول: هل الـ WebSocket متوفر ومفتوح؟ (هذا الكود تم الإبقاء عليه لضمان عدم التعليق)
+    if email not in active_ws or active_ws[email] is None or active_ws[email].sock is None or not active_ws[email].sock.connected:
+        print(f"❌ [TRADE ERROR] WebSocket connection for {email} is not open or connected. Cannot send trade.")
+        is_contract_open[email] = False 
+        current_data = get_session_data(email)
+        current_data['tick_history'] = [] 
+        save_session_data(email, current_data)
+        return
+
     ws_app = active_ws[email]
-    
     current_data = get_session_data(email)
     
     current_data['before_trade_balance'] = current_data['current_balance'] 
@@ -289,21 +298,15 @@ def send_trade_orders(email, base_stake, entry_config, currency_code, is_marting
     
     entry_msg = f"MARTINGALE STEP {current_data['current_step']}" if is_martingale else "BASE SIGNAL"
     
-    # T1 و T2 (التيك الأخير)
-    tick_T1_price = current_data['tick_history'][0]['price'] if len(current_data['tick_history']) == TICK_HISTORY_SIZE else 0.0
-    t2_price = current_data['last_entry_price']
     
-    contract_type = entry_config['contract_type']
-    barrier = entry_config['barrier'] # هذه القيمة هي -0.6 أو +0.6
+    contract_type = entry_config['type'] # DIGITOVER/DIGITUNDER
+    target_digit = entry_config['target_digit'] # 2
     
-    # حساب الحاجز المطلق بناءً على نوع الصفقة وقيمة الحاجز
-    absolute_barrier = current_data['last_entry_price'] + barrier
+    current_data['current_contract_type'] = f"{contract_type} (Target: {target_digit})"
     
-    current_data['current_contract_type'] = f"{contract_type} @ Barrier {barrier}"
-    
-    print(f"\n💰 [TRADE START] T1 Price: {tick_T1_price:.2f} | T2 Price: {t2_price:.2f} | D2(T2): {current_data['last_entry_d2']} | Total Stake: {current_data['current_total_stake']:.2f} ({entry_msg}) | Contract: {contract_type} @ {barrier} (Absolute: {absolute_barrier:.2f}) | Duration: {DURATION} ticks")
+    print(f"\n💰 [TRADE START] D2(T2): {current_data['last_entry_d2']} | Total Stake: {current_data['current_total_stake']:.2f} ({entry_msg}) | Contract: {contract_type} (Target: {target_digit}) | Duration: {DURATION} ticks")
 
-    
+    # 🌟 التعديل هنا: استخدام target_digit بدلاً من barrier
     trade_request = {
         "buy": 1, 
         "price": rounded_stake, 
@@ -315,26 +318,31 @@ def send_trade_orders(email, base_stake, entry_config, currency_code, is_marting
             "duration_unit": DURATION_UNIT, 
             "symbol": SYMBOL, 
             "contract_type": contract_type,
-            "barrier": str(round(absolute_barrier, 2))
+            "target_digit": target_digit # نستخدم target_digit هنا
         }
     }
     
     try:
         ws_app.send(json.dumps(trade_request))
-        print(f"   [-- ENTRY] Sent {contract_type} (Absolute Barrier: {trade_request['parameters']['barrier']}) @ {rounded_stake:.2f} {currency_code}") 
+        print(f"   [-- ENTRY] Sent {contract_type} (Target Digit: {target_digit}) @ {rounded_stake:.2f} {currency_code}") 
+        
+        is_contract_open[email] = True 
+        current_data['last_entry_time'] = time.time() * 1000 
+        
     except Exception as e:
-        print(f"❌ [TRADE ERROR] Could not send trade order: {e}")
-        pass
+        print(f"❌ [TRADE ERROR] Could not send trade order during execution: {e}")
+        is_contract_open[email] = False 
+        current_data['tick_history'] = [] 
+        save_session_data(email, current_data)
+        return
             
-    is_contract_open[email] = True 
-    current_data['last_entry_time'] = time.time() * 1000 
     
     if is_martingale:
          current_data['pending_martingale'] = False 
          
     save_session_data(email, current_data) 
     
-    # بدء عملية التحقق النهائي المنفصلة (يجب أن ينتظر وقت أطول بسبب 5 تيك)
+    # بدء عملية التحقق النهائي المنفصلة
     check_time = 4000 + (DURATION * 500) 
     
     final_check = multiprocessing.Process(
@@ -347,9 +355,7 @@ def send_trade_orders(email, base_stake, entry_config, currency_code, is_marting
 
 
 def check_pnl_limits_by_balance(email, after_trade_balance): 
-    """
-    تتحقق من النتيجة وتطبق منطق المضاعفة/التوقف.
-    """
+    # (.... نفس منطق PNL - لا تغيير ...)
     global is_contract_open 
     global MARTINGALE_STEPS
     global MAX_CONSECUTIVE_LOSSES
@@ -418,14 +424,13 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
         stop_bot(email, clear_data=True, stop_reason=stop_triggered) 
         return 
 
+
 # ==========================================================
 # UTILITY FUNCTIONS FOR PRICE MOVEMENT ANALYSIS 
 # ==========================================================
 
 def get_target_digits(price):
-    """
-    يستخرج رقمين عشريين فقط (D1, D2).
-    """
+    # (.... نفس الدالة - لا تغيير ...)
     try:
         s_price = str(price)
         if '.' not in s_price:
@@ -449,8 +454,7 @@ def get_target_digits(price):
 
 def get_initial_signal_check(tick_history):
     """
-    يتحقق من شرط D2=0 للتيك الأخير (T2) ثم يقارن سعر T2 بسعر T1.
-    ويستخدم الحاجز المعكوس بناءً على الاتجاه.
+    🌟 التعديل هنا: نتحقق من D2=0 للتيك الأخير (T2) وسعر T2 > سعر T1.
     """
     if len(tick_history) != TICK_HISTORY_SIZE:
         return None
@@ -465,29 +469,25 @@ def get_initial_signal_check(tick_history):
         
     T2_D2 = T2_digits[1] # الرقم الثاني بعد الفاصلة
     
-    # 2. شرط الإشارة الأساسي: D2 يجب أن يساوي 0
+    # 1. شرط الإشارة الأساسي: D2 يجب أن يساوي 0
     if T2_D2 != TARGET_D2_THRESHOLD:
         return None # لم يتم تحقق الشرط، لا يوجد إشارة
     
-    # 3. مقارنة الأسعار للدخول في Higher أو Lower (المنطق المعكوس)
-    
-    # Higher Barrier -0.6: إذا كان T2 أكبر من T1 (السعر يرتفع)
+    # 2. شرط الدخول: سعر T2 يجب أن يكون أكبر من سعر T1 (اتجاه صعودي)
     if T2_price > T1_price:
-        return {"contract_type": "CALL", "barrier": -0.6, "T2_D2": T2_D2} 
+        # إذا تحقق D2=0 والسعر ارتفع، ندخل DIGITOVER (Target 2)
+        target_digit = TRADE_CONFIGS[0]['target_digit'] # (وهو 2)
+        return {"type": "DIGITOVER", "target_digit": target_digit, "T2_D2": T2_D2} 
         
-    # Lower Barrier +0.6: إذا كان T2 أصغر من T1 (السعر ينخفض)
-    elif T2_price < T1_price:
-        return {"contract_type": "PUT", "barrier": 0.6, "T2_D2": T2_D2}
-        
-    # إذا تساوت الأسعار
+    # إذا لم يتحقق أي من الشرطين
     else:
         return None
         
 # ==========================================================
-# SYNC BALANCE RETRIEVAL FUNCTIONS 
+# SYNC BALANCE RETRIEVAL FUNCTIONS (لا تغيير)
 # ==========================================================
-
 def get_initial_balance_sync(token):
+    # (.... نفس الدالة - لا تغيير ....)
     global WSS_URL_UNIFIED
     try:
         ws = websocket.WebSocket()
@@ -519,6 +519,7 @@ def get_initial_balance_sync(token):
         return None, f"Connection/Request Failed: {e}"
 
 def get_balance_sync(token):
+    # (.... نفس الدالة - لا تغيير ....)
     global WSS_URL_UNIFIED
     try:
         # إنشاء اتصال جديد
@@ -550,10 +551,11 @@ def get_balance_sync(token):
         return None, f"Connection/Request Failed: {e}"
         
 # ==========================================================
-# الدالة الجديدة: عملية التحقق النهائي المنفصلة
+# الدالة الجديدة: عملية التحقق النهائي المنفصلة (لا تغيير)
 # ==========================================================
 
 def final_check_process(email, token, start_time_ms, time_to_wait_ms):
+    # (.... نفس الدالة - لا تغيير ....)
     global is_contract_open
     global final_check_processes
     
@@ -593,7 +595,7 @@ def final_check_process(email, token, start_time_ms, time_to_wait_ms):
 
 
 # ==========================================================
-# CORE BOT LOGIC 
+# CORE BOT LOGIC (مع إضافة Force Reset)
 # ==========================================================
 
 def bot_core_logic(email, token, stake, tp, account_type, currency_code):
@@ -684,14 +686,12 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                 
                 current_data = get_session_data(email) 
                 
-                # --- 🚨 التعديل الحاسم: إعادة التعيين القسري (FORCE RESET) 🚨 ---
-                # إذا كان العقد يعتبر مفتوحاً ومر أكثر من 15 ثانية، قم بإعادة تعيينه قسراً.
+                # --- 🚨 كود إعادة التعيين القسري (لضمان عدم التعليق) 🚨 ---
                 if is_contract_open.get(email) is True:
                     time_since_last_entry_ms = (time.time() * 1000) - current_data['last_entry_time']
                     if time_since_last_entry_ms > 15000:
                         is_contract_open[email] = False
                         current_data['current_contract_type'] = "N/A (Force Reset)"
-                        # لا نمسح tick_history لضمان عدم حدوث D2=0 مباشرة بعد إعادة التعيين
                         save_session_data(email, current_data)
                         print("⚠️ [FORCE RESET] Contract status forcibly reset after 15 seconds timeout.")
                 # -------------------------------------------------------------
@@ -754,7 +754,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                             current_data['tick_history'].pop(0) 
 
                         
-                        # 2. التحقق من إشارة D2=0 ومقارنة الأسعار
+                        # 2. التحقق من الإشارة
                         signal_config = get_initial_signal_check(current_data['tick_history'])
                         
                         if signal_config is not None:
@@ -765,7 +765,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                             # 🛑 [تصفير بعد الدخول] 
                             current_data['tick_history'] = [] 
                             
-                            print(f"🚀 [SIGNAL CONFIRMED] T2 D2=0, Price {signal_config['contract_type']} T1. Executing {signal_config['contract_type']} @ Barrier {signal_config['barrier']} (Step: {current_data['current_step']}).")
+                            print(f"🚀 [SIGNAL CONFIRMED] T2 D2=0, Price > T1. Executing {signal_config['type']} (Target: {signal_config['target_digit']}) (Step: {current_data['current_step']}).")
 
                         else:
                             # إذا كان السجل ممتلئاً ولم تتحقق الإشارة، نحذف أقدم تيك ونستمر
@@ -821,7 +821,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
 
 
 # ==========================================================
-# FLASK APP SETUP AND ROUTES 
+# FLASK APP SETUP AND ROUTES (لا تغيير)
 # ==========================================================
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
@@ -965,7 +965,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = '2-Tick D2=' + target_d2_threshold|string + ' Confirmation then Higher(-0.6)/Lower(+0.6) | DURATION: ' + DURATION|string + ' TICKS | Max Loss: ' + max_consecutive_losses|string + ' (No Martingale)' %}
+    {% set strategy = '2-Tick D2=' + target_d2_threshold|string + ' & T2 > T1 then DigitOver ' + trade_configs[0].target_digit|string + ' | DURATION: ' + DURATION|string + ' TICKS | Max Loss: ' + max_consecutive_losses|string + ' (No Martingale)' %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     
@@ -1076,6 +1076,7 @@ CONTROL_FORM = """
     var TICK_HISTORY_SIZE = {{ TICK_HISTORY_SIZE }}; 
     var TARGET_D2_THRESHOLD = {{ TARGET_D2_THRESHOLD }}; 
     var max_consecutive_losses = {{ MAX_CONSECUTIVE_LOSSES }};
+    var trade_configs = {{ TRADE_CONFIGS | tojson }};
     
     // دالة مساعدة لواجهة المستخدم لجلب D2 
     function get_target_digits_js(price) {
@@ -1146,7 +1147,8 @@ def control_panel():
         MAX_CONSECUTIVE_LOSSES=MAX_CONSECUTIVE_LOSSES,
         is_contract_open=is_contract_open,
         TARGET_D2_THRESHOLD=TARGET_D2_THRESHOLD,
-        get_target_digits=get_target_digits 
+        get_target_digits=get_target_digits,
+        trade_configs=TRADE_CONFIGS
     )
 
 
