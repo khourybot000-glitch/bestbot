@@ -15,8 +15,8 @@ WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
 DURATION = 5            
 DURATION_UNIT = "t"
-MARTINGALE_STEPS = 0            # 👈 تم التعديل إلى 0 (لا يوجد مضاعفة)
-MAX_CONSECUTIVE_LOSSES = 1      # 👈 تم التعديل إلى 1 (إيقاف بعد خسارة واحدة متتالية)
+MARTINGALE_STEPS = 0            
+MAX_CONSECUTIVE_LOSSES = 1      
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
@@ -27,7 +27,7 @@ SYNC_SECONDS = []
 
 # إعدادات الدخول: صفقة واحدة فقط (LOWER -0.6)
 TRADE_CONFIGS = [
-    {"type": "CALL", "barrier": "-0.6", "label": "LOWER_0_6"} # 👈 تم التعديل إلى PUT و -0.6
+    {"type": "CALL", "barrier": "-0.6", "label": "LOWER_0_6"} 
 ]
 
 # ==========================================================
@@ -39,6 +39,7 @@ DEFAULT_SESSION_STATE = {
     "tp_target": 10.0,
     "current_profit": 0.0,
     "current_balance": 0.0,
+    "initial_starting_balance": 0.0, # 👈 مفتاح جديد للرصيد الأساسي عند بدء البوت
     "before_trade_balance": 0.0,
     "current_stake": 0.35,
     "current_total_stake": 0.35 * len(TRADE_CONFIGS), 
@@ -234,9 +235,8 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
 
 def calculate_martingale_stake(base_stake, current_step):
     """
-    يحسب قيمة الرهان للمضاعفة (تراكمية بعامل 6.0).
+    يحسب قيمة الرهان للمضاعفة.
     """
-    # في حال MARTINGALE_STEPS = 0، دائماً يعود للرهان الأساسي
     if current_step == 0:
         return base_stake
 
@@ -258,6 +258,7 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
 
     current_data = get_session_data(email)
 
+    # 👈 التعديل رقم 2: تحديث قبل الرصيد الحالي قبل الصفقة
     current_data['before_trade_balance'] = current_data['current_balance']
 
     if current_data['before_trade_balance'] == 0.0:
@@ -361,10 +362,14 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
         # إذا لم يكن لدينا رصيد سابق، نفترض خسارة مساوية للرهان
         print("⚠️ [PNL WARNING] Before trade balance is 0.0. Assuming loss equivalent to stake for safety.")
         total_profit_loss = -last_total_stake
+    
+    # 👈 التعديل رقم 3: يتم الآن حساب PNL لكل صفقة بشكل صحيح، ولكننا لا نستخدم current_profit
+    # بل نعتمد على مقارنة الرصيد الحالي بالرصيد الأساسي (Initial Starting Balance) في الواجهة.
+    # ومع ذلك، يجب تحديث total_profit_loss ليتم استخدامه لتحديد حالة الربح/الخسارة.
 
     overall_loss = total_profit_loss < 0
 
-    current_data['current_profit'] += total_profit_loss
+    # current_data['current_profit'] += total_profit_loss # 👈 تم إزالة هذا السطر لعدم الحاجة إليه
 
     stop_triggered = False
 
@@ -379,7 +384,11 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
         current_data['current_total_stake'] = current_data['base_stake'] * len(TRADE_CONFIGS)
         current_data['tick_history'] = []
 
-        if current_data['current_profit'] >= current_data['tp_target']:
+        # 👈 حساب صافي الربح الإجمالي للمقارنة مع TP
+        initial_balance = current_data.get('initial_starting_balance', after_trade_balance)
+        net_profit_display = after_trade_balance - initial_balance
+        
+        if net_profit_display >= current_data['tp_target']:
             stop_triggered = "TP Reached"
 
     else:
@@ -405,7 +414,7 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
                 print(f"🚨 [MARTINGALE PENDING] Overall Loss Detected. Pending Step {current_data['current_step']} @ Total Stake: {current_data['current_total_stake']:.2f}. Restarting 2-tick analysis...")
 
             else:
-                # إعادة تعيين الرهان بعد تجاوز خطوات المضاعفة (هذا هو المسار الذي سيتم اتباعه دائماً إذا كانت MARTINGALE_STEPS = 0)
+                # إعادة تعيين الرهان
                 current_data['current_stake'] = current_data['base_stake']
                 current_data['pending_martingale'] = False
                 current_data['current_total_stake'] = current_data['base_stake'] * len(TRADE_CONFIGS)
@@ -419,7 +428,7 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
 
     save_session_data(email, current_data)
 
-    print(f"[LOG {email}] PNL: {current_data['current_profit']:.2f}, Last Total PL: {total_profit_loss:.2f}, Step: {current_data['current_step']}, Last Total Stake: {last_total_stake:.2f}")
+    print(f"[LOG {email}] Last Total PL: {total_profit_loss:.2f}, Step: {current_data['current_step']}, Last Total Stake: {last_total_stake:.2f}")
 
     if stop_triggered:
         stop_bot(email, clear_data=True, stop_reason=stop_triggered)
@@ -542,7 +551,6 @@ def final_check_process(email, token, start_time_ms, time_to_wait_ms, shared_is_
 
     # 🚨🚨 ضمان تصفير حالة العقد المفتوح كخطوة أخيرة 🚨🚨
     try:
-        # التحقق من is_contract_open != None لتجنب TypeError في بيئات النشر
         if shared_is_contract_open is not None and email in shared_is_contract_open:
             shared_is_contract_open[email] = False
             print(f"✅ [FINAL CHECK] Contract status successfully reset to False for {email}.")
@@ -566,8 +574,6 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
 
     active_ws[email] = None
 
-    # 👈 التأكد من أن الحالة الابتدائية للعقد هي False (جاهز للدخول)
-    # يجب التحقق من shared_is_contract_open != None
     if shared_is_contract_open is not None:
         if email not in shared_is_contract_open:
             shared_is_contract_open[email] = False
@@ -584,7 +590,9 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
             session_data['current_balance'] = initial_balance
             session_data['currency'] = currency_returned
             session_data['is_balance_received'] = True
-
+            
+            # 👈 التعديل رقم 1: تخزين الرصيد الأساسي
+            session_data['initial_starting_balance'] = initial_balance 
             session_data['before_trade_balance'] = initial_balance
             save_session_data(email, session_data)
 
@@ -644,6 +652,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
             current_balance = data['balance']['balance']
             currency = data['balance']['currency']
 
+            # 👈 تحديث current_balance بشكل مستمر
             current_data['current_balance'] = float(current_balance)
             current_data['currency'] = currency
             current_data['is_balance_received'] = True
@@ -674,7 +683,6 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                 current_data['display_t4_price'] = current_price
 
             # 👈 قراءة القاموس المشترك لتحديد حالة العقد
-            # التحقق من is_contract_open != None لتجنب TypeError
             is_open = shared_is_contract_open.get(email) if shared_is_contract_open is not None else False
 
             if is_open is False:
@@ -964,7 +972,11 @@ CONTROL_FORM = """
             Balance BEFORE Trade: <b>{{ session_data.currency }} {{ session_data.before_trade_balance|round(2) }}</b>
         </p>
 
-        <p>Net Profit: <b>{{ session_data.currency }} {{ session_data.current_profit|round(2) }}</b></p>
+        {# 👈 التعديل رقم 3: حساب صافي الربح للمستخدم #}
+        {% set net_profit_display = (session_data.current_balance - session_data.initial_starting_balance) if session_data.current_balance and session_data.initial_starting_balance else 0.0 %}
+        <p style="font-weight: bold; color: {% if net_profit_display >= 0 %}green{% else %}red{% endif %};">
+            Net Profit: <b>{{ session_data.currency }} {{ net_profit_display|round(2) }}</b> (TP Target: {{ session_data.tp_target|round(2) }})
+        </p>
 
         <p style="font-weight: bold; color: {% if session_data.current_total_stake %}#007bff{% else %}#555{% endif %};">
             Open Contract Status:
