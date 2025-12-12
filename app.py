@@ -9,25 +9,26 @@ from flask import Flask, request, render_template_string, redirect, url_for, ses
 from datetime import datetime, timezone
 
 # ==========================================================
-# BOT CONSTANT SETTINGS 
+# BOT CONSTANT SETTINGS (MODIFIED) 
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929" 
 SYMBOL = "R_100"        
 DURATION = 1            
 DURATION_UNIT = "t"     
-MARTINGALE_STEPS = 1    
-MAX_CONSECUTIVE_LOSSES = 2 
+MARTINGALE_STEPS = 1    # 🚨 تم التعديل: خطوة مضاعفة واحدة فقط
+MAX_CONSECUTIVE_LOSSES = 2 # 🚨 تم التعديل: حد الإيقاف عند خسارتين متتاليتين
 RECONNECT_DELAY = 1      
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json" 
-TICK_HISTORY_SIZE = 4   # حجم السجل 4 تيكات
+TICK_HISTORY_SIZE = 4   
 MARTINGALE_MULTIPLIER = 6.0 
 CANDLE_TICK_SIZE = 0   
 SYNC_SECONDS = [] 
 TRADE_CONFIGS = [
-    # صفقة واحدة: OVER 2 (الرقم الأخير أكبر من 2)
-    {"type": "DIGITOVER", "target_digit": 2, "label": "OVER_2"}, 
+    # 🚨 تم التعديل: صفقة واحدة: UNDER 8 (الرقم الأخير أصغر من 8)
+    {"type": "DIGITUNDER", "target_digit": 8, "label": "UNDER_8"}, 
 ]
+TARGET_D2_THRESHOLD = 8 # 🚨 تم التعديل: يجب أن يكون D2 أصغر من 8
 
 # ==========================================================
 # BOT RUNTIME STATE 
@@ -66,7 +67,7 @@ DEFAULT_SESSION_STATE = {
     "martingale_config": TRADE_CONFIGS, 
     "display_t1_price": 0.0, 
     "display_t4_price": 0.0, 
-    "last_entry_d2": None, # تم التعديل إلى D2 للعرض
+    "last_entry_d2": None, 
     "current_total_stake": 0.0, 
     "current_balance": 0.0,
     "is_balance_received": False,  
@@ -75,7 +76,9 @@ DEFAULT_SESSION_STATE = {
     "before_trade_balance": 0.0, 
 }
 
-# (.... Persistent State Management Functions ....)
+# (.... Persistent State Management Functions - No Change ....)
+# ... (Functions: get_file_lock, release_file_lock, load_persistent_sessions, 
+# save_session_data, delete_session_data, get_session_data, load_allowed_users, stop_bot) ...
 
 def get_file_lock(f):
     """ يطبق قفل كتابة حصري على الملف """
@@ -248,10 +251,12 @@ def calculate_martingale_stake(base_stake, current_step):
     if current_step == 0:
         return base_stake
     
+    # 🚨 يتم تطبيقها الآن فقط عندما تكون current_step = 1
     if current_step <= MARTINGALE_STEPS: 
         return base_stake * (MARTINGALE_MULTIPLIER ** current_step) 
     
     else:
+        # إذا تجاوزنا خطوة المضاعفة المسموحة (وهي خطوة واحدة الآن)، نعود للرهان الأساسي
         return base_stake
 
 
@@ -287,7 +292,7 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
     current_data['last_entry_price'] = current_data['last_tick_data']['price'] if current_data.get('last_tick_data') else 0.0
     
     entry_digits = get_target_digits(current_data['last_entry_price'])
-    # 🚨 D2 هو الرقم الثاني (index 1)
+    # D2 هو الرقم الثاني (index 1)
     current_data['last_entry_d2'] = entry_digits[1] if len(entry_digits) > 1 else 'N/A' 
     
     current_data['open_contract_ids'] = [] 
@@ -324,7 +329,8 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
         
         try:
             ws_app.send(json.dumps(trade_request))
-            print(f"   [-- {label}] Sent {contract_type} (Barrier: {target_digit}) @ {rounded_stake:.2f} {currency_code}")
+            # 🚨 تم تحديث الرسالة إلى UNDER 8
+            print(f"   [-- {label}] Sent {contract_type} (Barrier: {target_digit}) @ {rounded_stake:.2f} {currency_code}") 
         except Exception as e:
             print(f"❌ [TRADE ERROR] Could not send trade order for {label}: {e}")
             pass
@@ -404,15 +410,15 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
         current_data['total_losses'] += 1
         current_data['consecutive_losses'] += 1
         
-        # التحقق من شرط الإيقاف (SL) أولاً قبل أي تصفير
+        # 🚨 التحقق من شرط الإيقاف (SL) أولاً قبل أي تصفير
         if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES: 
             stop_triggered = f"SL Reached ({MAX_CONSECUTIVE_LOSSES} Consecutive Losses)"
         
         # إذا لم يتم الإيقاف، نتقدم إلى خطوة المضاعفة التالية (مع انتظار الإشارة)
         else:
-            # إذا كنا ما زلنا ضمن خطوات المضاعفة
+            # 🚨 إذا كنا ما زلنا ضمن خطوات المضاعفة (الآن: 0 فقط مسموح بالدخول)
             if current_data['current_step'] < MARTINGALE_STEPS:
-                current_data['current_step'] += 1
+                current_data['current_step'] += 1 # سيصبح 1
                 new_stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
                 
                 current_data['current_stake'] = new_stake
@@ -421,16 +427,16 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
                 current_data['current_total_stake'] = new_stake * len(TRADE_CONFIGS)
                 current_data['martingale_config'] = TRADE_CONFIGS 
                 
-                print(f"🚨 [MARTINGALE PENDING] Overall Loss Detected. Pending Step {current_data['current_step']} @ Total Stake: {current_data['current_total_stake']:.2f}. Restarting 4-tick analysis (D2 < 4)...")
+                print(f"🚨 [MARTINGALE PENDING] Overall Loss Detected. Pending Step {current_data['current_step']} @ Total Stake: {current_data['current_total_stake']:.2f}. Restarting 4-tick analysis (D2 < {TARGET_D2_THRESHOLD})...")
 
-            # إذا تجاوزنا خطوات المضاعفة ولم نصل إلى حد الإيقاف (للتأمين)
+            # إذا تجاوزنا خطوات المضاعفة المسموحة (أي current_step >= 1 بعد الخسارة الأولى)
             else:
                 # إعادة التعيين والعودة للبحث عن إشارة أساسية جديدة
                 current_data['current_stake'] = current_data['base_stake']
                 current_data['pending_martingale'] = False
                 current_data['current_total_stake'] = current_data['base_stake'] * len(TRADE_CONFIGS)
                 current_data['current_step'] = 0
-                current_data['consecutive_losses'] = 0
+                current_data['consecutive_losses'] = 0 # يجب أن يتم إيقاف البوت عند هذا الحد بالفعل بسبب SL
 
         # مسح السجل بعد الخسارة لفرض جمع 4 تيكات جديدة للبحث عن الإشارة
         current_data['tick_history'] = [] 
@@ -483,8 +489,10 @@ def get_target_digits(price):
 
 def get_initial_signal_check(tick_history):
     """
-    يتحقق من الإشارة: T1 D2 < 4 و T2 D2 < 4 و T3 D2 < 4 و T4 D2 < 4.
+    🚨 يتحقق من الإشارة: T1 D2 < 8 و T2 D2 < 8 و T3 D2 < 8 و T4 D2 < 8.
     """
+    global TARGET_D2_THRESHOLD
+    
     # التحقق من الحجم (4 تيكات)
     if len(tick_history) != TICK_HISTORY_SIZE:
         return False
@@ -502,20 +510,20 @@ def get_initial_signal_check(tick_history):
         if len(digits) < 2:
             return False 
             
-        # 🚨 الرقم الثاني بعد الفاصلة (D2) هو العنصر في المؤشر [1]
+        # الرقم الثاني بعد الفاصلة (D2) هو العنصر في المؤشر [1]
         last_digits_d2.append(digits[1]) 
     
     
-    # التحقق من الشرط: كل D2 يجب أن يكون أصغر من 4 (أي 0, 1, 2, 3)
-    all_under_4 = all(d < 4 for d in last_digits_d2)
+    # 🚨 التحقق من الشرط: كل D2 يجب أن يكون أصغر من 8 (أي 0, 1, ..., 7)
+    all_under_target = all(d < TARGET_D2_THRESHOLD for d in last_digits_d2)
     
-    if all_under_4:
+    if all_under_target:
         # إذا تحقق الشرط، نعيد الرقم D2 للتيك الأخير (T4) لأغراض التتبع/التأكيد
         return last_digits_d2[-1] 
     else:
         return False
         
-# ... (باقي دوال SYNC BALANCE RETRIEVAL) ...
+# ... (باقي دوال SYNC BALANCE RETRIEVAL - No Change) ...
 
 def get_initial_balance_sync(token):
     global WSS_URL_UNIFIED
@@ -781,7 +789,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                             current_data['tick_history'].pop(0) 
 
                         
-                        # 2. التحقق من إشارة T1, T2, T3, T4 < 4 (D2)
+                        # 2. التحقق من إشارة T1, T2, T3, T4 < 8 (D2)
                         initial_signal_d2 = get_initial_signal_check(current_data['tick_history'])
                         
                         if initial_signal_d2 is not False:
@@ -792,7 +800,8 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                             # 🛑 [تصفير بعد الدخول] 
                             current_data['tick_history'] = [] # تصفير سجل التيكس للبدء من جديد
                             
-                            print(f"🚀 [SIGNAL CONFIRMED] T1-T4 D2 < 4 (Last D2: {initial_signal_d2}). Executing OVER 2 trade (Step: {current_data['current_step']}).")
+                            # 🚨 تم تحديث رسالة التأكيد
+                            print(f"🚀 [SIGNAL CONFIRMED] T1-T4 D2 < {TARGET_D2_THRESHOLD} (Last D2: {initial_signal_d2}). Executing UNDER 8 trade (Step: {current_data['current_step']}).")
 
                         else:
                             # إذا كان السجل ممتلئاً ولم تتحقق الإشارة، نحذف أقدم تيك ونستمر
@@ -994,7 +1003,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = '4-Tick D2 < 4 Confirmation then OVER 2 Entry | DURATION: 1 TICK | Martingale: Signal Confirmed (Steps=' + max_martingale_step|string + ', Multiplier=' + martingale_multiplier|string + ')' %}
+    {% set strategy = '4-Tick D2 < ' + target_d2_threshold|string + ' Confirmation then UNDER 8 Entry | DURATION: 1 TICK | Max Martingale: ' + max_martingale_step|string + ' (Multiplier: ' + martingale_multiplier|string + ')' %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     
@@ -1113,6 +1122,7 @@ CONTROL_FORM = """
     var SYMBOL = "{{ SYMBOL }}";
     var DURATION = {{ DURATION }};
     var TICK_HISTORY_SIZE = {{ TICK_HISTORY_SIZE }}; 
+    var TARGET_D2_THRESHOLD = {{ TARGET_D2_THRESHOLD }}; 
     
     function autoRefresh() {
         // نعتمد فقط على حالة التشغيل لتقرير التحديث التلقائي
@@ -1157,7 +1167,8 @@ def control_panel():
         max_martingale_step=MARTINGALE_STEPS,
         martingale_multiplier=MARTINGALE_MULTIPLIER,
         max_consecutive_losses=MAX_CONSECUTIVE_LOSSES,
-        is_contract_open=is_contract_open
+        is_contract_open=is_contract_open,
+        TARGET_D2_THRESHOLD=TARGET_D2_THRESHOLD # تمرير الحد الجديد لواجهة المستخدم
     )
 
 
