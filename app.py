@@ -15,8 +15,8 @@ WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
 DURATION = 5            
 DURATION_UNIT = "t"
-MARTINGALE_STEPS = 0
-MAX_CONSECUTIVE_LOSSES = 1
+MARTINGALE_STEPS = 0            # 👈 تم التعديل إلى 0 (لا يوجد مضاعفة)
+MAX_CONSECUTIVE_LOSSES = 1      # 👈 تم التعديل إلى 1 (إيقاف بعد خسارة واحدة متتالية)
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
@@ -25,9 +25,9 @@ MARTINGALE_MULTIPLIER = 6.0
 CANDLE_TICK_SIZE = 0
 SYNC_SECONDS = []
 
-# إعدادات الدخول لصفقة واحدة فقط (HIGHER +0.6)
+# إعدادات الدخول: صفقة واحدة فقط (LOWER -0.6)
 TRADE_CONFIGS = [
-    {"type": "CALL", "barrier": "-0.6", "label": "HIGHER_0_6"} 
+    {"type": "CALL", "barrier": "-0.6", "label": "LOWER_0_6"} # 👈 تم التعديل إلى PUT و -0.6
 ]
 
 # ==========================================================
@@ -41,7 +41,7 @@ DEFAULT_SESSION_STATE = {
     "current_balance": 0.0,
     "before_trade_balance": 0.0,
     "current_stake": 0.35,
-    "current_total_stake": 0.35 * len(TRADE_CONFIGS),
+    "current_total_stake": 0.35 * len(TRADE_CONFIGS), 
     "current_step": 0,
     "consecutive_losses": 0,
     "total_wins": 0,
@@ -65,12 +65,11 @@ DEFAULT_SESSION_STATE = {
     "display_t4_price": 0.0,
 }
 
-# المتغيرات العالمية لعملية Flask الرئيسية
-# سيتم تهيئة is_contract_open كقاموس مشترك في __main__
+# المتغيرات العالمية لعملية Flask الرئيسية (سيتم تهيئتها قبل بدء تشغيل Flask)
 flask_local_processes = {}
 final_check_processes = {}
-active_ws = {} # هذا يُدار محلياً داخل كل عملية بوت
-is_contract_open = None # 👈 تم تعيينه لـ None وسيتم تعريفه كقاموس مشترك لاحقاً
+active_ws = {} 
+is_contract_open = None 
 # ==========================================================
 
 
@@ -81,7 +80,7 @@ is_contract_open = None # 👈 تم تعيينه لـ None وسيتم تعريف
 def get_file_lock(f):
     """ يطبق قفل كتابة حصري على الملف """
     try:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX) 
     except Exception:
         pass
 
@@ -97,9 +96,9 @@ def load_persistent_sessions():
     if not os.path.exists(ACTIVE_SESSIONS_FILE):
         return {}
 
-    with open(ACTIVE_SESSIONS_FILE, 'a+') as f:
-        f.seek(0)
+    with open(ACTIVE_SESSIONS_FILE, 'r+') as f: 
         get_file_lock(f)
+        f.seek(0)
         try:
             content = f.read()
             if content:
@@ -150,7 +149,8 @@ def get_session_data(email):
     all_sessions = load_persistent_sessions()
     if email in all_sessions:
         data = all_sessions[email]
-        for key, default_val in DEFAULT_SESSION_STATE.items():
+        # لضمان وجود جميع المفاتيح الجديدة (مهم للتحديثات)
+        for key, default_val in DEFAULT_SESSION_STATE.items(): 
             if key not in data:
                 data[key] = default_val
         return data
@@ -220,6 +220,7 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
         delete_session_data(email) # 🧹 مسح ملف الجلسة
         print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}) and session data cleared from file.")
 
+        # نكتب بيانات جديدة نظيفة لضمان عدم تعليق الواجهة
         temp_data = DEFAULT_SESSION_STATE.copy()
         temp_data["stop_reason"] = stop_reason
         save_session_data(email, temp_data)
@@ -235,6 +236,7 @@ def calculate_martingale_stake(base_stake, current_step):
     """
     يحسب قيمة الرهان للمضاعفة (تراكمية بعامل 6.0).
     """
+    # في حال MARTINGALE_STEPS = 0، دائماً يعود للرهان الأساسي
     if current_step == 0:
         return base_stake
 
@@ -245,7 +247,6 @@ def calculate_martingale_stake(base_stake, current_step):
         return base_stake
 
 
-# 👈 تمرير القاموس المشترك كـ وسيط جديد
 def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martingale=False, shared_is_contract_open=None):
     """
     يرسل أوامر شراء (صفقة واحدة) في نفس اللحظة.
@@ -271,7 +272,8 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
     rounded_stake = round(stake_per_contract, 2)
 
     current_data['current_stake'] = rounded_stake
-    current_data['current_total_stake'] = rounded_stake * len(trade_configs)
+    # في حالة الصفقات المتعددة، نستخدم الرهان لكل صفقة
+    current_data['current_total_stake'] = rounded_stake * len(trade_configs) 
     current_data['last_entry_price'] = current_data['last_tick_data']['price'] if current_data.get('last_tick_data') else 0.0
 
     entry_digits = get_target_digits(current_data['last_entry_price'])
@@ -326,7 +328,8 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
 
     save_session_data(email, current_data)
 
-    check_time = 16000
+    # الانتظار لمدة كافية لانتهاء الصفقة (5 تيكس) + هامش أمان (16 ثانية)
+    check_time = 16000 
 
     # 👈 تمرير القاموس المشترك إلى عملية التحقق النهائي
     final_check = multiprocessing.Process(
@@ -355,6 +358,7 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
         total_profit_loss = after_trade_balance - before_trade_balance
         print(f"** [PNL Calc] After Balance: {after_trade_balance:.2f} - Before Balance: {before_trade_balance:.2f} = PL: {total_profit_loss:.2f}")
     else:
+        # إذا لم يكن لدينا رصيد سابق، نفترض خسارة مساوية للرهان
         print("⚠️ [PNL WARNING] Before trade balance is 0.0. Assuming loss equivalent to stake for safety.")
         total_profit_loss = -last_total_stake
 
@@ -365,6 +369,7 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
     stop_triggered = False
 
     if not overall_loss:
+        # ربح
         current_data['total_wins'] += 1
         current_data['current_step'] = 0
         current_data['consecutive_losses'] = 0
@@ -378,6 +383,7 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
             stop_triggered = "TP Reached"
 
     else:
+        # خسارة
         current_data['total_losses'] += 1
         current_data['consecutive_losses'] += 1
 
@@ -386,6 +392,7 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
 
         else:
             if current_data['current_step'] < MARTINGALE_STEPS:
+                # مضاعفة (لن تحدث إذا كانت MARTINGALE_STEPS = 0)
                 current_data['current_step'] += 1
                 new_stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
 
@@ -398,6 +405,7 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
                 print(f"🚨 [MARTINGALE PENDING] Overall Loss Detected. Pending Step {current_data['current_step']} @ Total Stake: {current_data['current_total_stake']:.2f}. Restarting 2-tick analysis...")
 
             else:
+                # إعادة تعيين الرهان بعد تجاوز خطوات المضاعفة (هذا هو المسار الذي سيتم اتباعه دائماً إذا كانت MARTINGALE_STEPS = 0)
                 current_data['current_stake'] = current_data['base_stake']
                 current_data['pending_martingale'] = False
                 current_data['current_total_stake'] = current_data['base_stake'] * len(TRADE_CONFIGS)
@@ -426,6 +434,7 @@ def get_target_digits(price):
     يستخرج الأرقام العشرية من سعر التيك، مع الاقتصار على رقمين بعد الفاصلة.
     """
     try:
+        # تنسيق السعر لضمان وجود خانتين عشريتين
         formatted_price = "{:.2f}".format(float(price)) 
 
         if '.' in formatted_price:
@@ -505,7 +514,6 @@ def get_balance_sync(token):
 # عملية التحقق النهائي المنفصلة (Final Check)
 # ==========================================================
 
-# 👈 إضافة القاموس المشترك كوسيط
 def final_check_process(email, token, start_time_ms, time_to_wait_ms, shared_is_contract_open):
     """
     عملية منفصلة تنتظر فترة محددة ثم تتحقق من الرصيد وتحسب PNL وتُعيد تعيين حالة العقد.
@@ -534,6 +542,7 @@ def final_check_process(email, token, start_time_ms, time_to_wait_ms, shared_is_
 
     # 🚨🚨 ضمان تصفير حالة العقد المفتوح كخطوة أخيرة 🚨🚨
     try:
+        # التحقق من is_contract_open != None لتجنب TypeError في بيئات النشر
         if shared_is_contract_open is not None and email in shared_is_contract_open:
             shared_is_contract_open[email] = False
             print(f"✅ [FINAL CHECK] Contract status successfully reset to False for {email}.")
@@ -550,7 +559,6 @@ def final_check_process(email, token, start_time_ms, time_to_wait_ms, shared_is_
 # CORE BOT LOGIC
 # ==========================================================
 
-# 👈 إضافة القاموس المشترك كوسيط
 def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_is_contract_open):
     """ Main bot logic for a single user/session. """
     global active_ws
@@ -559,10 +567,12 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
     active_ws[email] = None
 
     # 👈 التأكد من أن الحالة الابتدائية للعقد هي False (جاهز للدخول)
-    if email not in shared_is_contract_open:
-        shared_is_contract_open[email] = False
-    else:
-        shared_is_contract_open[email] = False
+    # يجب التحقق من shared_is_contract_open != None
+    if shared_is_contract_open is not None:
+        if email not in shared_is_contract_open:
+            shared_is_contract_open[email] = False
+        else:
+            shared_is_contract_open[email] = False
 
     session_data = get_session_data(email)
 
@@ -658,19 +668,24 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
 
             if len(current_data['tick_history']) >= TICK_HISTORY_SIZE:
                 current_data['display_t1_price'] = current_data['tick_history'][0]['price']
-                current_data['display_t4_price'] = current_data['tick_history'][1]['price']
+                current_data['display_t4_price'] = current_data['tick_history'][1]['price'] # T2 in 2-tick logic
             else:
                 current_data['display_t1_price'] = 0.0
                 current_data['display_t4_price'] = current_price
 
             # 👈 قراءة القاموس المشترك لتحديد حالة العقد
-            if shared_is_contract_open.get(email) is False:
+            # التحقق من is_contract_open != None لتجنب TypeError
+            is_open = shared_is_contract_open.get(email) if shared_is_contract_open is not None else False
+
+            if is_open is False:
 
                 current_time_ms = time.time() * 1000
                 time_since_last_entry_ms = current_time_ms - current_data['last_entry_time']
-                is_time_gap_respected = time_since_last_entry_ms > 5000
+                # انتظار 5 ثواني كحد أدنى بين الصفقات
+                is_time_gap_respected = time_since_last_entry_ms > 5000 
 
                 if not is_time_gap_respected:
+                    # نُبقي فقط على آخر عدد مطلوب من التيكس إذا كان الفارق الزمني لم يُحترم
                     if len(current_data['tick_history']) > TICK_HISTORY_SIZE:
                         current_data['tick_history'].pop(0)
                     save_session_data(email, current_data)
@@ -684,8 +699,10 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
 
                     digits_T2 = get_target_digits(tick_T2_price)
 
+                    # الشرط 1: T2 > T1
                     condition_T2_greater_than_T1 = tick_T2_price > tick_T1_price
 
+                    # الشرط 2: T2 D2 = 0
                     condition_T2_D2_is_0 = False
                     digit_T2_D2 = 'N/A'
                     if len(digits_T2) >= 2:
@@ -693,10 +710,11 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                         if digit_T2_D2 == 0:
                             condition_T2_D2_is_0 = True
 
+                    # 👈 تطبيق منطق الدخول
                     if condition_T2_D2_is_0 and condition_T2_greater_than_T1:
-
+                        # 🚀 إشارة دخول قوية
                         is_martingale = current_data['current_step'] > 0
-                        execute_multi_trade(email, current_data, is_martingale=is_martingale) # 👈 تستدعي الدالة التي تستخدم القاموس المشترك
+                        execute_multi_trade(email, current_data, is_martingale=is_martingale) 
 
                         current_data['tick_history'] = []
 
@@ -899,7 +917,7 @@ CONTROL_FORM = """
     {% set contract_label = TRADE_CONFIGS[0]['label'] %}
     {% set contract_barrier = TRADE_CONFIGS[0]['barrier'] %}
 
-    {% set strategy = 'Immediate Entry: (T2 D2=0 AND T2 > T1) | Ticks: ' + TICK_HISTORY_SIZE|string + ' | Contract: ' + contract_label + ' (Offset: ' + contract_barrier + ') | Duration: ' + DURATION|string + ' Ticks | Martingale: Signal Confirmed (Steps=' + max_martingale_step|string + ', Multiplier=' + martingale_multiplier|string + ')' %}
+    {% set strategy = 'Immediate Entry: (T2 D2=0 AND T2 > T1) | Ticks: ' + TICK_HISTORY_SIZE|string + ' | Contract: ' + contract_label + ' (Offset: ' + contract_barrier + ') | Duration: ' + DURATION|string + ' Ticks | Martingale: Off (Max Steps=' + max_martingale_step|string + ')' %}
 
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
 
@@ -951,7 +969,9 @@ CONTROL_FORM = """
         <p style="font-weight: bold; color: {% if session_data.current_total_stake %}#007bff{% else %}#555{% endif %};">
             Open Contract Status:
             <b>
-            {% if is_contract_open is not none and is_contract_open.get(email) %}
+            {# يتم التحقق من is_contract_open != none لتجنب الأخطاء في Gunicorn #}
+            {% set is_open = is_contract_open.get(email) if is_contract_open is not none else false %}
+            {% if is_open %}
                 Waiting 16s Check (Stake: {{ session_data.current_total_stake|round(2) }})
             {% else %}
                 0 (Ready for Signal/Martingale)
@@ -962,7 +982,8 @@ CONTROL_FORM = """
         <p style="font-weight: bold; color: {% if session_data.current_step > 0 %}#ff5733{% else %}#555{% endif %};">
             Trade Status:
             <b>
-                {% if is_contract_open is not none and is_contract_open.get(email) %}
+                {% set is_open = is_contract_open.get(email) if is_contract_open is not none else false %}
+                {% if is_open %}
                     Awaiting 16s Balance Check (Stake: {{ session_data.current_total_stake|round(2) }})
                 {% elif session_data.current_step > 0 %}
                     MARTINGALE STEP {{ session_data.current_step }} @ Stake: {{ session_data.current_stake|round(2) }} (Searching 2-Tick Signal)
@@ -1056,7 +1077,7 @@ def control_panel():
     email = session['email']
     session_data = get_session_data(email)
 
-    # لا حاجة لـ global is_contract_open هنا للقراءة
+    # is_contract_open يأتي مباشرة من النطاق العام بعد تهيئته كـ manager.dict()
     
     return render_template_string(CONTROL_FORM,
         email=email,
@@ -1134,6 +1155,11 @@ def start_bot():
         })
         save_session_data(email, initial_data)
 
+        # التحقق مرة أخرى من تهيئة القاموس المشترك
+        if is_contract_open is None:
+             flash("Bot initialization failed (Shared state manager not ready). Please restart the service.", 'error')
+             return redirect(url_for('control_panel'))
+        
         # 👈 تمرير القاموس المشترك إلى عملية البوت
         process = multiprocessing.Process(
             target=bot_core_logic,
@@ -1164,19 +1190,28 @@ def stop_route():
     flash(f"Bot stopped and {'session cleared' if clear_data_on_stop else 'state saved'}.", 'info')
     return redirect(url_for('control_panel'))
 
-if __name__ == '__main__':
-    # 🚨🚨 التعديل الحاسم: إزالة 'global is_contract_open' لحل الـ SyntaxError 🚨🚨
+# ==========================================================
+# Gunicorn/Local Execution Entry Point & Shared State Setup
+# ==========================================================
+
+# 🚨🚨 الإصلاح الحاسم لمشكلة Gunicorn/TypeError: 
+# تهيئة Manager والقواميس المشتركة في النطاق العام
+try:
     manager = multiprocessing.Manager()
-    
-    # القاموس المشترك لحالة العقد المفتوح
-    # is_contract_open تم تعريفه كمتغير عام بالفعل في السطر 71 (is_contract_open = None)
     is_contract_open = manager.dict() 
-    
-    # القواميس الأخرى التي تتعامل مع Process objects (تبقى قواميس عادية في العملية الرئيسية)
+except Exception as e:
+    # هذا يمنع تعليق التطبيق إذا فشل Manager في بعض البيئات
+    print(f"⚠️ [MANAGER INIT] Multiprocessing Manager failed to initialize: {e}. Defaulting shared state to None.")
+    is_contract_open = None
+
+# ----------------------------------------------------------
+
+if __name__ == '__main__':
+    # تهيئة القواميس العادية في النطاق الرئيسي فقط
     flask_local_processes = {}
     final_check_processes = {}
 
-    # Initial cleanup of old processes
+    # Initial cleanup of old processes (للتشغيل المحلي)
     for email in list(flask_local_processes.keys()):
         if flask_local_processes[email].is_alive():
             flask_local_processes[email].terminate()
