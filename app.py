@@ -27,7 +27,7 @@ SYNC_SECONDS = []
 
 # إعدادات الدخول لصفقة واحدة فقط (HIGHER +0.6)
 TRADE_CONFIGS = [
-    {"type": "PUT", "barrier": "+0.6", "label": "HIGHER_0_6"} 
+    {"type": "CALL", "barrier": "-0.6", "label": "HIGHER_0_6"} 
 ]
 
 # ==========================================================
