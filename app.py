@@ -176,7 +176,7 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
     """
     global flask_local_processes
     global final_check_processes
-    global is_contract_open # 👈 الآن هو القاموس المشترك
+    global is_contract_open 
 
     current_data = get_session_data(email)
     current_data["is_running"] = False
@@ -1056,9 +1056,8 @@ def control_panel():
     email = session['email']
     session_data = get_session_data(email)
 
-    # 🚨 تم إزالة global is_contract_open من هنا لحل الـ SyntaxError.
-    # المتغير is_contract_open معرف في النطاق العام ويمكن قراءته مباشرة.
-
+    # لا حاجة لـ global is_contract_open هنا للقراءة
+    
     return render_template_string(CONTROL_FORM,
         email=email,
         session_data=session_data,
@@ -1068,7 +1067,7 @@ def control_panel():
         max_martingale_step=MARTINGALE_STEPS,
         martingale_multiplier=MARTINGALE_MULTIPLIER,
         max_consecutive_losses=MAX_CONSECUTIVE_LOSSES,
-        is_contract_open=is_contract_open, # 👈 استخدامه للقراءة صحيح
+        is_contract_open=is_contract_open, 
         TRADE_CONFIGS=TRADE_CONFIGS
     )
 
@@ -1166,11 +1165,11 @@ def stop_route():
     return redirect(url_for('control_panel'))
 
 if __name__ == '__main__':
-    # 🚨🚨 التعديل الذي يحل الـ SyntaxError: إزالة 'global' من هنا 🚨🚨
+    # 🚨🚨 التعديل الحاسم: إزالة 'global is_contract_open' لحل الـ SyntaxError 🚨🚨
     manager = multiprocessing.Manager()
     
     # القاموس المشترك لحالة العقد المفتوح
-    global is_contract_open # ❌ تم تعريفه هنا كعام، لذا لا يجب استخدام global مرة أخرى
+    # is_contract_open تم تعريفه كمتغير عام بالفعل في السطر 71 (is_contract_open = None)
     is_contract_open = manager.dict() 
     
     # القواميس الأخرى التي تتعامل مع Process objects (تبقى قواميس عادية في العملية الرئيسية)
