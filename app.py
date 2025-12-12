@@ -21,7 +21,7 @@ RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json" 
 TICK_HISTORY_SIZE = 2   
-MARTINGALE_MULTIPLIER = 6.0 # لم يعد يستخدم
+MARTINGALE_MULTIPLIER = 6.0 
 CANDLE_TICK_SIZE = 0   
 SYNC_SECONDS = [] 
 TRADE_CONFIGS = [ 
@@ -296,7 +296,7 @@ def send_trade_orders(email, base_stake, entry_config, currency_code, is_marting
     contract_type = entry_config['contract_type']
     barrier = entry_config['barrier'] # هذه القيمة هي -0.6 أو +0.6
     
-    # حساب الحاجز المطلق بناءً على نوع الصفقة وقيمة الحاجز (لضمان الحاجز المعكوس)
+    # حساب الحاجز المطلق بناءً على نوع الصفقة وقيمة الحاجز
     absolute_barrier = current_data['last_entry_price'] + barrier
     
     current_data['current_contract_type'] = f"{contract_type} @ Barrier {barrier}"
@@ -335,7 +335,6 @@ def send_trade_orders(email, base_stake, entry_config, currency_code, is_marting
     save_session_data(email, current_data) 
     
     # بدء عملية التحقق النهائي المنفصلة (يجب أن ينتظر وقت أطول بسبب 5 تيك)
-    # وقت الانتظار: 4 ثواني + 0.5 ثانية لكل تيك
     check_time = 4000 + (DURATION * 500) 
     
     final_check = multiprocessing.Process(
@@ -369,7 +368,6 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
         print(f"** [PNL Calc] After Balance: {after_trade_balance:.2f} - Before Balance: {before_trade_balance:.2f} = PL: {total_profit_loss:.2f}")
     else:
         print("⚠️ [PNL WARNING] Before trade balance is 0.0. Assuming loss equivalent to stake for safety.")
-        # هذه الحالة لن تحدث عادةً إذا كان الرصيد الأولي قد تم جلبه
         total_profit_loss = -last_total_stake 
 
     overall_loss = total_profit_loss < 0 
@@ -546,7 +544,7 @@ def get_balance_sync(token):
             balance = balance_response.get('balance', {}).get('balance')
             return float(balance), None 
 
-        return None, "Balance response invalid"
+        return None, f"Balance response invalid: {balance_response}"
 
     except Exception as e:
         return None, f"Connection/Request Failed: {e}"
@@ -618,12 +616,9 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
         initial_balance, currency_returned = get_initial_balance_sync(token) 
         
         if initial_balance is not None:
-            # 1. تحديث الرصيد الحالي
             session_data['current_balance'] = initial_balance
             session_data['currency'] = currency_returned 
             session_data['is_balance_received'] = True
-            
-            # ضمان حفظ الرصيد الأولي كمرجع قبل الدخول في أي صفقة
             session_data['before_trade_balance'] = initial_balance 
             save_session_data(email, session_data) 
             
@@ -639,10 +634,8 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
         stop_bot(email, stop_reason="Balance Retrieval Failed")
         return
 
-    # إعادة جلب البيانات التي تم حفظها للتو لضمان التزامن
     session_data = get_session_data(email)
     
-    # تحديث باقي البيانات بناءً على الجلسة الجديدة والبيانات التي تم جلبها
     session_data.update({
         "api_token": token, "base_stake": stake, "tp_target": tp,
         "is_running": True, 
@@ -658,7 +651,6 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
         if not current_data.get('is_running'):
             break
 
-        # 🌟 محاولة إعادة الاتصال بـ WebSocket إذا كان غير متصل
         if active_ws.get(email) is None:
             print(f"🔗 [PROCESS] Attempting to connect for {email} to {WSS_URL_UNIFIED}...")
 
@@ -683,7 +675,6 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
             def execute_multi_trade(email, current_data, entry_config, is_martingale=False):
                 base_stake_to_use = current_data['base_stake']
                 currency_code = current_data['currency']
-                # نمرر إعدادات الدخول الديناميكية المستخلصة من التحليل
                 send_trade_orders(email, base_stake_to_use, entry_config, currency_code, is_martingale=is_martingale)
                 
 
@@ -692,6 +683,18 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                 msg_type = data.get('msg_type')
                 
                 current_data = get_session_data(email) 
+                
+                # --- 🚨 التعديل الحاسم: إعادة التعيين القسري (FORCE RESET) 🚨 ---
+                # إذا كان العقد يعتبر مفتوحاً ومر أكثر من 15 ثانية، قم بإعادة تعيينه قسراً.
+                if is_contract_open.get(email) is True:
+                    time_since_last_entry_ms = (time.time() * 1000) - current_data['last_entry_time']
+                    if time_since_last_entry_ms > 15000:
+                        is_contract_open[email] = False
+                        current_data['current_contract_type'] = "N/A (Force Reset)"
+                        # لا نمسح tick_history لضمان عدم حدوث D2=0 مباشرة بعد إعادة التعيين
+                        save_session_data(email, current_data)
+                        print("⚠️ [FORCE RESET] Contract status forcibly reset after 15 seconds timeout.")
+                # -------------------------------------------------------------
                 
                 if not current_data.get('is_running'):
                     ws_app.close() 
@@ -713,7 +716,6 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                     current_timestamp = int(data['tick']['epoch'])
                     current_price = float(data['tick']['quote'])
                     
-                    # استخراج D2
                     processed_digits = get_target_digits(current_price) 
                     
                     tick_data = {
@@ -738,6 +740,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                         
                         current_time_ms = time.time() * 1000
                         time_since_last_entry_ms = current_time_ms - current_data['last_entry_time']
+                        # يجب أن يسمح بالدخول بعد 0.1 ثانية على الأقل
                         is_time_gap_respected = time_since_last_entry_ms > 100 
                         
                         if not is_time_gap_respected:
@@ -1003,7 +1006,7 @@ CONTROL_FORM = """
         
         <p style="font-weight: bold; color: {% if session_data.current_total_stake %}#007bff{% else %}#555{% endif %};">
             Open Contract Status: 
-            <b>{% if is_contract_open.get(email) %}Waiting Check (Stake: {{ session_data.current_total_stake|round(2) }}){% else %}0 (Ready for Signal){% endif %}</b>
+            <b>{% if is_contract_open.get(email) %}Waiting Check (Contract: {{ session_data.current_contract_type }}){% else %}0 (Ready for Signal){% endif %}</b>
         </p>
         
         <p style="font-weight: bold; color: {% if session_data.current_step > 0 %}#ff5733{% else %}#555{% endif %};">
@@ -1077,7 +1080,7 @@ CONTROL_FORM = """
     // دالة مساعدة لواجهة المستخدم لجلب D2 
     function get_target_digits_js(price) {
         if (!price) return [];
-        var s_price = price.toFixed(2); 
+        var s_price = price.toFixed(3); 
         var parts = s_price.split('.');
         if (parts.length > 1 && parts[1].length >= 2) {
             return [parseInt(parts[1][0]), parseInt(parts[1][1])];
@@ -1085,7 +1088,6 @@ CONTROL_FORM = """
         return [];
     }
     
-    // 🚨 لضمان عمل الدالة المساعدة في Flask (على الرغم من استخدام البايثون في القالب)
     var get_target_digits_func = function(price) {
         {% raw %}
         var price_str = price.toFixed(3);
@@ -1144,7 +1146,7 @@ def control_panel():
         MAX_CONSECUTIVE_LOSSES=MAX_CONSECUTIVE_LOSSES,
         is_contract_open=is_contract_open,
         TARGET_D2_THRESHOLD=TARGET_D2_THRESHOLD,
-        get_target_digits=get_target_digits # لتمرير الدالة إلى القالب
+        get_target_digits=get_target_digits 
     )
 
 
