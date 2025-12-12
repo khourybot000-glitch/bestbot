@@ -9,26 +9,25 @@ from flask import Flask, request, render_template_string, redirect, url_for, ses
 from datetime import datetime, timezone
 
 # ==========================================================
-# BOT CONSTANT SETTINGS (MODIFIED) 
+# BOT CONSTANT SETTINGS (FINAL CONFIGURATION)
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929" 
 SYMBOL = "R_100"        
-DURATION = 1            
+DURATION = 5            # 🚨 مدة الصفقة 5 تيكات
 DURATION_UNIT = "t"     
-MARTINGALE_STEPS = 1    # 🚨 تم التعديل: خطوة مضاعفة واحدة فقط
-MAX_CONSECUTIVE_LOSSES = 2 # 🚨 تم التعديل: حد الإيقاف عند خسارتين متتاليتين
+MARTINGALE_STEPS = 0    # 🚨 لا مضاعفة
+MAX_CONSECUTIVE_LOSSES = 1 # 🚨 يتوقف عند الخسارة الأولى
 RECONNECT_DELAY = 1      
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json" 
-TICK_HISTORY_SIZE = 4   
-MARTINGALE_MULTIPLIER = 6.0 
+TICK_HISTORY_SIZE = 2   
+MARTINGALE_MULTIPLIER = 6.0 # لم يعد يستخدم
 CANDLE_TICK_SIZE = 0   
 SYNC_SECONDS = [] 
-TRADE_CONFIGS = [
-    # 🚨 تم التعديل: صفقة واحدة: UNDER 8 (الرقم الأخير أصغر من 8)
-    {"type": "DIGITUNDER", "target_digit": 8, "label": "UNDER_8"}, 
+TRADE_CONFIGS = [ 
+    {"type": "DYNAMIC_ENTRY", "target_digit": 0, "label": "Higher/Lower_0.6"}, 
 ]
-TARGET_D2_THRESHOLD = 4 # 🚨 تم التعديل: يجب أن يكون D2 أصغر من 8
+TARGET_D2_THRESHOLD = 0 # D2 يجب أن يساوي 0 للتيك الأخير (T2)
 
 # ==========================================================
 # BOT RUNTIME STATE 
@@ -38,7 +37,7 @@ manager = multiprocessing.Manager()
 
 active_ws = {} 
 is_contract_open = manager.dict() 
-final_check_processes = manager.dict() # لتتبع عمليات التحقق النهائية
+final_check_processes = manager.dict() 
 
 TRADE_STATE_DEFAULT = TRADE_CONFIGS 
 
@@ -74,11 +73,10 @@ DEFAULT_SESSION_STATE = {
     "pending_delayed_entry": False, 
     "entry_t1_d2": None, 
     "before_trade_balance": 0.0, 
+    "current_contract_type": "N/A", 
 }
 
 # (.... Persistent State Management Functions - No Change ....)
-# ... (Functions: get_file_lock, release_file_lock, load_persistent_sessions, 
-# save_session_data, delete_session_data, get_session_data, load_allowed_users, stop_bot) ...
 
 def get_file_lock(f):
     """ يطبق قفل كتابة حصري على الملف """
@@ -88,7 +86,7 @@ def get_file_lock(f):
         pass
 
 def release_file_lock(f):
-    """ يحرر قفل الملف """
+    """ يحرر قفل قفل الملف """
     try:
         fcntl.flock(f.fileno(), fcntl.LOCK_UN)
     except Exception:
@@ -117,7 +115,6 @@ def load_persistent_sessions():
 def save_session_data(email, session_data):
     """ حفظ بيانات الجلسة مع تطبيق قفل الكتابة """
     all_sessions = load_persistent_sessions()
-    # تأكد من أننا لا نحفظ بيانات فارغة إذا كانت هناك مشكلة في البيانات المرسلة
     if not isinstance(session_data, dict):
          print(f"❌ ERROR: Attempted to save non-dict data for {email}")
          return
@@ -246,23 +243,21 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
 
 def calculate_martingale_stake(base_stake, current_step):
     """
-    يحسب قيمة الرهان للمضاعفة (تراكمية بعامل 6.0).
+    يحسب قيمة الرهان للمضاعفة (غير مستخدم حاليًا حيث MARTINGALE_STEPS = 0).
     """
     if current_step == 0:
         return base_stake
     
-    # 🚨 يتم تطبيقها الآن فقط عندما تكون current_step = 1
     if current_step <= MARTINGALE_STEPS: 
         return base_stake * (MARTINGALE_MULTIPLIER ** current_step) 
     
     else:
-        # إذا تجاوزنا خطوة المضاعفة المسموحة (وهي خطوة واحدة الآن)، نعود للرهان الأساسي
         return base_stake
 
 
-def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martingale=False):
+def send_trade_orders(email, base_stake, entry_config, currency_code, is_martingale=False):
     """
-    يرسل أوامر شراء متعددة (صفقة واحدة في هذا الإصدار).
+    يرسل أوامر شراء بناءً على الإشارة الديناميكية.
     """
     global is_contract_open 
     global final_check_processes 
@@ -272,68 +267,64 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
     
     current_data = get_session_data(email)
     
-    # التعديل الحاسم: حفظ الرصيد الحالي كمرجع BEFORE_TRADE_BALANCE
     current_data['before_trade_balance'] = current_data['current_balance'] 
     
     if current_data['before_trade_balance'] == 0.0:
         print("⚠️ [STAKE WARNING] Before trade balance is 0.0. PNL calculation will rely heavily on the final balance check.")
         pass
 
-    # إذا كنا في المضاعفة، نستخدم الرهان الذي تم حسابه وحفظه مسبقاً في حالة الخسارة
-    if is_martingale:
-        stake_per_contract = current_data['martingale_stake']
-    else:
-        stake_per_contract = base_stake
+    # بما أن MARTINGALE_STEPS = 0، دائماً نستخدم الـ base_stake
+    stake_per_contract = base_stake
         
     rounded_stake = round(stake_per_contract, 2)
     
     current_data['current_stake'] = rounded_stake 
-    current_data['current_total_stake'] = rounded_stake * len(trade_configs) 
+    current_data['current_total_stake'] = rounded_stake 
     current_data['last_entry_price'] = current_data['last_tick_data']['price'] if current_data.get('last_tick_data') else 0.0
     
     entry_digits = get_target_digits(current_data['last_entry_price'])
-    # D2 هو الرقم الثاني (index 1)
     current_data['last_entry_d2'] = entry_digits[1] if len(entry_digits) > 1 else 'N/A' 
     
     current_data['open_contract_ids'] = [] 
     
     entry_msg = f"MARTINGALE STEP {current_data['current_step']}" if is_martingale else "BASE SIGNAL"
     
-    # T1 D2 يتم حسابه من التيك الأول في history و T4 D2 هو التيك الأخير (index 3)
+    # T1 و T2 (التيك الأخير)
     tick_T1_price = current_data['tick_history'][0]['price'] if len(current_data['tick_history']) == TICK_HISTORY_SIZE else 0.0
-    t1_d2_entry = get_target_digits(tick_T1_price)[1] if len(get_target_digits(tick_T1_price)) > 1 else 'N/A'
-    t4_d2_entry = current_data['last_entry_d2'] 
+    t2_price = current_data['last_entry_price']
     
-    print(f"\n💰 [TRADE START] T1 D2: {t1_d2_entry} | T4 D2: {t4_d2_entry} | Total Stake: {current_data['current_total_stake']:.2f} ({entry_msg}) | Balance Ref: {current_data['before_trade_balance']:.2f} {currency_code}")
+    contract_type = entry_config['contract_type']
+    barrier = entry_config['barrier'] # هذه القيمة هي -0.6 أو +0.6
+    
+    # حساب الحاجز المطلق بناءً على نوع الصفقة وقيمة الحاجز (لضمان الحاجز المعكوس)
+    absolute_barrier = current_data['last_entry_price'] + barrier
+    
+    current_data['current_contract_type'] = f"{contract_type} @ Barrier {barrier}"
+    
+    print(f"\n💰 [TRADE START] T1 Price: {tick_T1_price:.2f} | T2 Price: {t2_price:.2f} | D2(T2): {current_data['last_entry_d2']} | Total Stake: {current_data['current_total_stake']:.2f} ({entry_msg}) | Contract: {contract_type} @ {barrier} (Absolute: {absolute_barrier:.2f}) | Duration: {DURATION} ticks")
 
-
-    for config in trade_configs:
-        contract_type = config['type']
-        target_digit = config['target_digit']
-        label = config['label']
-        
-        trade_request = {
-            "buy": 1, 
-            "price": rounded_stake, 
-            "parameters": {
-                "amount": rounded_stake, 
-                "basis": "stake",
-                "currency": currency_code, 
-                "duration": DURATION,  
-                "duration_unit": DURATION_UNIT, 
-                "symbol": SYMBOL, 
-                "contract_type": contract_type,
-                "barrier": str(target_digit) 
-            }
+    
+    trade_request = {
+        "buy": 1, 
+        "price": rounded_stake, 
+        "parameters": {
+            "amount": rounded_stake, 
+            "basis": "stake",
+            "currency": currency_code, 
+            "duration": DURATION,  
+            "duration_unit": DURATION_UNIT, 
+            "symbol": SYMBOL, 
+            "contract_type": contract_type,
+            "barrier": str(round(absolute_barrier, 2))
         }
-        
-        try:
-            ws_app.send(json.dumps(trade_request))
-            # 🚨 تم تحديث الرسالة إلى UNDER 8
-            print(f"   [-- {label}] Sent {contract_type} (Barrier: {target_digit}) @ {rounded_stake:.2f} {currency_code}") 
-        except Exception as e:
-            print(f"❌ [TRADE ERROR] Could not send trade order for {label}: {e}")
-            pass
+    }
+    
+    try:
+        ws_app.send(json.dumps(trade_request))
+        print(f"   [-- ENTRY] Sent {contract_type} (Absolute Barrier: {trade_request['parameters']['barrier']}) @ {rounded_stake:.2f} {currency_code}") 
+    except Exception as e:
+        print(f"❌ [TRADE ERROR] Could not send trade order: {e}")
+        pass
             
     is_contract_open[email] = True 
     current_data['last_entry_time'] = time.time() * 1000 
@@ -341,11 +332,11 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
     if is_martingale:
          current_data['pending_martingale'] = False 
          
-    # حفظ الحالة بعد إرسال الأوامر وتحديد الرصيد المرجعي
     save_session_data(email, current_data) 
     
-    # بدء عملية التحقق النهائي المنفصلة
-    check_time = 4000 # 4 ثواني
+    # بدء عملية التحقق النهائي المنفصلة (يجب أن ينتظر وقت أطول بسبب 5 تيك)
+    # وقت الانتظار: 4 ثواني + 0.5 ثانية لكل تيك
+    check_time = 4000 + (DURATION * 500) 
     
     final_check = multiprocessing.Process(
         target=final_check_process, 
@@ -353,12 +344,12 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
     )
     final_check.start()
     final_check_processes[email] = final_check
-    print(f"✅ [TRADE START] Final check process started in background (Waiting {check_time / 1000}s).")
+    print(f"✅ [TRADE START] Final check process started in background (Waiting {check_time / 1000:.2f}s).")
 
 
 def check_pnl_limits_by_balance(email, after_trade_balance): 
     """
-    تتحقق من النتيجة عبر مقارنة الرصيد قبل وبعد الصفقة وتطبق منطق المضاعفة/التوقف.
+    تتحقق من النتيجة وتطبق منطق المضاعفة/التوقف.
     """
     global is_contract_open 
     global MARTINGALE_STEPS
@@ -366,7 +357,6 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
     
     current_data = get_session_data(email)
     
-    # التأكد من عدم معالجة نتائج صفقة قديمة بعد إيقاف البوت
     if not current_data.get('is_running') and current_data.get('stop_reason') != "Running": 
         print(f"⚠️ [PNL] Bot stopped. Ignoring check for {email}.")
         return
@@ -374,13 +364,12 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
     before_trade_balance = current_data.get('before_trade_balance', 0.0)
     last_total_stake = current_data['current_total_stake'] 
 
-    # منطق المقارنة (الرصيد النهائي - الرصيد المرجعي قبل الصفقة)
     if before_trade_balance > 0.0:
         total_profit_loss = after_trade_balance - before_trade_balance 
         print(f"** [PNL Calc] After Balance: {after_trade_balance:.2f} - Before Balance: {before_trade_balance:.2f} = PL: {total_profit_loss:.2f}")
     else:
-        # حالة أمان إذا لم يتم تحديد الرصيد المرجعي
         print("⚠️ [PNL WARNING] Before trade balance is 0.0. Assuming loss equivalent to stake for safety.")
+        # هذه الحالة لن تحدث عادةً إذا كان الرصيد الأولي قد تم جلبه
         total_profit_loss = -last_total_stake 
 
     overall_loss = total_profit_loss < 0 
@@ -390,70 +379,46 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
     stop_triggered = False
 
     if not overall_loss:
-        # 🟢 حالة الربح الإجمالي (أو التعادل)
+        # 🟢 حالة الربح 
         current_data['total_wins'] += 1 
         current_data['current_step'] = 0 
         current_data['consecutive_losses'] = 0
         current_data['current_stake'] = current_data['base_stake']
         current_data['pending_martingale'] = False 
-        current_data['martingale_config'] = TRADE_CONFIGS 
-        current_data['current_total_stake'] = current_data['base_stake'] * len(TRADE_CONFIGS) 
-        
-        # مسح السجل عند الربح
+        current_data['current_total_stake'] = current_data['base_stake'] 
         current_data['tick_history'] = [] 
         
         if current_data['current_profit'] >= current_data['tp_target']:
             stop_triggered = "TP Reached"
             
     else:
-        # 🔴 حالة الخسارة الإجمالية (MARTINGALE/STOP)
+        # 🔴 حالة الخسارة (MAX_CONSECUTIVE_LOSSES = 1)
         current_data['total_losses'] += 1
         current_data['consecutive_losses'] += 1
         
-        # 🚨 التحقق من شرط الإيقاف (SL) أولاً قبل أي تصفير
         if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES: 
+            # يتوقف عند الخسارة الأولى
             stop_triggered = f"SL Reached ({MAX_CONSECUTIVE_LOSSES} Consecutive Losses)"
         
-        # إذا لم يتم الإيقاف، نتقدم إلى خطوة المضاعفة التالية (مع انتظار الإشارة)
         else:
-            # 🚨 إذا كنا ما زلنا ضمن خطوات المضاعفة (الآن: 0 فقط مسموح بالدخول)
-            if current_data['current_step'] < MARTINGALE_STEPS:
-                current_data['current_step'] += 1 # سيصبح 1
-                new_stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
-                
-                current_data['current_stake'] = new_stake
-                current_data['pending_martingale'] = False 
-                current_data['martingale_stake'] = new_stake
-                current_data['current_total_stake'] = new_stake * len(TRADE_CONFIGS)
-                current_data['martingale_config'] = TRADE_CONFIGS 
-                
-                print(f"🚨 [MARTINGALE PENDING] Overall Loss Detected. Pending Step {current_data['current_step']} @ Total Stake: {current_data['current_total_stake']:.2f}. Restarting 4-tick analysis (D2 < {TARGET_D2_THRESHOLD})...")
+            # بما أن MARTINGALE_STEPS = 0، هذا القسم لن يتم تنفيذه
+            pass 
 
-            # إذا تجاوزنا خطوات المضاعفة المسموحة (أي current_step >= 1 بعد الخسارة الأولى)
-            else:
-                # إعادة التعيين والعودة للبحث عن إشارة أساسية جديدة
-                current_data['current_stake'] = current_data['base_stake']
-                current_data['pending_martingale'] = False
-                current_data['current_total_stake'] = current_data['base_stake'] * len(TRADE_CONFIGS)
-                current_data['current_step'] = 0
-                current_data['consecutive_losses'] = 0 # يجب أن يتم إيقاف البوت عند هذا الحد بالفعل بسبب SL
-
-        # مسح السجل بعد الخسارة لفرض جمع 4 تيكات جديدة للبحث عن الإشارة
+        # مسح السجل لبدء جمع تيكين جديدين
         current_data['tick_history'] = [] 
         
     
-    # مسح حالة الانتظار (للتأمين، لكنها غير مستخدمة في هذا المنطق)
     current_data['pending_delayed_entry'] = False 
     current_data['entry_t1_d2'] = None
+    current_data['current_contract_type'] = "N/A"
         
     save_session_data(email, current_data) 
     
     print(f"[LOG {email}] PNL: {current_data['current_profit']:.2f}, Last Total PL: {total_profit_loss:.2f}, Step: {current_data['current_step']}, Last Total Stake: {last_total_stake:.2f}")
 
-    # ضمان إيقاف البوت عند تفعيل الإيقاف (SL أو TP)
     if stop_triggered:
         stop_bot(email, clear_data=True, stop_reason=stop_triggered) 
-        return # يجب أن نخرج فوراً بعد الإيقاف
+        return 
 
 # ==========================================================
 # UTILITY FUNCTIONS FOR PRICE MOVEMENT ANALYSIS 
@@ -461,26 +426,23 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
 
 def get_target_digits(price):
     """
-    يستخرج الأرقام العشرية من سعر التيك. (D2 هو الرقم الثاني بعد الفاصلة)
+    يستخرج رقمين عشريين فقط (D1, D2).
     """
     try:
-        # نستخدم 3 منازل عشرية للتأكد من وجود D2 على الأقل.
-        formatted_price = "{:.3f}".format(float(price)) 
+        s_price = str(price)
+        if '.' not in s_price:
+            return [0, 0] 
         
-        if '.' in formatted_price:
-            parts = formatted_price.split('.')
-            decimal_part = parts[1] 
-            
-            # الأرقام العشرية هي (D1, D2, D3, ...)
-            digits = [int(d) for d in decimal_part if d.isdigit()]
-            
-            # الترتيب: D1 هو index 0، D2 هو index 1، D3 هو index 2...
-            # يجب أن يكون حجم الأرقام 2 على الأقل (D1, D2)
-            if len(digits) >= 2:
-                # نرجع قائمة الأرقام العشرية [D1, D2, D3, ...]
-                return digits
+        parts = s_price.split('.')
+        decimal_part = parts[1] 
         
-        # إذا لم يكن هناك أرقام عشرية كافية (للتأمين)
+        if len(decimal_part) == 1:
+            decimal_part += '0'
+        
+        if len(decimal_part) >= 2:
+            digits = [int(d) for d in decimal_part[:2] if d.isdigit()]
+            return digits
+        
         return [] 
         
     except Exception as e:
@@ -489,41 +451,43 @@ def get_target_digits(price):
 
 def get_initial_signal_check(tick_history):
     """
-    🚨 يتحقق من الإشارة: T1 D2 < 8 و T2 D2 < 8 و T3 D2 < 8 و T4 D2 < 8.
+    يتحقق من شرط D2=0 للتيك الأخير (T2) ثم يقارن سعر T2 بسعر T1.
+    ويستخدم الحاجز المعكوس بناءً على الاتجاه.
     """
-    global TARGET_D2_THRESHOLD
-    
-    # التحقق من الحجم (4 تيكات)
     if len(tick_history) != TICK_HISTORY_SIZE:
-        return False
+        return None
     
-    last_digits_d2 = []
+    T1_price = tick_history[0]['price'] 
+    T2_price = tick_history[1]['price'] 
     
-    # نمر على التيكات من 0 إلى 3 (T1 إلى T4)
-    for i in range(TICK_HISTORY_SIZE):
-        tick_price = tick_history[i]['price'] 
+    T2_digits = get_target_digits(T2_price)
+    
+    if len(T2_digits) < 2:
+        return None 
         
-        # نحصل على جميع الأرقام العشرية.
-        digits = get_target_digits(tick_price)
+    T2_D2 = T2_digits[1] # الرقم الثاني بعد الفاصلة
+    
+    # 2. شرط الإشارة الأساسي: D2 يجب أن يساوي 0
+    if T2_D2 != TARGET_D2_THRESHOLD:
+        return None # لم يتم تحقق الشرط، لا يوجد إشارة
+    
+    # 3. مقارنة الأسعار للدخول في Higher أو Lower (المنطق المعكوس)
+    
+    # Higher Barrier -0.6: إذا كان T2 أكبر من T1 (السعر يرتفع)
+    if T2_price > T1_price:
+        return {"contract_type": "CALL", "barrier": -0.6, "T2_D2": T2_D2} 
         
-        # يجب أن يكون هناك D2 على الأقل
-        if len(digits) < 2:
-            return False 
-            
-        # الرقم الثاني بعد الفاصلة (D2) هو العنصر في المؤشر [1]
-        last_digits_d2.append(digits[1]) 
-    
-    
-    # 🚨 التحقق من الشرط: كل D2 يجب أن يكون أصغر من 8 (أي 0, 1, ..., 7)
-    all_under_target = all(d < TARGET_D2_THRESHOLD for d in last_digits_d2)
-    
-    if all_under_target:
-        # إذا تحقق الشرط، نعيد الرقم D2 للتيك الأخير (T4) لأغراض التتبع/التأكيد
-        return last_digits_d2[-1] 
+    # Lower Barrier +0.6: إذا كان T2 أصغر من T1 (السعر ينخفض)
+    elif T2_price < T1_price:
+        return {"contract_type": "PUT", "barrier": 0.6, "T2_D2": T2_D2}
+        
+    # إذا تساوت الأسعار
     else:
-        return False
+        return None
         
-# ... (باقي دوال SYNC BALANCE RETRIEVAL - No Change) ...
+# ==========================================================
+# SYNC BALANCE RETRIEVAL FUNCTIONS 
+# ==========================================================
 
 def get_initial_balance_sync(token):
     global WSS_URL_UNIFIED
@@ -682,11 +646,11 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
     session_data.update({
         "api_token": token, "base_stake": stake, "tp_target": tp,
         "is_running": True, 
-        "current_total_stake": session_data.get("current_total_stake", stake * len(TRADE_CONFIGS)),
+        "current_total_stake": session_data.get("current_total_stake", stake), 
         "stop_reason": "Running",
     })
     
-    save_session_data(email, session_data) # تأكيد حفظ جميع المتغيرات
+    save_session_data(email, session_data) 
 
     while True: 
         current_data = get_session_data(email)
@@ -716,11 +680,11 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                 print(f"✅ [PROCESS] Connection established for {email}. Waiting for authorization...")
                 
             
-            def execute_multi_trade(email, current_data, is_martingale=False):
+            def execute_multi_trade(email, current_data, entry_config, is_martingale=False):
                 base_stake_to_use = current_data['base_stake']
                 currency_code = current_data['currency']
-                trade_configs_to_use = TRADE_CONFIGS
-                send_trade_orders(email, base_stake_to_use, trade_configs_to_use, currency_code, is_martingale=is_martingale)
+                # نمرر إعدادات الدخول الديناميكية المستخلصة من التحليل
+                send_trade_orders(email, base_stake_to_use, entry_config, currency_code, is_martingale=is_martingale)
                 
 
             def on_message_wrapper(ws_app, message):
@@ -733,16 +697,12 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                     ws_app.close() 
                     return
                 
-                # تحديث وحفظ الرصيد فور وصول الرسالة
                 if msg_type == 'balance':
                     current_balance = data['balance']['balance']
                     currency = data['balance']['currency']
                     
-                    # لا نعتمد على تحديث الرصيد لتحديد نتيجة الصفقة، ولكن نحفظه كأحدث رصيد
                     current_data['current_balance'] = float(current_balance)
                     current_data['currency'] = currency 
-                    
-                    # حفظ البيانات فوراً لضمان التزامن 
                     save_session_data(email, current_data) 
                 
                 elif msg_type == 'tick':
@@ -753,19 +713,22 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                     current_timestamp = int(data['tick']['epoch'])
                     current_price = float(data['tick']['quote'])
                     
+                    # استخراج D2
+                    processed_digits = get_target_digits(current_price) 
+                    
                     tick_data = {
                         "price": current_price,
-                        "timestamp": current_timestamp
+                        "timestamp": current_timestamp,
+                        "D2": processed_digits[1] if len(processed_digits) >= 2 else None 
                     }
                     current_data['last_tick_data'] = tick_data
                     
                     # 1. تحديث تاريخ التيك (يجب أن يحدث دائماً)
                     current_data['tick_history'].append(tick_data)
                     
-                    # تحديث لعرض البيانات (4 تيكات)
+                    # تحديث لعرض البيانات (2 تيك)
                     if len(current_data['tick_history']) >= TICK_HISTORY_SIZE:
                         current_data['display_t1_price'] = current_data['tick_history'][0]['price'] 
-                        # نستخدم التيك الأحدث (index 3)
                         current_data['display_t4_price'] = current_data['tick_history'][TICK_HISTORY_SIZE - 1]['price'] 
                     else:
                         current_data['display_t1_price'] = 0.0 
@@ -783,25 +746,23 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                             return
                         
                         
-                        # 1. التأكد من أن السجل هو 4 فقط
+                        # 1. التأكد من أن السجل هو 2 فقط
                         if len(current_data['tick_history']) > TICK_HISTORY_SIZE:
-                            # حذف أقدم تيك لتثبيت حجم السجل عند 4
                             current_data['tick_history'].pop(0) 
 
                         
-                        # 2. التحقق من إشارة T1, T2, T3, T4 < 8 (D2)
-                        initial_signal_d2 = get_initial_signal_check(current_data['tick_history'])
+                        # 2. التحقق من إشارة D2=0 ومقارنة الأسعار
+                        signal_config = get_initial_signal_check(current_data['tick_history'])
                         
-                        if initial_signal_d2 is not False:
+                        if signal_config is not None:
                             
                             is_martingale = current_data['current_step'] > 0
-                            execute_multi_trade(email, current_data, is_martingale=is_martingale)
+                            execute_multi_trade(email, current_data, signal_config, is_martingale=is_martingale)
                             
                             # 🛑 [تصفير بعد الدخول] 
-                            current_data['tick_history'] = [] # تصفير سجل التيكس للبدء من جديد
+                            current_data['tick_history'] = [] 
                             
-                            # 🚨 تم تحديث رسالة التأكيد
-                            print(f"🚀 [SIGNAL CONFIRMED] T1-T4 D2 < {TARGET_D2_THRESHOLD} (Last D2: {initial_signal_d2}). Executing UNDER 8 trade (Step: {current_data['current_step']}).")
+                            print(f"🚀 [SIGNAL CONFIRMED] T2 D2=0, Price {signal_config['contract_type']} T1. Executing {signal_config['contract_type']} @ Barrier {signal_config['barrier']} (Step: {current_data['current_step']}).")
 
                         else:
                             # إذا كان السجل ممتلئاً ولم تتحقق الإشارة، نحذف أقدم تيك ونستمر
@@ -824,7 +785,6 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
 
             def on_close_wrapper(ws_app, code, msg):
                 print(f"❌ [WS Close {email}] Code: {code}, Message: {msg}")
-                # مسح الـ WS من active_ws لضمان إعادة الاتصال
                 if email in active_ws:
                     active_ws[email] = None
                 
@@ -851,7 +811,6 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
             print(f"💤 [PROCESS] Waiting {RECONNECT_DELAY} seconds before retrying connection for {email}...")
             time.sleep(RECONNECT_DELAY)
         else:
-             # إذا كان الـ WS متصلاً ولا توجد صفقة مفتوحة، انتظر قليلاً قبل التحقق مرة أخرى
              time.sleep(0.5) 
 
 
@@ -1003,44 +962,34 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = '4-Tick D2 < ' + target_d2_threshold|string + ' Confirmation then UNDER 8 Entry | DURATION: 1 TICK | Max Martingale: ' + max_martingale_step|string + ' (Multiplier: ' + martingale_multiplier|string + ')' %}
+    {% set strategy = '2-Tick D2=' + target_d2_threshold|string + ' Confirmation then Higher(-0.6)/Lower(+0.6) | DURATION: ' + DURATION|string + ' TICKS | Max Loss: ' + max_consecutive_losses|string + ' (No Martingale)' %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     
-    {# 🌟 Display T1 D2 and T4 D2 #}
+    {# 🌟 Display T1 D2 and T2 D2 #}
     <div class="tick-box">
         <div>
-            <span class="info-label">T1 Price:</span> <b>{% if session_data.display_t1_price %}{{ "%0.3f"|format(session_data.display_t1_price) }}{% else %}N/A{% endif %}</b>
+            <span class="info-label">T1 Price:</span> <b>{% if session_data.display_t1_price %}{{ "%0.2f"|format(session_data.display_t1_price) }}{% else %}N/A{% endif %}</b>
             <br>
             <span class="info-label">T1 D2:</span> 
             <b class="current-digit">
-            {% set price_str = "%0.3f"|format(session_data.display_t1_price) %}
-            {% set price_parts = price_str.split('.') %} 
-            {% if price_parts|length > 1 and price_parts[-1]|length >= 2 %}
-                {{ price_parts[-1][1] }} {# T1 D2 is the second digit (index 1) #}
-            {% else %}
-                N/A
-            {% endif %}
+            {% set digits = get_target_digits(session_data.display_t1_price) %}
+            {% if digits|length >= 2 %}{{ digits[1] }}{% else %}N/A{% endif %}
             </b>
         </div>
         <div>
-            <span class="info-label">Current Price (T4):</span> <b>{% if session_data.display_t4_price %}{{ "%0.3f"|format(session_data.display_t4_price) }}{% else %}N/A{% endif %}</b>
+            <span class="info-label">Current Price (T2):</span> <b>{% if session_data.display_t4_price %}{{ "%0.2f"|format(session_data.display_t4_price) }}{% else %}N/A{% endif %}</b>
             <br>
             <span class="info-label">Current D2:</span>
             <b class="current-digit">
-            {% set price_str = "%0.3f"|format(session_data.display_t4_price) %}
-            {% set price_parts = price_str.split('.') %} 
-            {% if price_parts|length > 1 and price_parts[-1]|length >= 2 %}
-                {{ price_parts[-1][1] }} {# T4 D2 is the second digit (index 1) #}
-            {% else %}
-                N/A
-            {% endif %}
+            {% set digits = get_target_digits(session_data.display_t4_price) %}
+            {% if digits|length >= 2 %}{{ digits[1] }}{% else %}N/A{% endif %}
             </b>
         </div>
     </div>
     
     <div class="data-box">
-        <p>Asset: <b>{{ SYMBOL }}</b> | Account: <b>{{ session_data.account_type.upper() }}</b> | Duration: <b>1 Tick</b></p>
+        <p>Asset: <b>{{ SYMBOL }}</b> | Account: <b>{{ session_data.account_type.upper() }}</b> | Duration: <b>{{ DURATION }} Ticks</b></p>
         
         {# 💡 عرض الرصيد #}
         <p style="font-weight: bold; color: #17a2b8;">
@@ -1054,23 +1003,23 @@ CONTROL_FORM = """
         
         <p style="font-weight: bold; color: {% if session_data.current_total_stake %}#007bff{% else %}#555{% endif %};">
             Open Contract Status: 
-            <b>{% if is_contract_open.get(email) %}Waiting 4s Check (Total Stake: {{ session_data.current_total_stake|round(2) }}){% else %}0 (Ready for Signal/Martingale){% endif %}</b>
+            <b>{% if is_contract_open.get(email) %}Waiting Check (Stake: {{ session_data.current_total_stake|round(2) }}){% else %}0 (Ready for Signal){% endif %}</b>
         </p>
         
         <p style="font-weight: bold; color: {% if session_data.current_step > 0 %}#ff5733{% else %}#555{% endif %};">
             Trade Status: 
             <b>
                 {% if is_contract_open.get(email) %}
-                    Awaiting 4s Balance Check (Total Stake: {{ session_data.current_total_stake|round(2) }})
+                    Awaiting Balance Check (Contract: {{ session_data.current_contract_type }})
                 {% elif session_data.current_step > 0 %}
-                    MARTINGALE STEP {{ session_data.current_step }} @ Stake/Contract: {{ session_data.current_stake|round(2) }} (Total: {{ session_data.current_total_stake|round(2) }}) (Searching 4-Tick Signal)
+                    MARTINGALE STEP {{ session_data.current_step }} @ Stake: {{ session_data.current_stake|round(2) }} (Searching 2-Tick Signal)
                 {% else %}
-                    BASE STAKE @ Stake/Contract: {{ session_data.base_stake|round(2) }} (Total: {{ session_data.current_total_stake|round(2) }}) (Searching 4-Tick Signal)
+                    BASE STAKE @ Stake: {{ session_data.base_stake|round(2) }} (Searching 2-Tick Signal)
                 {% endif %}
             </b>
         </p>
 
-        <p>Current Stake per Contract: <b>{{ session_data.currency }} {{ session_data.current_stake|round(2) }}</b></p>
+        <p>Current Stake: <b>{{ session_data.currency }} {{ session_data.current_stake|round(2) }}</b></p>
         <p style="font-weight: bold; color: {% if session_data.consecutive_losses > 0 %}red{% else %}green{% endif %};">
         Consecutive Losses: <b>{{ session_data.consecutive_losses }}</b> / {{ max_consecutive_losses }} 
         (Last Entry D2: <b>{{ session_data.last_entry_d2 if session_data.last_entry_d2 is not none else 'N/A' }}</b>)
@@ -1123,13 +1072,40 @@ CONTROL_FORM = """
     var DURATION = {{ DURATION }};
     var TICK_HISTORY_SIZE = {{ TICK_HISTORY_SIZE }}; 
     var TARGET_D2_THRESHOLD = {{ TARGET_D2_THRESHOLD }}; 
+    var max_consecutive_losses = {{ MAX_CONSECUTIVE_LOSSES }};
     
+    // دالة مساعدة لواجهة المستخدم لجلب D2 
+    function get_target_digits_js(price) {
+        if (!price) return [];
+        var s_price = price.toFixed(2); 
+        var parts = s_price.split('.');
+        if (parts.length > 1 && parts[1].length >= 2) {
+            return [parseInt(parts[1][0]), parseInt(parts[1][1])];
+        }
+        return [];
+    }
+    
+    // 🚨 لضمان عمل الدالة المساعدة في Flask (على الرغم من استخدام البايثون في القالب)
+    var get_target_digits_func = function(price) {
+        {% raw %}
+        var price_str = price.toFixed(3);
+        var parts = price_str.split('.');
+        if (parts.length > 1) {
+            var decimal_part = parts[1];
+            if (decimal_part.length == 1) decimal_part += '0';
+            if (decimal_part.length >= 2) {
+                return [parseInt(decimal_part[0]), parseInt(decimal_part[1])];
+            }
+        }
+        return [];
+        {% endraw %}
+    };
+
+
     function autoRefresh() {
-        // نعتمد فقط على حالة التشغيل لتقرير التحديث التلقائي
         var isRunning = {{ 'true' if session_data and session_data.is_running else 'false' }};
         
         if (isRunning) {
-            // تحديث كل ثانية
             var refreshInterval = 1000; 
             
             setTimeout(function() {
@@ -1157,7 +1133,6 @@ def control_panel():
     email = session['email']
     session_data = get_session_data(email)
     
-    # تم التأكد من تمرير is_contract_open هنا
     return render_template_string(CONTROL_FORM, 
         email=email, 
         session_data=session_data, 
@@ -1166,9 +1141,10 @@ def control_panel():
         TICK_HISTORY_SIZE=TICK_HISTORY_SIZE,
         max_martingale_step=MARTINGALE_STEPS,
         martingale_multiplier=MARTINGALE_MULTIPLIER,
-        max_consecutive_losses=MAX_CONSECUTIVE_LOSSES,
+        MAX_CONSECUTIVE_LOSSES=MAX_CONSECUTIVE_LOSSES,
         is_contract_open=is_contract_open,
-        TARGET_D2_THRESHOLD=TARGET_D2_THRESHOLD # تمرير الحد الجديد لواجهة المستخدم
+        TARGET_D2_THRESHOLD=TARGET_D2_THRESHOLD,
+        get_target_digits=get_target_digits # لتمرير الدالة إلى القالب
     )
 
 
@@ -1229,8 +1205,8 @@ def start_bot():
             "account_type": account_type,
             "currency": currency,
             "current_stake": stake,
-            "current_total_stake": stake * len(TRADE_CONFIGS), 
-            "is_running": False, # Set to True inside the process once ready
+            "current_total_stake": stake, 
+            "is_running": False, 
             "stop_reason": "Starting..." 
         })
         save_session_data(email, initial_data)
@@ -1258,7 +1234,6 @@ def stop_route():
     email = session['email']
     force_stop = request.form.get('force_stop') == 'true'
     
-    # Determine if we should clear data based on force_stop or normal stop
     clear_data_on_stop = force_stop 
     
     stop_bot(email, clear_data=clear_data_on_stop, stop_reason="Stopped Manually")
@@ -1279,6 +1254,6 @@ if __name__ == '__main__':
         with open(ACTIVE_SESSIONS_FILE, 'w') as f:
             f.write('{}')
     if not os.path.exists(USER_IDS_FILE):
-        load_allowed_users() # Creates the default file
+        load_allowed_users() 
 
     app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
