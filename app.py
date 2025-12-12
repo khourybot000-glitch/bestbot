@@ -13,28 +13,66 @@ from datetime import datetime, timezone
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
-DURATION = 5            # 🚨 التعديل: تم تغيير المدة إلى 5 تيك
+DURATION = 5            
 DURATION_UNIT = "t"
-MARTINGALE_STEPS = 0
-MAX_CONSECUTIVE_LOSSES = 1
+MARTINGALE_STEPS = 1
+MAX_CONSECUTIVE_LOSSES = 2
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
-TICK_HISTORY_SIZE = 2   # حجم السجل 2 تيك
+TICK_HISTORY_SIZE = 2   
 MARTINGALE_MULTIPLIER = 6.0
 CANDLE_TICK_SIZE = 0
 SYNC_SECONDS = []
 
-# 🚨 إعدادات الدخول لصفقة واحدة فقط (HIGHER +0.6)
+# إعدادات الدخول لصفقة واحدة فقط (HIGHER +0.6)
 TRADE_CONFIGS = [
-    # type: "CALL" ليمثل Higher/Rise. barrier: "+0.6" هو Offset Barrier.
-    {"type": "CALL", "barrier": "-0.6", "label": "HIGHER_0_6"} 
+    {"type": "CALL", "barrier": "+0.6", "label": "HIGHER_0_6"} 
 ]
 
 # ==========================================================
 # BOT RUNTIME STATE
-# ... (باقي المتغيرات كما هي) ...
 # ==========================================================
+# 🚨🚨 الإضافة المطلوبة لحل مشكلة NameError 🚨🚨
+DEFAULT_SESSION_STATE = {
+    "api_token": "",
+    "base_stake": 0.35,
+    "tp_target": 10.0,
+    "current_profit": 0.0,
+    "current_balance": 0.0,
+    "before_trade_balance": 0.0,
+    "current_stake": 0.35,
+    "current_total_stake": 0.35 * len(TRADE_CONFIGS), # يجب أن تكون ديناميكية
+    "current_step": 0,
+    "consecutive_losses": 0,
+    "total_wins": 0,
+    "total_losses": 0,
+    "is_running": False,
+    "account_type": "demo",
+    "currency": "USD",
+    "last_entry_time": 0.0,
+    "last_entry_d2": 'N/A',
+    "tick_history": [],
+    "last_tick_data": {},
+    "open_contract_ids": [],
+    "martingale_stake": 0.0,
+    "martingale_config": TRADE_CONFIGS,
+    "pending_martingale": False,
+    "is_balance_received": False,
+    "stop_reason": "Stopped",
+    "pending_delayed_entry": False,
+    "entry_t1_d2": None,
+    "display_t1_price": 0.0,
+    "display_t4_price": 0.0,
+}
+
+# المتغيرات العالمية للحالة الحالية (يجب أن تظل خارج الدوال)
+flask_local_processes = {}
+final_check_processes = {}
+active_ws = {}
+is_contract_open = {} 
+# ==========================================================
+
 
 # ... (Persistent State Management Functions - No Changes) ...
 
@@ -117,7 +155,8 @@ def get_session_data(email):
                 data[key] = default_val
         return data
 
-    return DEFAULT_SESSION_STATE.copy()
+    # 🚨 هنا كان الخطأ، حيث يتم إنشاء حالة افتراضية جديدة 
+    return DEFAULT_SESSION_STATE.copy() 
 
 def load_allowed_users():
     """ تحميل قائمة المستخدمين المسموح لهم بالدخول """
@@ -275,7 +314,7 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
                 "amount": rounded_stake,
                 "basis": "stake",
                 "currency": currency_code,
-                "duration": DURATION,        # 🚨 DURATION = 5
+                "duration": DURATION,        
                 "duration_unit": DURATION_UNIT,
                 "symbol": SYMBOL,
                 "contract_type": contract_type, # CALL
@@ -300,7 +339,7 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
     save_session_data(email, current_data)
 
     # بدء عملية التحقق النهائي المنفصلة
-    check_time = 16000 # 🚨 التعديل: 16 ثانية (16000ms)
+    check_time = 16000 # 16 ثانية (16000ms)
 
     final_check = multiprocessing.Process(
         target=final_check_process,
@@ -1038,13 +1077,13 @@ CONTROL_FORM = """
         </select><br>
 
         <label for="token">Deriv API Token:</label><br>
-        <input type="text" id="token" name="token" required value="{{ session_data.api_token if session_data else '' }}"><br>
+        <input type="text" id="token" name="token" required value="{{ session_data.api_token if session_data and session_data.api_token else '' }}"><br>
 
-        <label for="stake">Base Stake (For {{ TRADE_CONFIGS[0]['label'] }} contract, 5 Ticks):</label><br>
-        <input type="number" id="stake" name="stake" value="{{ session_data.base_stake|round(2) if session_data else 0.35 }}" step="0.01" min="0.35" required><br>
+        <label for="stake">Base Stake (For {{ TRADE_CONFIGS[0]['label'] }} contract, {{ DURATION }} Ticks):</label><br>
+        <input type="number" id="stake" name="stake" value="{{ session_data.base_stake|round(2) if session_data and session_data.base_stake else 0.35 }}" step="0.01" min="0.35" required><br>
 
         <label for="tp">TP Target (USD/tUSDT):</label><br>
-        <input type="number" id="tp" name="tp" value="{{ session_data.tp_target|round(2) if session_data else 10.0 }}" step="0.01" required><br>
+        <input type="number" id="tp" name="tp" value="{{ session_data.tp_target|round(2) if session_data and session_data.tp_target else 10.0 }}" step="0.01" required><br>
 
         <button type="submit" style="background-color: green; color: white;">🚀 Start Bot</button>
     </form>
