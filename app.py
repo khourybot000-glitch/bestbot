@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 # BOT CONSTANT SETTINGS
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929"
-SYMBOL = "R_100"
+SYMBOL = "R_10"                 # 👈 تم التعديل إلى R_10
 DURATION = 5            
 DURATION_UNIT = "t"
 MARTINGALE_STEPS = 0            
@@ -27,7 +27,7 @@ SYNC_SECONDS = []
 
 # إعدادات الدخول: صفقة واحدة فقط (LOWER -0.6)
 TRADE_CONFIGS = [
-    {"type": "CALL", "barrier": "-0.6", "label": "LOWER_0_6"} 
+    {"type": "PUT", "barrier": "+0.6", "label": "LOWER_0_6"} 
 ]
 
 # ==========================================================
@@ -39,7 +39,7 @@ DEFAULT_SESSION_STATE = {
     "tp_target": 10.0,
     "current_profit": 0.0,
     "current_balance": 0.0,
-    "initial_starting_balance": 0.0, # 👈 مفتاح جديد للرصيد الأساسي عند بدء البوت
+    "initial_starting_balance": 0.0, 
     "before_trade_balance": 0.0,
     "current_stake": 0.35,
     "current_total_stake": 0.35 * len(TRADE_CONFIGS), 
@@ -258,7 +258,7 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
 
     current_data = get_session_data(email)
 
-    # 👈 التعديل رقم 2: تحديث قبل الرصيد الحالي قبل الصفقة
+    # تحديث الرصيد قبل الصفقة
     current_data['before_trade_balance'] = current_data['current_balance']
 
     if current_data['before_trade_balance'] == 0.0:
@@ -277,8 +277,9 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
     current_data['current_total_stake'] = rounded_stake * len(trade_configs) 
     current_data['last_entry_price'] = current_data['last_tick_data']['price'] if current_data.get('last_tick_data') else 0.0
 
+    # يتم استخراج D3 هنا ولكن لا يتم حفظه بشكل منفصل في متغير D2 القديم
     entry_digits = get_target_digits(current_data['last_entry_price'])
-    current_data['last_entry_d2'] = entry_digits[1] if len(entry_digits) > 1 else 'N/A'
+    current_data['last_entry_d2'] = entry_digits[2] if len(entry_digits) > 2 else 'N/A' # 👈 نستخدم D3 للعرض
 
     current_data['open_contract_ids'] = []
 
@@ -286,10 +287,12 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
 
     tick_T1_price = current_data['tick_history'][0]['price'] if len(current_data['tick_history']) == TICK_HISTORY_SIZE else 0.0
     tick_T2_price = current_data['tick_history'][1]['price'] if len(current_data['tick_history']) == TICK_HISTORY_SIZE else 0.0
-    t2_d2_entry = get_target_digits(tick_T2_price)[1] if len(get_target_digits(tick_T2_price)) > 1 else 'N/A'
+    
+    # يجب استخدام 3 أرقام عشرية عند العرض لـ R_10
+    t2_d3_entry = get_target_digits(tick_T2_price)[2] if len(get_target_digits(tick_T2_price)) > 2 else 'N/A'
 
 
-    print(f"\n💰 [TRADE START] T1: {tick_T1_price:.2f} | T2: {tick_T2_price:.2f} | T2 D2: {t2_d2_entry} | Stake: {current_data['current_total_stake']:.2f} ({entry_msg}) | Balance Ref: {current_data['before_trade_balance']:.2f} {currency_code}")
+    print(f"\n💰 [TRADE START] T1: {tick_T1_price:.3f} | T2: {tick_T2_price:.3f} | T2 D3: {t2_d3_entry} | Stake: {current_data['current_total_stake']:.2f} ({entry_msg}) | Balance Ref: {current_data['before_trade_balance']:.2f} {currency_code}")
 
 
     for config in trade_configs:
@@ -363,13 +366,7 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
         print("⚠️ [PNL WARNING] Before trade balance is 0.0. Assuming loss equivalent to stake for safety.")
         total_profit_loss = -last_total_stake
     
-    # 👈 التعديل رقم 3: يتم الآن حساب PNL لكل صفقة بشكل صحيح، ولكننا لا نستخدم current_profit
-    # بل نعتمد على مقارنة الرصيد الحالي بالرصيد الأساسي (Initial Starting Balance) في الواجهة.
-    # ومع ذلك، يجب تحديث total_profit_loss ليتم استخدامه لتحديد حالة الربح/الخسارة.
-
     overall_loss = total_profit_loss < 0
-
-    # current_data['current_profit'] += total_profit_loss # 👈 تم إزالة هذا السطر لعدم الحاجة إليه
 
     stop_triggered = False
 
@@ -384,7 +381,7 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
         current_data['current_total_stake'] = current_data['base_stake'] * len(TRADE_CONFIGS)
         current_data['tick_history'] = []
 
-        # 👈 حساب صافي الربح الإجمالي للمقارنة مع TP
+        # حساب صافي الربح الإجمالي للمقارنة مع TP
         initial_balance = current_data.get('initial_starting_balance', after_trade_balance)
         net_profit_display = after_trade_balance - initial_balance
         
@@ -440,24 +437,26 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
 
 def get_target_digits(price):
     """
-    يستخرج الأرقام العشرية من سعر التيك، مع الاقتصار على رقمين بعد الفاصلة.
+    يستخرج الأرقام العشرية من سعر التيك، مع الاقتصار على ثلاثة أرقام بعد الفاصلة.
     """
     try:
-        # تنسيق السعر لضمان وجود خانتين عشريتين
-        formatted_price = "{:.2f}".format(float(price)) 
+        # تنسيق السعر لضمان وجود ثلاث خانات عشرية (مهم لـ R_10)
+        formatted_price = "{:.3f}".format(float(price)) 
 
         if '.' in formatted_price:
             parts = formatted_price.split('.')
             decimal_part = parts[1] 
 
-            digits = [int(d) for d in decimal_part if d.isdigit()]
+            # نأخذ أول 3 أرقام بعد الفاصلة (D1, D2, D3)
+            digits = [int(d) for d in decimal_part[:3] if d.isdigit()]
             return digits 
 
-        return [0, 0]
+        # في حال عدم وجود فاصلة (نادر جداً في R_10)
+        return [0, 0, 0]
 
     except Exception as e:
         print(f"Error calculating target digits: {e}")
-        return [0, 0]
+        return [0, 0, 0]
 
 
 # ----------------------------------------------------------
@@ -591,7 +590,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
             session_data['currency'] = currency_returned
             session_data['is_balance_received'] = True
             
-            # 👈 التعديل رقم 1: تخزين الرصيد الأساسي
+            # تخزين الرصيد الأساسي
             session_data['initial_starting_balance'] = initial_balance 
             session_data['before_trade_balance'] = initial_balance
             save_session_data(email, session_data)
@@ -652,7 +651,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
             current_balance = data['balance']['balance']
             currency = data['balance']['currency']
 
-            # 👈 تحديث current_balance بشكل مستمر
+            # تحديث current_balance بشكل مستمر
             current_data['current_balance'] = float(current_balance)
             current_data['currency'] = currency
             current_data['is_balance_received'] = True
@@ -675,6 +674,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
 
             current_data['tick_history'].append(tick_data)
 
+            # يجب استخدام 3 أرقام عشرية عند العرض لـ R_10
             if len(current_data['tick_history']) >= TICK_HISTORY_SIZE:
                 current_data['display_t1_price'] = current_data['tick_history'][0]['price']
                 current_data['display_t4_price'] = current_data['tick_history'][1]['price'] # T2 in 2-tick logic
@@ -705,32 +705,32 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                     tick_T1_price = current_data['tick_history'][0]['price']
                     tick_T2_price = current_data['tick_history'][1]['price']
 
-                    digits_T2 = get_target_digits(tick_T2_price)
+                    digits_T2 = get_target_digits(tick_T2_price) # 👈 الآن تعيد 3 أرقام
 
-                    # الشرط 1: T2 > T1
-                    condition_T2_greater_than_T1 = tick_T2_price > tick_T1_price
+                    # الشرط 1: T2 أصغر من T1
+                    condition_T2_smaller_than_T1 = tick_T2_price < tick_T1_price # 👈 تم التعديل
 
-                    # الشرط 2: T2 D2 = 0
-                    condition_T2_D2_is_0 = False
-                    digit_T2_D2 = 'N/A'
-                    if len(digits_T2) >= 2:
-                        digit_T2_D2 = digits_T2[1]
-                        if digit_T2_D2 == 0:
-                            condition_T2_D2_is_0 = True
+                    # الشرط 2: T2 D3 = 9
+                    condition_T2_D3_is_9 = False
+                    digit_T2_D3 = 'N/A'
+                    if len(digits_T2) >= 3: # 👈 الآن نتحقق من D3 (المؤشر 2)
+                        digit_T2_D3 = digits_T2[2]
+                        if digit_T2_D3 == 9:
+                            condition_T2_D3_is_9 = True
 
                     # 👈 تطبيق منطق الدخول
-                    if condition_T2_D2_is_0 and condition_T2_greater_than_T1:
+                    if condition_T2_D3_is_9 and condition_T2_smaller_than_T1: # 👈 التعديل في الشرط المركب
                         # 🚀 إشارة دخول قوية
                         is_martingale = current_data['current_step'] > 0
                         execute_multi_trade(email, current_data, is_martingale=is_martingale) 
 
                         current_data['tick_history'] = []
 
-                        print(f"🚀 [IMMEDIATE ENTRY CONFIRMED] T2 D2=0 ({digit_T2_D2}) AND T2 > T1 ({tick_T2_price:.2f} > {tick_T1_price:.2f}). Executing trade (Step: {current_data['current_step']}).")
+                        print(f"🚀 [IMMEDIATE ENTRY CONFIRMED] T2 D3=9 ({digit_T2_D3}) AND T2 < T1 ({tick_T2_price:.3f} < {tick_T1_price:.3f}). Executing trade (Step: {current_data['current_step']}).")
 
                     else:
                         current_data['tick_history'].pop(0)
-                        print(f"🔄 [2-TICK ANALYSIS] Condition not met. T2 D2={digit_T2_D2} | T2 > T1: {condition_T2_greater_than_T1}. Clearing T1.")
+                        print(f"🔄 [2-TICK ANALYSIS] Condition not met. T2 D3={digit_T2_D3} | T2 < T1: {condition_T2_smaller_than_T1}. Clearing T1.")
 
                 save_session_data(email, current_data)
 
@@ -925,35 +925,35 @@ CONTROL_FORM = """
     {% set contract_label = TRADE_CONFIGS[0]['label'] %}
     {% set contract_barrier = TRADE_CONFIGS[0]['barrier'] %}
 
-    {% set strategy = 'Immediate Entry: (T2 D2=0 AND T2 > T1) | Ticks: ' + TICK_HISTORY_SIZE|string + ' | Contract: ' + contract_label + ' (Offset: ' + contract_barrier + ') | Duration: ' + DURATION|string + ' Ticks | Martingale: Off (Max Steps=' + max_martingale_step|string + ')' %}
+    {% set strategy = 'Immediate Entry: (T2 D3=9 AND T2 < T1) | Ticks: ' + TICK_HISTORY_SIZE|string + ' | Contract: ' + contract_label + ' (Offset: ' + contract_barrier + ') | Duration: ' + DURATION|string + ' Ticks | Martingale: Off (Max Steps=' + max_martingale_step|string + ')' %}
 
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
 
-    {# 🌟 Display T1 Price and T2 D2 (2 decimal points) #}
+    {# 🌟 Display T1 Price and T2 D3 (3 decimal points) #}
     <div class="tick-box">
         <div>
-            <span class="info-label">T1 Price:</span> <b>{% if session_data.display_t1_price %}{{ "%0.2f"|format(session_data.display_t1_price) }}{% else %}N/A{% endif %}</b>
+            <span class="info-label">T1 Price:</span> <b>{% if session_data.display_t1_price %}{{ "%0.3f"|format(session_data.display_t1_price) }}{% else %}N/A{% endif %}</b>
             <br>
-            <span class="info-label">T1 D2:</span>
+            <span class="info-label">T1 D3:</span>
             <b class="current-digit">
-            {% set price_str = "%0.2f"|format(session_data.display_t1_price) %}
+            {% set price_str = "%0.3f"|format(session_data.display_t1_price) %}
             {% set price_parts = price_str.split('.') %}
-            {% if price_parts|length > 1 and price_parts[-1]|length >= 2 %}
-                {{ price_parts[-1][1] }}
+            {% if price_parts|length > 1 and price_parts[-1]|length >= 3 %}
+                {{ price_parts[-1][2] }}
             {% else %}
                 N/A
             {% endif %}
             </b>
         </div>
         <div>
-            <span class="info-label">Current Price (T2):</span> <b>{% if session_data.display_t4_price %}{{ "%0.2f"|format(session_data.display_t4_price) }}{% else %}N/A{% endif %}</b>
+            <span class="info-label">Current Price (T2):</span> <b>{% if session_data.display_t4_price %}{{ "%0.3f"|format(session_data.display_t4_price) }}{% else %}N/A{% endif %}</b>
             <br>
-            <span class="info-label">T2 D2:</span>
+            <span class="info-label">T2 D3:</span>
             <b class="current-digit">
-            {% set price_str = "%0.2f"|format(session_data.display_t4_price) %}
+            {% set price_str = "%0.3f"|format(session_data.display_t4_price) %}
             {% set price_parts = price_str.split('.') %}
-            {% if price_parts|length > 1 and price_parts[-1]|length >= 2 %}
-                {{ price_parts[-1][1] }}
+            {% if price_parts|length > 1 and price_parts[-1]|length >= 3 %}
+                {{ price_parts[-1][2] }}
             {% else %}
                 N/A
             {% endif %}
@@ -1008,7 +1008,7 @@ CONTROL_FORM = """
         <p>Current Stake: <b>{{ session_data.currency }} {{ session_data.current_stake|round(2) }}</b></p>
         <p style="font-weight: bold; color: {% if session_data.consecutive_losses > 0 %}red{% else %}green{% endif %};">
         Consecutive Losses: <b>{{ session_data.consecutive_losses }}</b> / {{ max_consecutive_losses }}
-        (Last Entry D2: <b>{{ session_data.last_entry_d2 if session_data.last_entry_d2 is not none else 'N/A' }}</b>)
+        (Last Entry D3: <b>{{ session_data.last_entry_d2 if session_data.last_entry_d2 is not none else 'N/A' }}</b>)
         </p>
         <p style="font-weight: bold; color: green;">Total Wins: {{ session_data.total_wins }} | Total Losses: {{ session_data.total_losses }}</p>
         <p style="font-weight: bold; color: #007bff;">Current Strategy: {{ strategy }}</p>
