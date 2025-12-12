@@ -27,7 +27,7 @@ SYNC_SECONDS = []
 
 # 🚨 التعديل: تغيير نوع العقد إلى DIGITDIFF Target 9
 TRADE_CONFIGS = [
-    {"type": "DIGITDIFF", "target": "9", "label": "DIGITDIFF_9"} 
+    {"type": "DIGITDIFF", "barrier": "9", "label": "DIGITDIFF_9"} 
 ]
 
 # ==========================================================
