@@ -212,8 +212,9 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
             print(f"❌ [ERROR] Could not terminate final check process for {email}: {e}")
 
 
+    # تحديث القاموس المشترك للتأكد من التصفير
     if is_contract_open is not None and email in is_contract_open:
-        is_contract_open[email] = False # 👈 تحديث القاموس المشترك للتأكد من التصفير
+        is_contract_open[email] = False 
 
     if clear_data:
         delete_session_data(email) # 🧹 مسح ملف الجلسة
@@ -1055,8 +1056,8 @@ def control_panel():
     email = session['email']
     session_data = get_session_data(email)
 
-    # 👈 قراءة is_contract_open كقاموس مشترك عالمي
-    global is_contract_open 
+    # 🚨 تم إزالة global is_contract_open من هنا لحل الـ SyntaxError.
+    # المتغير is_contract_open معرف في النطاق العام ويمكن قراءته مباشرة.
 
     return render_template_string(CONTROL_FORM,
         email=email,
@@ -1067,7 +1068,7 @@ def control_panel():
         max_martingale_step=MARTINGALE_STEPS,
         martingale_multiplier=MARTINGALE_MULTIPLIER,
         max_consecutive_losses=MAX_CONSECUTIVE_LOSSES,
-        is_contract_open=is_contract_open, # 👈 تمرير القاموس المشترك
+        is_contract_open=is_contract_open, # 👈 استخدامه للقراءة صحيح
         TRADE_CONFIGS=TRADE_CONFIGS
     )
 
@@ -1165,11 +1166,11 @@ def stop_route():
     return redirect(url_for('control_panel'))
 
 if __name__ == '__main__':
-    # 🚨🚨 التعديل الجذري: تهيئة Manager والقواميس المشتركة 🚨🚨
+    # 🚨🚨 التعديل الذي يحل الـ SyntaxError: إزالة 'global' من هنا 🚨🚨
     manager = multiprocessing.Manager()
     
     # القاموس المشترك لحالة العقد المفتوح
-    global is_contract_open
+    global is_contract_open # ❌ تم تعريفه هنا كعام، لذا لا يجب استخدام global مرة أخرى
     is_contract_open = manager.dict() 
     
     # القواميس الأخرى التي تتعامل مع Process objects (تبقى قواميس عادية في العملية الرئيسية)
