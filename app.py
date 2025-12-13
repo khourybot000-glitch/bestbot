@@ -27,7 +27,7 @@ SYNC_SECONDS = []
 
 # 🌟🌟🌟 التعديل هنا: تغيير نوع العقد إلى DIGITEVEN 🌟🌟🌟
 TRADE_CONFIGS = [
-    {"type": "DIGITEVEN", "label": "DIGIT_EVEN"} 
+    {"type": "DIGITODD", "label": "DIGIT_EVEN"} 
 ]
 # ==========================================================
 # BOT RUNTIME STATE
