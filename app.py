@@ -15,8 +15,8 @@ WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
 DURATION = 5          
 DURATION_UNIT = "t"
-MARTINGALE_STEPS = 2          
-MAX_CONSECUTIVE_LOSSES = 3    
+MARTINGALE_STEPS = 3          
+MAX_CONSECUTIVE_LOSSES = 4    
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
@@ -27,7 +27,7 @@ SYNC_SECONDS = []
 
 # 🌟🌟🌟 الإعدادات الحالية: ONETOUCH وحاجز +0.1 🌟🌟🌟
 TRADE_CONFIGS = [
-    {"type": "ONETOUCH", "barrier": "-0.1", "label": "ONETOUCH_0_1"} 
+    {"type": "ONETOUCH", "barrier": "+0.1", "label": "ONETOUCH_0_1"} 
 ]
 # ==========================================================
 # BOT RUNTIME STATE
