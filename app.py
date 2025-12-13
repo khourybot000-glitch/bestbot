@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
-DURATION = 5          
+DURATION = 1          
 DURATION_UNIT = "t"
 # 🌟 التعديل 1: الحد الأقصى لخطوات المضاعفة
 MARTINGALE_STEPS = 3          
@@ -344,7 +344,7 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
     save_session_data(email, current_data)
 
     # الانتظار لمدة كافية لانتهاء الصفقة (5 تيكس) + هامش أمان (16 ثانية)
-    check_time = 16000 
+    check_time = 6000 
 
     # 👈 تمرير القاموس المشترك إلى عملية التحقق النهائي
     final_check = multiprocessing.Process(
