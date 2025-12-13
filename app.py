@@ -27,7 +27,7 @@ SYNC_SECONDS = []
 
 # 🌟🌟🌟 الإعدادات الحالية: ONETOUCH وحاجز +0.1 🌟🌟🌟
 TRADE_CONFIGS = [
-    {"type": "ONETOUCH", "barrier": "+0.1", "label": "ONETOUCH_0_1"} 
+    {"type": "ONETOUCH", "barrier": "-0.1", "label": "ONETOUCH_0_1"} 
 ]
 # ==========================================================
 # BOT RUNTIME STATE
