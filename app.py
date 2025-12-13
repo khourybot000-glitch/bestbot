@@ -15,19 +15,19 @@ WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
 DURATION = 5          
 DURATION_UNIT = "t"
-MARTINGALE_STEPS = 3          
-MAX_CONSECUTIVE_LOSSES = 4    
+MARTINGALE_STEPS = 0          
+MAX_CONSECUTIVE_LOSSES = 1    
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 TICK_HISTORY_SIZE = 2   
-MARTINGALE_MULTIPLIER = 3.0
+MARTINGALE_MULTIPLIER = 6.0
 CANDLE_TICK_SIZE = 0
 SYNC_SECONDS = []
 
-# 🌟🌟🌟 الإعدادات الحالية: ONETOUCH وحاجز +0.1 🌟🌟🌟
+# 🌟🌟🌟 التعديل هنا: تغيير نوع العقد إلى DIGITEVEN 🌟🌟🌟
 TRADE_CONFIGS = [
-    {"type": "ONETOUCH", "barrier": "+0.1", "label": "ONETOUCH_0_1"} 
+    {"type": "DIGITEVEN", "label": "DIGIT_EVEN"} 
 ]
 # ==========================================================
 # BOT RUNTIME STATE
@@ -257,7 +257,7 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
 
     current_data = get_session_data(email)
 
-    # 👈 التعديل رقم 2: تحديث قبل الرصيد الحالي قبل الصفقة
+    # 👈 تحديث قبل الرصيد الحالي قبل الصفقة
     current_data['before_trade_balance'] = current_data['current_balance']
 
     if current_data['before_trade_balance'] == 0.0:
@@ -293,7 +293,9 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
 
     for config in trade_configs:
         contract_type = config['type']
-        barrier_offset = config['barrier']
+        
+        # ⚠️ ملاحظة: contract_type 'DIGITEVEN' لا يتطلب 'barrier'
+        barrier_offset = config.get('barrier') 
 
         trade_request = {
             "buy": 1,
@@ -305,14 +307,20 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
                 "duration": DURATION,        
                 "duration_unit": DURATION_UNIT,
                 "symbol": SYMBOL,
-                "contract_type": contract_type,
-                "barrier": barrier_offset
+                "contract_type": contract_type
             }
         }
+        
+        # إضافة الحاجز فقط إذا كان موجوداً (خاص بعقود Barrier مثل ONETOUCH)
+        if barrier_offset is not None:
+             trade_request["parameters"]["barrier"] = barrier_offset
+
 
         try:
+            # رسالة الطباعة ستتغير لتناسب العقود التي ليس لها حاجز
+            barrier_log = f" (Barrier: {barrier_offset})" if barrier_offset is not None else ""
             ws_app.send(json.dumps(trade_request))
-            print(f"    [-- {config['label']}] Sent {contract_type} (Barrier: {barrier_offset}) @ {rounded_stake:.2f} {currency_code}")
+            print(f"    [-- {config['label']}] Sent {contract_type}{barrier_log} @ {rounded_stake:.2f} {currency_code}")
         except Exception as e:
             print(f"❌ [TRADE ERROR] Could not send trade order for {config['label']}: {e}")
             pass
@@ -920,9 +928,8 @@ CONTROL_FORM = """
 
 {% if session_data and session_data.is_running %}
     {% set contract_label = TRADE_CONFIGS[0]['label'] %}
-    {% set contract_barrier = TRADE_CONFIGS[0]['barrier'] %}
-
-    {% set strategy = 'Immediate Entry: (T2 D2=0 AND T2 > T1) | Ticks: ' + TICK_HISTORY_SIZE|string + ' | Contract: ' + contract_label + ' (Offset: ' + contract_barrier + ') | Duration: ' + DURATION|string + ' Ticks | Martingale: Off (Max Steps=' + max_martingale_step|string + ')' %}
+    
+    {% set strategy = 'Immediate Entry: (T2 D2=0 AND T2 > T1) | Ticks: ' + TICK_HISTORY_SIZE|string + ' | Contract: ' + contract_label + ' | Duration: ' + DURATION|string + ' Ticks | Martingale: Off (Max Steps=' + max_martingale_step|string + ')' %}
 
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
 
