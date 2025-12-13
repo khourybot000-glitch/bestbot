@@ -247,95 +247,96 @@ def calculate_martingale_stake(base_stake, current_step):
         return base_stake
 
 
-def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martingale=False, shared_is_contract_open=None):
+def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martingale=False):
     """
-    يرسل أوامر شراء (صفقة واحدة) في نفس اللحظة.
+    يرسل أوامر شراء متعددة (صفقة واحدة في هذا الإصدار).
     """
-    global final_check_processes
-
+    global is_contract_open 
+    global final_check_processes 
+    
     if email not in active_ws or active_ws[email] is None: return
     ws_app = active_ws[email]
-
+    
     current_data = get_session_data(email)
-
-    # 👈 التعديل رقم 2: تحديث قبل الرصيد الحالي قبل الصفقة
-    current_data['before_trade_balance'] = current_data['current_balance']
-
+    
+    # التعديل الحاسم: حفظ الرصيد الحالي كمرجع BEFORE_TRADE_BALANCE
+    current_data['before_trade_balance'] = current_data['current_balance'] 
+    
     if current_data['before_trade_balance'] == 0.0:
         print("⚠️ [STAKE WARNING] Before trade balance is 0.0. PNL calculation will rely heavily on the final balance check.")
         pass
 
+    # إذا كنا في المضاعفة، نستخدم الرهان الذي تم حسابه وحفظه مسبقاً في حالة الخسارة
     if is_martingale:
         stake_per_contract = current_data['martingale_stake']
     else:
         stake_per_contract = base_stake
-
+        
     rounded_stake = round(stake_per_contract, 2)
-
-    current_data['current_stake'] = rounded_stake
-    # في حالة الصفقات المتعددة، نستخدم الرهان لكل صفقة
+    
+    current_data['current_stake'] = rounded_stake 
     current_data['current_total_stake'] = rounded_stake * len(trade_configs) 
     current_data['last_entry_price'] = current_data['last_tick_data']['price'] if current_data.get('last_tick_data') else 0.0
-
+    
     entry_digits = get_target_digits(current_data['last_entry_price'])
-    current_data['last_entry_d2'] = entry_digits[1] if len(entry_digits) > 1 else 'N/A'
-
-    current_data['open_contract_ids'] = []
-
+    # D2 هو الرقم الثاني (index 1)
+    current_data['last_entry_d2'] = entry_digits[1] if len(entry_digits) > 1 else 'N/A' 
+    
+    current_data['open_contract_ids'] = [] 
+    
     entry_msg = f"MARTINGALE STEP {current_data['current_step']}" if is_martingale else "BASE SIGNAL"
-
+    
+    # T1 D2 يتم حسابه من التيك الأول في history و T4 D2 هو التيك الأخير (index 3)
     tick_T1_price = current_data['tick_history'][0]['price'] if len(current_data['tick_history']) == TICK_HISTORY_SIZE else 0.0
-    tick_T2_price = current_data['tick_history'][1]['price'] if len(current_data['tick_history']) == TICK_HISTORY_SIZE else 0.0
-    t2_d2_entry = get_target_digits(tick_T2_price)[1] if len(get_target_digits(tick_T2_price)) > 1 else 'N/A'
-
-
-    print(f"\n💰 [TRADE START] T1: {tick_T1_price:.2f} | T2: {tick_T2_price:.2f} | T2 D2: {t2_d2_entry} | Stake: {current_data['current_total_stake']:.2f} ({entry_msg}) | Balance Ref: {current_data['before_trade_balance']:.2f} {currency_code}")
+    t1_d2_entry = get_target_digits(tick_T1_price)[1] if len(get_target_digits(tick_T1_price)) > 1 else 'N/A'
+    t4_d2_entry = current_data['last_entry_d2'] 
+    
+    print(f"\n💰 [TRADE START] T1 D2: {t1_d2_entry} | T4 D2: {t4_d2_entry} | Total Stake: {current_data['current_total_stake']:.2f} ({entry_msg}) | Balance Ref: {current_data['before_trade_balance']:.2f} {currency_code}")
 
 
     for config in trade_configs:
         contract_type = config['type']
-        barrier_offset = config['barrier']
-
+        target_digit = config['target_digit']
+        label = config['label']
+        
         trade_request = {
-            "buy": 1,
-            "price": rounded_stake,
+            "buy": 1, 
+            "price": rounded_stake, 
             "parameters": {
-                "amount": rounded_stake,
+                "amount": rounded_stake, 
                 "basis": "stake",
-                "currency": currency_code,
-                "duration": DURATION,        
-                "duration_unit": DURATION_UNIT,
-                "symbol": SYMBOL,
+                "currency": currency_code, 
+                "duration": DURATION,  
+                "duration_unit": DURATION_UNIT, 
+                "symbol": SYMBOL, 
                 "contract_type": contract_type,
-                "barrier": barrier_offset
+                "barrier": str(target_digit) 
             }
         }
-
+        
         try:
             ws_app.send(json.dumps(trade_request))
-            print(f"   [-- {config['label']}] Sent {contract_type} (Barrier: {barrier_offset}) @ {rounded_stake:.2f} {currency_code}")
+            # 🚨 تم تحديث الرسالة إلى UNDER 8
+            print(f"   [-- {label}] Sent {contract_type} (Barrier: {target_digit}) @ {rounded_stake:.2f} {currency_code}") 
         except Exception as e:
-            print(f"❌ [TRADE ERROR] Could not send trade order for {config['label']}: {e}")
+            print(f"❌ [TRADE ERROR] Could not send trade order for {label}: {e}")
             pass
-
-    # 👈 التحديث في القاموس المشترك
-    if shared_is_contract_open is not None:
-        shared_is_contract_open[email] = True 
-        
-    current_data['last_entry_time'] = time.time() * 1000
-
+            
+    is_contract_open[email] = True 
+    current_data['last_entry_time'] = time.time() * 1000 
+    
     if is_martingale:
-          current_data['pending_martingale'] = False
-
-    save_session_data(email, current_data)
-
-    # الانتظار لمدة كافية لانتهاء الصفقة (5 تيكس) + هامش أمان (16 ثانية)
-    check_time = 16000 
-
-    # 👈 تمرير القاموس المشترك إلى عملية التحقق النهائي
+         current_data['pending_martingale'] = False 
+         
+    # حفظ الحالة بعد إرسال الأوامر وتحديد الرصيد المرجعي
+    save_session_data(email, current_data) 
+    
+    # بدء عملية التحقق النهائي المنفصلة
+    check_time = 4000 # 4 ثواني
+    
     final_check = multiprocessing.Process(
-        target=final_check_process,
-        args=(email, current_data['api_token'], current_data['last_entry_time'], check_time, shared_is_contract_open)
+        target=final_check_process, 
+        args=(email, current_data['api_token'], current_data['last_entry_time'], check_time)
     )
     final_check.start()
     final_check_processes[email] = final_check
