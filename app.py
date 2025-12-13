@@ -15,19 +15,19 @@ WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
 DURATION = 5            
 DURATION_UNIT = "t"
-MARTINGALE_STEPS = 0            
-MAX_CONSECUTIVE_LOSSES = 1      
+MARTINGALE_STEPS = 2            
+MAX_CONSECUTIVE_LOSSES = 3      
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 TICK_HISTORY_SIZE = 2   
-MARTINGALE_MULTIPLIER = 6.0
+MARTINGALE_MULTIPLIER = 3.0
 CANDLE_TICK_SIZE = 0
 SYNC_SECONDS = []
 
 # إعدادات الدخول: صفقة واحدة فقط (LOWER -0.6)
 TRADE_CONFIGS = [
-    {"type": "PUT", "barrier": "+0.6", "label": "LOWER_0_6"} 
+    {"type": "ONETOUCH", "barrier": "+0.1", "label": "LOWER_0_6"} 
 ]
 
 # ==========================================================
