@@ -26,7 +26,7 @@ CANDLE_TICK_SIZE = 0
 SYNC_SECONDS = [] 
 TRADE_CONFIGS = [
     # 🚨 تم التعديل: صفقة واحدة: UNDER 8 (الرقم الأخير أصغر من 8)
-    {"type": "DIGITDIFF", "target_digit": 2, "label": "DIFFER_2"}, 
+    {"type": "DIGITDIFF", "target_digit": 4, "label": "DIFFER_2"}, 
 ]
 TARGET_D2_THRESHOLD = 4 # 🚨 تم التعديل: يجب أن يكون D2 أصغر من 8
 
