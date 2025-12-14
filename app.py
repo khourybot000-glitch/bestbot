@@ -320,7 +320,7 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
     save_session_data(email, current_data)
 
     # وقت التحقق النهائي 6 ثواني + 5 تيك (لأغراض تقديرية)
-    check_time_ms = 6000 + (DURATION * 1000) 
+    check_time_ms = 16000 + (DURATION * 1000) 
 
     final_check = multiprocessing.Process(
         target=final_check_process,
