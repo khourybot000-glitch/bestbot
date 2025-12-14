@@ -9,28 +9,32 @@ from flask import Flask, request, render_template_string, redirect, url_for, ses
 from datetime import datetime, timezone
 
 # ==========================================================
-# BOT CONSTANT SETTINGS
+# BOT CONSTANT SETTINGS (UPDATED)
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929"
-SYMBOL = "R_100"
-DURATION = 1          
+# 🌟 التعديل 1: تغيير الأصل
+SYMBOL = "R_25"
+# 🌟 التعديل 2: تغيير مدة الصفقة
+DURATION = 3          
 DURATION_UNIT = "t"
-# 🌟 التعديل 1: الحد الأقصى لخطوات المضاعفة
-MARTINGALE_STEPS = 3          
-# 🌟 التعديل 2: الحد الأقصى للخسائر المتتالية
-MAX_CONSECUTIVE_LOSSES = 4    
+# 🌟 التعديل 3: الحد الأقصى لخطوات المضاعفة
+MARTINGALE_STEPS = 1          
+# 🌟 التعديل 4: الحد الأقصى للخسائر المتتالية
+MAX_CONSECUTIVE_LOSSES = 1    
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
-TICK_HISTORY_SIZE = 3   
-# 🌟 التعديل 3: معامل المضاعفة
-MARTINGALE_MULTIPLIER = 2.2
+# 🌟 التعديل 5: تحليل تيك واحد فقط
+TICK_HISTORY_SIZE = 1   
+# 🌟 التعديل 6: معامل المضاعفة الهائل
+MARTINGALE_MULTIPLIER = 14.0
 CANDLE_TICK_SIZE = 0
 SYNC_SECONDS = []
 
-# 🌟🌟🌟 الإعدادات الحالية: DIGITEVEN (هدف زوجي) 🌟🌟🌟
+# 🌟🌟🌟 الإعدادات الحالية: DIGITDIFF (الرقم الأخير لا يساوي 0) 🌟🌟🌟
 TRADE_CONFIGS = [
-    {"type": "DIGITEVEN", "label": "DIGIT_EVEN"} 
+    # contract_type 'DIGITDIFF' requires a 'barrier' for the difference
+    {"type": "DIGITDIFF", "barrier": 0, "label": "DIGIT_DIFF_0"} 
 ]
 # ==========================================================
 # BOT RUNTIME STATE
@@ -78,7 +82,7 @@ is_contract_open = None
 
 
 # ----------------------------------------------------------
-# Persistent State Management Functions
+# Persistent State Management Functions (No change here)
 # ----------------------------------------------------------
 
 def get_file_lock(f):
@@ -281,8 +285,9 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
     current_data['current_total_stake'] = rounded_stake * len(trade_configs) 
     current_data['last_entry_price'] = current_data['last_tick_data']['price'] if current_data.get('last_tick_data') else 0.0
 
+    # 🌟 التعديل: استخلاص D3 من التيك الأخير
     entry_digits = get_target_digits(current_data['last_entry_price'])
-    current_data['last_entry_d2'] = entry_digits[1] if len(entry_digits) > 1 else 'N/A'
+    current_data['last_entry_d2'] = entry_digits[2] if len(entry_digits) > 2 else 'N/A' # هنا يتم استخدام D3 للعرض
 
     current_data['open_contract_ids'] = []
 
@@ -290,18 +295,18 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
 
     # لغرض العرض والطباعة في اللوغ
     tick_T1_price = current_data['tick_history'][0]['price'] if len(current_data['tick_history']) >= 1 else 0.0
-    tick_T2_price = current_data['tick_history'][1]['price'] if len(current_data['tick_history']) >= 2 else 0.0
-    tick_T3_price = current_data['tick_history'][2]['price'] if len(current_data['tick_history']) == TICK_HISTORY_SIZE else 0.0
-    t3_d2_entry = get_target_digits(tick_T3_price)[1] if len(get_target_digits(tick_T3_price)) > 1 else 'N/A'
+    
+    # 🌟 التعديل: التحليل الآن يتم على T1 فقط
+    t1_d3_entry = get_target_digits(tick_T1_price)[2] if len(get_target_digits(tick_T1_price)) > 2 else 'N/A'
 
 
-    print(f"\n💰 [TRADE START] T1: {tick_T1_price:.2f} | T2: {tick_T2_price:.2f} | T3: {tick_T3_price:.2f} | T3 D2: {t3_d2_entry} | Stake: {current_data['current_total_stake']:.2f} ({entry_msg}) | Balance Ref: {current_data['before_trade_balance']:.2f} {currency_code}")
+    print(f"\n💰 [TRADE START] T1: {tick_T1_price:.3f} | T1 D3: {t1_d3_entry} | Stake: {current_data['current_total_stake']:.2f} ({entry_msg}) | Balance Ref: {current_data['before_trade_balance']:.2f} {currency_code}")
 
 
     for config in trade_configs:
         contract_type = config['type']
         
-        # ⚠️ ملاحظة: contract_type 'DIGITEVEN' لا يتطلب 'barrier'
+        # ⚠️ ملاحظة: contract_type 'DIGITDIFF' يتطلب 'barrier' (وهو رقم النهاية المتوقع ألا يظهر)
         barrier_offset = config.get('barrier') 
 
         trade_request = {
@@ -314,18 +319,14 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
                 "duration": DURATION,        
                 "duration_unit": DURATION_UNIT,
                 "symbol": SYMBOL,
-                "contract_type": contract_type
+                "contract_type": contract_type,
+                "barrier": barrier_offset # إلزامي لـ DIGITDIFF
             }
         }
         
-        # إضافة الحاجز فقط إذا كان موجوداً (خاص بعقود Barrier مثل ONETOUCH)
-        if barrier_offset is not None:
-             trade_request["parameters"]["barrier"] = barrier_offset
-
-
+        # إضافة الحاجز فقط إذا كان موجوداً
+        barrier_log = f" (Barrier: {barrier_offset})" if barrier_offset is not None else ""
         try:
-            # رسالة الطباعة ستتغير لتناسب العقود التي ليس لها حاجز
-            barrier_log = f" (Barrier: {barrier_offset})" if barrier_offset is not None else ""
             ws_app.send(json.dumps(trade_request))
             print(f"    [-- {config['label']}] Sent {contract_type}{barrier_log} @ {rounded_stake:.2f} {currency_code}")
         except Exception as e:
@@ -343,8 +344,9 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
 
     save_session_data(email, current_data)
 
-    # الانتظار لمدة كافية لانتهاء الصفقة (5 تيكس) + هامش أمان (16 ثانية)
-    check_time = 6000 
+    # الانتظار لمدة كافية لانتهاء الصفقة (3 تيكس) + هامش أمان (16 ثانية)
+    # ملاحظة: 10 ثواني تكفي عادة لصفقة 3 تيكس
+    check_time = 10000 
 
     # 👈 تمرير القاموس المشترك إلى عملية التحقق النهائي
     final_check = multiprocessing.Process(
@@ -404,6 +406,7 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
         current_data['total_losses'] += 1
         current_data['consecutive_losses'] += 1
 
+        # 🌟 التعديل: التحقق من حد الخسائر المتتالية
         if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES:
             stop_triggered = f"SL Reached ({MAX_CONSECUTIVE_LOSSES} Consecutive Losses)"
 
@@ -427,7 +430,7 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
                 current_data['pending_martingale'] = False
                 current_data['current_total_stake'] = current_data['base_stake'] * len(TRADE_CONFIGS)
                 current_data['current_step'] = 0
-                current_data['consecutive_losses'] = 0 # ستتم إعادة ضبطها لاحقًا عند الوصول إلى الحد الأقصى للخسائر المتتالية
+                current_data['consecutive_losses'] = 0 # سيتم إعادة ضبطها لاحقًا عند الوصول إلى الحد الأقصى للخسائر المتتالية
 
         current_data['tick_history'] = []
 
@@ -443,29 +446,35 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
         return
 
 # ==========================================================
-# UTILITY FUNCTIONS FOR PRICE MOVEMENT ANALYSIS
+# UTILITY FUNCTIONS FOR PRICE MOVEMENT ANALYSIS (UPDATED)
 # ==========================================================
 
 def get_target_digits(price):
     """
-    يستخرج الأرقام العشرية من سعر التيك، مع الاقتصار على رقمين بعد الفاصلة.
+    يستخرج الأرقام العشرية من سعر التيك، مع الاقتصار على ثلاثة أرقام بعد الفاصلة.
     """
     try:
-        # تنسيق السعر لضمان وجود خانتين عشريتين
-        formatted_price = "{:.2f}".format(float(price)) 
+        # 🌟 التعديل: تنسيق السعر لضمان وجود ثلاث خانات عشرية (0.000)
+        formatted_price = "{:.3f}".format(float(price)) 
 
         if '.' in formatted_price:
             parts = formatted_price.split('.')
             decimal_part = parts[1] 
 
-            digits = [int(d) for d in decimal_part if d.isdigit()]
+            # نأخذ أول ثلاثة أرقام فقط
+            digits = [int(d) for d in decimal_part[:3] if d.isdigit()]
+            
+            # إذا كان أقل من 3 أرقام، نملأها بالصفر
+            while len(digits) < 3:
+                 digits.append(0)
+
             return digits 
 
-        return [0, 0]
+        return [0, 0, 0] # 🌟 التعديل: العودة بثلاثة أصفار
 
     except Exception as e:
         print(f"Error calculating target digits: {e}")
-        return [0, 0]
+        return [0, 0, 0]
 
 def is_odd(digit):
     """ يتحقق مما إذا كان الرقم فردياً (1, 3, 5, 7, 9) """
@@ -474,7 +483,7 @@ def is_odd(digit):
     return digit % 2 != 0
 
 # ----------------------------------------------------------
-# SYNC BALANCE RETRIEVAL
+# SYNC BALANCE RETRIEVAL (No change here)
 # ----------------------------------------------------------
 
 def get_initial_balance_sync(token):
@@ -533,7 +542,7 @@ def get_balance_sync(token):
         return None, f"Connection/Request Failed: {e}"
 
 # ==========================================================
-# عملية التحقق النهائي المنفصلة (Final Check)
+# عملية التحقق النهائي المنفصلة (Final Check) (No change here)
 # ==========================================================
 
 def final_check_process(email, token, start_time_ms, time_to_wait_ms, shared_is_contract_open):
@@ -581,7 +590,7 @@ def final_check_process(email, token, start_time_ms, time_to_wait_ms, shared_is_
 
 
 # ==========================================================
-# CORE BOT LOGIC
+# CORE BOT LOGIC (UPDATED)
 # ==========================================================
 
 def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_is_contract_open):
@@ -692,14 +701,14 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
 
             current_data['tick_history'].append(tick_data)
 
-            if len(current_data['tick_history']) >= TICK_HISTORY_SIZE:
-                current_data['display_t1_price'] = current_data['tick_history'][0]['price']
-                current_data['display_t4_price'] = current_data['tick_history'][1]['price'] # T2
-                current_data['display_t3_price'] = current_data['tick_history'][2]['price'] # T3
-            else:
-                current_data['display_t1_price'] = 0.0
-                current_data['display_t4_price'] = 0.0
-                current_data['display_t3_price'] = current_price # آخر تيك
+            # 🌟 التعديل: تحليل تيك واحد فقط (TICK_HISTORY_SIZE = 1)
+            if len(current_data['tick_history']) > TICK_HISTORY_SIZE:
+                 current_data['tick_history'].pop(0)
+
+            # 🌟 التعديل: عرض التيك الحالي على أنه T1
+            current_data['display_t1_price'] = current_price
+            current_data['display_t4_price'] = 0.0
+            current_data['display_t3_price'] = 0.0
 
             # 👈 قراءة القاموس المشترك لتحديد حالة العقد
             is_open = shared_is_contract_open.get(email) if shared_is_contract_open is not None else False
@@ -712,43 +721,36 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                 is_time_gap_respected = time_since_last_entry_ms > 5000 
 
                 if not is_time_gap_respected:
-                    # نُبقي فقط على آخر عدد مطلوب من التيكس إذا كان الفارق الزمني لم يُحترم
-                    if len(current_data['tick_history']) > TICK_HISTORY_SIZE:
-                        current_data['tick_history'].pop(0)
                     save_session_data(email, current_data)
                     return
 
-                # 🚨🚨 المرحلة 1: التحقق الفوري من شرط الدخول على 3 تيك 🚨🚨
+                # 🚨🚨 المرحلة 1: التحقق الفوري من شرط الدخول على 1 تيك 🚨🚨
                 if len(current_data['tick_history']) == TICK_HISTORY_SIZE:
 
                     tick_T1_price = current_data['tick_history'][0]['price']
-                    tick_T2_price = current_data['tick_history'][1]['price']
-                    tick_T3_price = current_data['tick_history'][2]['price'] # التيك الثالث
 
+                    # 🌟 التعديل: استخراج 3 أرقام عشرية
                     digits_T1 = get_target_digits(tick_T1_price)
-                    digits_T2 = get_target_digits(tick_T2_price)
-                    digits_T3 = get_target_digits(tick_T3_price)
 
-                    # 🌟 الشرط الرئيسي: T1 D2, T2 D2, T3 D2 جميعها أرقام فردية
-                    T1_D2 = digits_T1[1] if len(digits_T1) >= 2 else None
-                    T2_D2 = digits_T2[1] if len(digits_T2) >= 2 else None
-                    T3_D2 = digits_T3[1] if len(digits_T3) >= 2 else None
+                    # 🌟 الشرط الرئيسي: T1 D3 يساوي 7
+                    T1_D3 = digits_T1[2] if len(digits_T1) >= 3 else None
 
-                    condition_all_d2_odd = is_odd(T1_D2) and is_odd(T2_D2) and is_odd(T3_D2)
+                    condition_t1_d3_is_7 = (T1_D3 == 7)
 
                     # 👈 تطبيق منطق الدخول
-                    if condition_all_d2_odd:
-                        # 🚀 إشارة دخول قوية (هدف زوجي)
+                    if condition_t1_d3_is_7:
+                        # 🚀 إشارة دخول قوية (هدف DIGITDIFF0)
                         is_martingale = current_data['current_step'] > 0
                         execute_multi_trade(email, current_data, is_martingale=is_martingale) 
 
                         current_data['tick_history'] = []
 
-                        print(f"🚀 [IMMEDIATE ENTRY CONFIRMED] 3 Ticks (T1 D2:{T1_D2}, T2 D2:{T2_D2}, T3 D2:{T3_D2}) ALL ODD. Executing DIGITEVEN (Step: {current_data['current_step']}).")
+                        print(f"🚀 [IMMEDIATE ENTRY CONFIRMED] T1 D3:{T1_D3} == 7. Executing DIGITDIFF0 (Step: {current_data['current_step']}).")
 
                     else:
-                        current_data['tick_history'].pop(0)
-                        print(f"🔄 [3-TICK ANALYSIS] Condition not met. T1 D2:{T1_D2}, T2 D2:{T2_D2}, T3 D2:{T3_D2}. Clearing T1.")
+                        current_data['tick_history'] = [] # مسح التيك والانتظار للتيك التالي
+                        print(f"🔄 [1-TICK ANALYSIS] Condition (T1 D3 == 7) not met. Current T1 D3:{T1_D3}. Clearing T1.")
+
 
                 save_session_data(email, current_data)
 
@@ -796,7 +798,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
 
 
 # ==========================================================
-# FLASK APP SETUP AND ROUTES
+# FLASK APP SETUP AND ROUTES (UPDATED FOR D3 DISPLAY)
 # ==========================================================
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
@@ -943,50 +945,28 @@ CONTROL_FORM = """
 {% if session_data and session_data.is_running %}
     {% set contract_label = TRADE_CONFIGS[0]['label'] %}
     
-    {% set strategy = '3 Ticks D2 ALL ODD -> Entry: ' + contract_label + ' | Ticks: ' + TICK_HISTORY_SIZE|string + ' | Duration: ' + DURATION|string + ' Ticks | Martingale: On (Max Steps=' + max_martingale_step|string + ', Multiplier=' + martingale_multiplier|string + ')' %}
+    {% set strategy = '1 Tick (T1 D3=7) -> Entry: ' + contract_label + ' | Ticks: ' + TICK_HISTORY_SIZE|string + ' | Duration: ' + DURATION|string + ' Ticks | Martingale: On (Max Steps=' + max_martingale_step|string + ', Multiplier=' + martingale_multiplier|string + ')' %}
 
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
 
-    {# 🌟 Display T1, T2, T3 Prices and D2 Digits #}
+    {# 🌟 Display T1 Price and D3 Digit #}
     <div class="tick-box">
         {# T1 Display #}
         <div>
-            <span class="info-label">T1 Price:</span> <b>{% if session_data.display_t1_price %}{{ "%0.2f"|format(session_data.display_t1_price) }}{% else %}N/A{% endif %}</b>
+            <span class="info-label">T1 Price:</span> <b>{% if session_data.display_t1_price %}{{ "%0.3f"|format(session_data.display_t1_price) }}{% else %}N/A{% endif %}</b>
             <br>
-            <span class="info-label">T1 D2:</span>
+            <span class="info-label">T1 D3 (Current):</span>
             <b class="current-digit">
-            {% set price_str = "%0.2f"|format(session_data.display_t1_price) %}
+            {% set price_str = "%0.3f"|format(session_data.display_t1_price) %}
             {% set price_parts = price_str.split('.') %}
-            {% set d2_digit = 'N/A' %}
-            {% if price_parts|length > 1 and price_parts[-1]|length >= 2 %}{% set d2_digit = price_parts[-1][1] %}{% endif %}
-            {{ d2_digit }}
+            {% set d3_digit = 'N/A' %}
+            {# 🌟 التعديل: التحقق من وجود 3 أرقام بعد الفاصلة وأخذ الرقم الثالث #}
+            {% if price_parts|length > 1 and price_parts[-1]|length >= 3 %}{% set d3_digit = price_parts[-1][2] %}{% endif %}
+            {{ d3_digit }}
             </b>
-        </div>
-        {# T2 Display #}
-        <div>
-            <span class="info-label">T2 Price:</span> <b>{% if session_data.display_t4_price %}{{ "%0.2f"|format(session_data.display_t4_price) }}{% else %}N/A{% endif %}</b>
-            <br>
-            <span class="info-label">T2 D2:</span>
-            <b class="current-digit">
-            {% set price_str = "%0.2f"|format(session_data.display_t4_price) %}
-            {% set price_parts = price_str.split('.') %}
-            {% set d2_digit = 'N/A' %}
-            {% if price_parts|length > 1 and price_parts[-1]|length >= 2 %}{% set d2_digit = price_parts[-1][1] %}{% endif %}
-            {{ d2_digit }}
-            </b>
-        </div>
-        {# T3 Display (Current/Last Tick) #}
-        <div>
-            <span class="info-label">T3 Price:</span> <b>{% if session_data.display_t3_price %}{{ "%0.2f"|format(session_data.display_t3_price) }}{% else %}N/A{% endif %}</b>
-            <br>
-            <span class="info-label">T3 D2 (Current):</span>
-            <b class="current-digit">
-            {% set price_str = "%0.2f"|format(session_data.display_t3_price) %}
-            {% set price_parts = price_str.split('.') %}
-            {% set d2_digit = 'N/A' %}
-            {% if price_parts|length > 1 and price_parts[-1]|length >= 2 %}{% set d2_digit = price_parts[-1][1] %}{% endif %}
-            {{ d2_digit }}
-            </b>
+            <p style="font-weight: normal; font-size: 0.8em; color: {% if d3_digit == '7' %}green{% else %}red{% endif %};">
+                Condition: D3 == 7
+            </p>
         </div>
     </div>
 
@@ -1013,7 +993,7 @@ CONTROL_FORM = """
             {# يتم التحقق من is_contract_open != none لتجنب الأخطاء في Gunicorn #}
             {% set is_open = is_contract_open.get(email) if is_contract_open is not none else false %}
             {% if is_open %}
-                Waiting 16s Check (Stake: {{ session_data.current_total_stake|round(2) }})
+                Waiting 10s Check (Stake: {{ session_data.current_total_stake|round(2) }})
             {% else %}
                 0 (Ready for Signal/Martingale)
             {% endif %}
@@ -1025,11 +1005,11 @@ CONTROL_FORM = """
             <b>
                 {% set is_open = is_contract_open.get(email) if is_contract_open is not none else false %}
                 {% if is_open %}
-                    Awaiting 16s Balance Check (Stake: {{ session_data.current_total_stake|round(2) }})
+                    Awaiting 10s Balance Check (Stake: {{ session_data.current_total_stake|round(2) }})
                 {% elif session_data.current_step > 0 %}
-                    MARTINGALE STEP {{ session_data.current_step }} @ Stake: {{ session_data.current_stake|round(2) }} (Searching 3-Tick Signal)
+                    MARTINGALE STEP {{ session_data.current_step }} @ Stake: {{ session_data.current_stake|round(2) }} (Searching T1 D3=7 Signal)
                 {% else %}
-                    BASE STAKE @ Stake: {{ session_data.base_stake|round(2) }} (Searching 3-Tick Signal)
+                    BASE STAKE @ Stake: {{ session_data.base_stake|round(2) }} (Searching T1 D3=7 Signal)
                 {% endif %}
             </b>
         </p>
@@ -1037,7 +1017,7 @@ CONTROL_FORM = """
         <p>Current Stake: <b>{{ session_data.currency }} {{ session_data.current_stake|round(2) }}</b></p>
         <p style="font-weight: bold; color: {% if session_data.consecutive_losses > 0 %}red{% else %}green{% endif %};">
         Consecutive Losses: <b>{{ session_data.consecutive_losses }}</b> / {{ max_consecutive_losses }}
-        (Last Entry D2: <b>{{ session_data.last_entry_d2 if session_data.last_entry_d2 is not none else 'N/A' }}</b>)
+        (Last Entry D3: <b>{{ session_data.last_entry_d2 if session_data.last_entry_d2 is not none else 'N/A' }}</b>)
         </p>
         <p style="font-weight: bold; color: green;">Total Wins: {{ session_data.total_wins }} | Total Losses: {{ session_data.total_losses }}</p>
         <p style="font-weight: bold; color: #007bff;">Current Strategy: {{ strategy }}</p>
@@ -1232,7 +1212,7 @@ def stop_route():
     return redirect(url_for('control_panel'))
 
 # ==========================================================
-# Gunicorn/Local Execution Entry Point & Shared State Setup
+# Gunicorn/Local Execution Entry Point & Shared State Setup (No change here)
 # ==========================================================
 
 # 🚨🚨 الإصلاح الحاسم لمشكلة Gunicorn/TypeError: 
