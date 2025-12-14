@@ -15,12 +15,12 @@ WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 # 🌟 التعديل 1: تغيير الأصل
 SYMBOL = "R_25"
 # 🌟 التعديل 2: تغيير مدة الصفقة
-DURATION = 3          
+DURATION = 2          
 DURATION_UNIT = "t"
 # 🌟 التعديل 3: الحد الأقصى لخطوات المضاعفة
 MARTINGALE_STEPS = 1          
 # 🌟 التعديل 4: الحد الأقصى للخسائر المتتالية
-MAX_CONSECUTIVE_LOSSES = 1    
+MAX_CONSECUTIVE_LOSSES = 2    
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
