@@ -15,7 +15,7 @@ WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 # 🌟 التعديل 1: تغيير الأصل
 SYMBOL = "R_25"
 # 🌟 التعديل 2: تغيير مدة الصفقة
-DURATION = 2          
+DURATION = 1          
 DURATION_UNIT = "t"
 # 🌟 التعديل 3: الحد الأقصى لخطوات المضاعفة
 MARTINGALE_STEPS = 1          
@@ -34,7 +34,7 @@ SYNC_SECONDS = []
 # 🌟🌟🌟 الإعدادات الحالية: DIGITDIFF (الرقم الأخير لا يساوي 0) 🌟🌟🌟
 TRADE_CONFIGS = [
     # contract_type 'DIGITDIFF' requires a 'barrier' for the difference
-    {"type": "DIGITDIFF", "barrier": 0, "label": "DIGIT_DIFF_0"} 
+    {"type": "DIGITDIFF", "barrier": 7, "label": "DIGIT_DIFF_0"} 
 ]
 # ==========================================================
 # BOT RUNTIME STATE
