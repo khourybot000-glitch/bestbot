@@ -700,11 +700,11 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                     condition_call = (tick_T2_price < tick_T1_price) and (T2_D2 == 1)
 
                     if condition_put:
-                        trade_signal = "PUT"
-                        trade_label = "PUT_ENTRY"
-                    elif condition_call:
                         trade_signal = "CALL"
                         trade_label = "CALL_ENTRY"
+                    elif condition_call:
+                        trade_signal = "PUT"
+                        trade_label = "PUT_ENTRY"
 
 
                     if trade_signal:
