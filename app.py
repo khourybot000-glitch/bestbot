@@ -439,7 +439,6 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
 # ==========================================================
 # UTILITY FUNCTIONS 
 # ==========================================================
-# (get_target_digits, get_initial_balance_sync, get_balance_sync remain the same)
 def get_target_digits(price):
     try:
         formatted_price = "{:.2f}".format(float(price)) 
@@ -510,7 +509,6 @@ def final_check_process(email, token, start_time_ms, time_to_wait_ms, shared_is_
     final_balance, error = get_balance_sync(token)
 
     if final_balance is not None:
-        # هذا هو المكان الذي يتم فيه تحديد ما إذا كانت هناك خسارة وتفعيل pending_martingale_restart
         check_pnl_limits_by_balance(email, final_balance) 
         
         current_data = get_session_data(email)
@@ -599,24 +597,31 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
         if is_immediate_restart and is_open is False:
             current_data = get_session_data(email) 
             
-            # التأكد من أن الخطوة > 0 (لأننا لا نريد المضاعفة عند الربح أو بعد الفشل في خطوات المضاعفة)
-            if current_data['current_step'] > 0 and current_data['current_step'] <= MARTINGALE_STEPS:
-
-                print(f"🚀 [IMMEDIATE MARTINGALE TRIGGERED] Executing Step {current_data['current_step']} trade immediately after loss confirmation.")
-                
-                # تنفيذ الصفقة المضاعفة فوراً
-                execute_single_trade(email, current_data) 
-                
-                # إلغاء علم إعادة التشغيل الفوري بعد التنفيذ الناجح
-                shared_pending_martingale_restart[email] = False
-                
+            # 💡 إذا كانت العلامة مفعَّلة ولم يكن WS نشطاً (انقطع بعد الخسارة)، يجب أن نمرر للسماح بإعادة الفتح أدناه
+            if active_ws.get(email) is None:
+                print("⚠️ [MARTINGALE PENDING] WS is closed. Waiting for mandatory reconnect before trade.")
+                pass 
             else:
-                 shared_pending_martingale_restart[email] = False # إعادة ضبط العلامة إذا كانت خاطئة
-            
-            # العودة إلى بداية حلقة 'while True' للانتظار حتى انتهاء الصفقة أو محاولة فتح WS
-            time.sleep(0.5)
-            session_data = get_session_data(email)
-            continue 
+                # إذا كان WS مفتوحاً، نستخدمه لإرسال الأمر
+                
+                # التأكد من أن الخطوة > 0 
+                if current_data['current_step'] > 0 and current_data['current_step'] <= MARTINGALE_STEPS:
+
+                    print(f"🚀 [IMMEDIATE MARTINGALE TRIGGERED] Executing Step {current_data['current_step']} trade immediately after loss confirmation.")
+                    
+                    # تنفيذ الصفقة المضاعفة فوراً
+                    execute_single_trade(email, current_data) 
+                    
+                    # إلغاء علم إعادة التشغيل الفوري بعد التنفيذ الناجح
+                    shared_pending_martingale_restart[email] = False
+                    
+                else:
+                     shared_pending_martingale_restart[email] = False # إعادة ضبط العلامة إذا كانت خاطئة
+                
+                # العودة إلى بداية حلقة 'while True' للانتظار حتى انتهاء الصفقة
+                time.sleep(0.5)
+                session_data = get_session_data(email)
+                continue 
 
 
         def execute_single_trade(email, current_data):
@@ -752,10 +757,16 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
         # -------------------------------------------------------------
         current_data = get_session_data(email)
         is_open = shared_is_contract_open.get(email) if shared_is_contract_open is not None else False
+        is_immediate_restart = shared_pending_martingale_restart.get(email) if shared_pending_martingale_restart is not None else False
 
-        # لا تحاول فتح WS إذا كان مفتوحاً أو كان هناك عقد قيد المراجعة
+        # 💡 لا تحاول فتح WS إذا كان مفتوحاً أو كان هناك عقد قيد المراجعة
         if active_ws.get(email) is None and is_open is False:
-            print(f"🔗 [PROCESS] Attempting to connect for {email} to {WSS_URL_UNIFIED}...")
+            
+            if is_immediate_restart:
+                print(f"🔗 [MARTINGALE RECONNECT] Forcing immediate WS reconnect to execute trade for {email}...")
+            else:
+                print(f"🔗 [PROCESS] Attempting to connect for {email} to {WSS_URL_UNIFIED}...")
+
 
             try:
                 ws = websocket.WebSocketApp(
@@ -775,15 +786,15 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
             if not session_data.get('is_running'):
                 break
 
-            if not shared_pending_martingale_restart.get(email, False):
+            # إذا تم فقدان الاتصال وليس هناك مضاعفة فورية معلقة، ننتظر قبل إعادة المحاولة
+            if not is_immediate_restart:
                  print(f"💤 [PROCESS] Waiting {RECONNECT_DELAY} seconds before retrying connection for {email}...")
                  time.sleep(RECONNECT_DELAY)
         else:
+              # إذا كان WS نشطاً أو عقد مفتوح، ننتظر قليلاً ونكرر الحلقة
               time.sleep(0.5)
               
     print(f"🛑 [PROCESS] Bot process ended for {email}.")
-
-# ... (بقية كود Flask كما هو) ...
 
 
 # ==========================================================
