@@ -7,7 +7,6 @@ import sys
 import fcntl
 import ssl
 from flask import Flask, request, render_template_string, redirect, url_for, session, flash
-from datetime import datetime, timezone
 
 # ==========================================================
 # BOT CONSTANT SETTINGS (FINAL)
@@ -18,23 +17,21 @@ SYMBOL = "R_100"
 # مدة الصفقة 1 تيك
 DURATION = 1          
 DURATION_UNIT = "t"
-# تفعيل المضاعفة 2 خطوات
-MARTINGALE_STEPS = 2          
-# الحد الأقصى للخسائر المتتالية 3
-MAX_CONSECUTIVE_LOSSES = 3    
+# ✅ المضاعفة خطوة واحدة
+MARTINGALE_STEPS = 1          
+# ✅ الحد الأقصى للخسائر المتتالية 2 
+MAX_CONSECUTIVE_LOSSES = 2    
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
-# تحليل 2 تيك 
-TICK_HISTORY_SIZE = 2   
-# مُضاعِف مارتينجال 4.0
-MARTINGALE_MULTIPLIER = 4.0 
-CANDLE_TICK_SIZE = 0
-SYNC_SECONDS = []
+# تحليل 3 تيكات
+TICK_HISTORY_SIZE = 3   
+# ✅ مُضاعِف مارتينجال 9.0 
+MARTINGALE_MULTIPLIER = 9.0 
 
-# نوع العقد: DIGITOVER مع حاجز 2 (Over 2)
+# 🔄 نوع العقد: DIGITOVER مع حاجز 2 (Over 2) - تم إرجاعه ليتوافق مع شرط الدخول D2=8|9
 TRADE_CONFIGS = [
-    {"type": "DIGITOVER", "barrier": 2, "label": "OVER_2_ENTRY"}, 
+    {"type": "DIGITUNDER", "barrier": 8, "label": "OVER_2_ENTRY"}, 
 ]
 
 # ==========================================================
@@ -64,12 +61,9 @@ DEFAULT_SESSION_STATE = {
     "open_contract_ids": [],
     "martingale_stake": 0.0,
     "martingale_config": TRADE_CONFIGS,
-    "pending_martingale": False,
     "is_balance_received": False,
     "stop_reason": "Stopped",
-    "pending_delayed_entry": False,
-    "entry_t1_d2": None,
-    "display_t1_price": 0.0,
+    "display_t1_price": 0.0, 
     "display_t4_price": 0.0, 
     "display_t3_price": 0.0,
     "last_trade_type": None
@@ -80,12 +74,9 @@ flask_local_processes = {}
 final_check_processes = {}
 active_ws = {}  
 is_contract_open = None  
-pending_martingale_restart = None 
-# ==========================================================
-
 
 # ----------------------------------------------------------
-# Persistent State Management Functions
+# Persistent State Management Functions (No Changes)
 # ----------------------------------------------------------
 
 def get_file_lock(f):
@@ -177,7 +168,6 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
     global flask_local_processes
     global final_check_processes
     global is_contract_open 
-    global pending_martingale_restart 
     global active_ws 
 
     current_data = get_session_data(email)
@@ -222,9 +212,6 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
     if is_contract_open is not None and email in is_contract_open:
         is_contract_open[email] = False 
     
-    if pending_martingale_restart is not None and email in pending_martingale_restart:
-        pending_martingale_restart[email] = False 
-
     if clear_data:
         delete_session_data(email) 
         print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}) and session data cleared from file.")
@@ -237,27 +224,25 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
 
 
 # ==========================================================
-# TRADING BOT FUNCTIONS
+# TRADING BOT FUNCTIONS 
 # ==========================================================
 
 def calculate_martingale_stake(base_stake, current_step):
     """
-    يحسب قيمة الرهان للمضاعفة باستخدام x4.0.
+    يحسب قيمة الرهان للمضاعفة باستخدام x9.0.
     """
     if current_step == 0:
         return base_stake
 
-    # استخدام Martingale Multiplier 4.0 
-    if current_step <= MARTINGALE_STEPS: 
-        stake = base_stake
-        for i in range(current_step):
-            stake = stake * MARTINGALE_MULTIPLIER
-        return stake
-    else:
+    # استخدام Martingale Multiplier 9.0 (مضاعفة واحدة فقط)
+    if current_step == 1:
+        return base_stake * MARTINGALE_MULTIPLIER
+    elif current_step > MARTINGALE_STEPS:
         return base_stake
+    
+    return base_stake * MARTINGALE_MULTIPLIER 
 
-
-def send_trade_orders(email, base_stake, currency_code, contract_type, label, barrier, is_martingale=False, shared_is_contract_open=None):
+def send_trade_orders(email, base_stake, currency_code, contract_type, label, barrier, current_step, shared_is_contract_open=None):
     global final_check_processes
 
     if email not in active_ws or active_ws[email] is None: 
@@ -275,10 +260,8 @@ def send_trade_orders(email, base_stake, currency_code, contract_type, label, ba
         print("⚠️ [STAKE WARNING] Before trade balance is 0.0. PNL calculation will rely heavily on the final balance check.")
         pass
 
-    if is_martingale:
-        stake_per_contract = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
-    else:
-        stake_per_contract = current_data['base_stake']
+    # استخدام current_step لتحديد قيمة الـ stake
+    stake_per_contract = calculate_martingale_stake(current_data['base_stake'], current_step)
         
     rounded_stake = round(stake_per_contract, 2)
 
@@ -290,14 +273,11 @@ def send_trade_orders(email, base_stake, currency_code, contract_type, label, ba
     current_data['last_entry_d2'] = entry_digits[1] if len(entry_digits) > 1 else 'N/A' 
     current_data['open_contract_ids'] = []
 
-    entry_msg = f"MARTINGALE STEP {current_data['current_step']} (Immediate)" if is_martingale else "BASE SIGNAL (Analysis)"
-
-    t1_d2_entry = 'N/A' 
-    t2_d2_entry = 'N/A'
+    entry_msg = f"MARTINGALE STEP {current_step}" if current_step > 0 else "BASE SIGNAL (Analysis)"
 
     barrier_display = barrier if barrier is not None else 'N/A'
 
-    print(f"\n💰 [TRADE START] T1 D2: {t1_d2_entry} | T2 D2: {t2_d2_entry} | Stake: {current_data['current_total_stake']:.2f} ({entry_msg}) | Contract: {contract_type} @ Barrier: {barrier_display}")
+    print(f"\n💰 [TRADE START] Stake: {current_data['current_total_stake']:.2f} ({entry_msg}) | Contract: {contract_type} @ Barrier: {barrier_display}")
 
     # بناء طلب التداول للصفقة الواحدة
     trade_request = {
@@ -349,7 +329,6 @@ def send_trade_orders(email, base_stake, currency_code, contract_type, label, ba
 def check_pnl_limits_by_balance(email, after_trade_balance):
     global MARTINGALE_STEPS
     global MAX_CONSECUTIVE_LOSSES
-    global pending_martingale_restart 
 
     current_data = get_session_data(email)
 
@@ -378,13 +357,8 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
         current_data['consecutive_losses'] = 0
         current_data['current_stake'] = current_data['base_stake']
         current_data['current_total_stake'] = current_data['base_stake'] * 1
-        current_data['tick_history'] = []
         current_data['last_trade_type'] = None
         
-        # 💡 نوقف المضاعفة الفورية في حالة الربح
-        if pending_martingale_restart is not None:
-             pending_martingale_restart[email] = False
-
         initial_balance = current_data.get('initial_starting_balance', after_trade_balance)
         net_profit_display = after_trade_balance - initial_balance
         
@@ -392,7 +366,7 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
             stop_triggered = "TP Reached"
 
     else:
-        # 🔴 خسارة: الاستعداد للمضاعفة الفورية
+        # 🔴 خسارة: الاستعداد للمضاعفة (عند التيك التالي الذي يحقق الشرط)
         current_data['total_losses'] += 1
         current_data['consecutive_losses'] += 1
         current_data['last_trade_type'] = None
@@ -410,23 +384,14 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
                 current_data['current_total_stake'] = new_stake * 1 
                 current_data['martingale_stake'] = new_stake
                 
-                # 🚨 تفعيل إشارة المضاعفة الفورية (الدخول بدون انتظار تيك جديد)
-                if pending_martingale_restart is not None:
-                     pending_martingale_restart[email] = True 
-                     print(f"🚨 [IMMEDIATE MARTINGALE] Loss detected. Setting restart flag for Step {current_data['current_step']}.")
-
-
             else:
-                # تجاوز Max Martingale Steps (2)، يتم إعادة ضبط الخطوة إلى 0
+                # تجاوز Max Martingale Steps (1)، يتم إعادة ضبط الخطوة إلى 0
                 current_data['current_stake'] = current_data['base_stake']
                 current_data['current_total_stake'] = current_data['base_stake'] * 1
                 current_data['current_step'] = 0
 
         # تفريغ سجل التيك لضمان عدم استخدام بيانات قديمة
         current_data['tick_history'] = []
-
-    current_data['pending_delayed_entry'] = False
-    current_data['entry_t1_d2'] = None
 
     save_session_data(email, current_data)
 
@@ -441,6 +406,7 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
 # ==========================================================
 def get_target_digits(price):
     try:
+        # لضمان الحصول على رقمين عشريين (D1, D2)
         formatted_price = "{:.2f}".format(float(price)) 
         if '.' in formatted_price:
             parts = formatted_price.split('.')
@@ -516,7 +482,7 @@ def final_check_process(email, token, start_time_ms, time_to_wait_ms, shared_is_
         current_data['before_trade_balance'] = final_balance
         save_session_data(email, current_data)
         
-        print(f"✅ [FINAL CHECK] Result confirmed. New Balance: {final_balance:.2f}. Martingale restart flag status: {pending_martingale_restart.get(email, False)}")
+        print(f"✅ [FINAL CHECK] Result confirmed. New Balance: {final_balance:.2f}.")
 
     else:
         print(f"❌ [FINAL CHECK] Failed to get final balance: {error}. Cannot calculate precise PNL for this trade.")
@@ -534,10 +500,10 @@ def final_check_process(email, token, start_time_ms, time_to_wait_ms, shared_is_
 
 
 # ==========================================================
-# CORE BOT LOGIC 
+# CORE BOT LOGIC (مع تحليل 3 تيكات لـ D2=8|9)
 # ==========================================================
 
-def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_is_contract_open, shared_pending_martingale_restart):
+def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_is_contract_open):
     global active_ws
     global WSS_URL_UNIFIED
 
@@ -547,10 +513,6 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
     if shared_is_contract_open is not None:
         if email not in shared_is_contract_open: shared_is_contract_open[email] = False
         else: shared_is_contract_open[email] = False
-            
-    if shared_pending_martingale_restart is not None:
-        if email not in shared_pending_martingale_restart: shared_pending_martingale_restart[email] = False
-        else: shared_pending_martingale_restart[email] = False
 
     session_data = get_session_data(email)
 
@@ -587,186 +549,148 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
     save_session_data(email, session_data)
     
     
-    # 💡 حلقة خارجية تسمح بإعادة التشغيل الفوري بعد الخسارة
-    while session_data.get('is_running'):
+    # دالة تنفيذ الصفقة
+    def execute_single_trade(email, current_data):
+        current_step = current_data['current_step']
+        base_stake_to_use = current_data['base_stake']
+        currency_code = current_data['currency']
         
-        is_open = shared_is_contract_open.get(email) if shared_is_contract_open is not None else False
-        is_immediate_restart = shared_pending_martingale_restart.get(email) if shared_pending_martingale_restart is not None else False
+        config = TRADE_CONFIGS[0]
+        send_trade_orders(email, base_stake_to_use, currency_code, config['type'], config['label'], config['barrier'], current_step, shared_is_contract_open=shared_is_contract_open)
 
-        # 🚨🚨 منطق المضاعفة الفورية (الأولوية القصوى) 🚨🚨
-        if is_immediate_restart and is_open is False:
-            current_data = get_session_data(email) 
+    # -------------------------------------------------------------
+    # الدوال المساعدة (on_open_wrapper, on_message_wrapper, on_close_wrapper)
+    # -------------------------------------------------------------
+
+    def on_open_wrapper(ws):
+        current_data = get_session_data(email)
+        token = current_data.get('api_token')
+        asset = SYMBOL
+
+        ws.send(json.dumps({"authorize": token}))
+        ws.send(json.dumps({"ticks": asset, "subscribe": 1}))
+        if not current_data.get('is_balance_received'):
+              ws.send(json.dumps({"balance": 1, "subscribe": 1}))
+
+    def on_message_wrapper(ws_app, message):
+        data = json.loads(message)
+        msg_type = data.get('msg_type')
+
+        current_data = get_session_data(email)
+
+        if not current_data.get('is_running'):
+            ws_app.close()
+            return
+
+        if msg_type == 'balance':
+            current_balance = data['balance']['balance']
+            currency = data['balance']['currency']
+
+            current_data['current_balance'] = float(current_balance)
+            current_data['currency'] = currency
+            current_data['is_balance_received'] = True
+            save_session_data(email, current_data)
+
+        elif msg_type == 'tick':
+
+            if current_data['is_balance_received'] == False:
+                return
             
-            # 💡 إذا كانت العلامة مفعَّلة ولم يكن WS نشطاً (انقطع بعد الخسارة)، يجب أن نمرر للسماح بإعادة الفتح أدناه
-            if active_ws.get(email) is None:
-                print("⚠️ [MARTINGALE PENDING] WS is closed. Waiting for mandatory reconnect before trade.")
-                pass 
-            else:
-                # إذا كان WS مفتوحاً، نستخدمه لإرسال الأمر
-                
-                # التأكد من أن الخطوة > 0 
-                if current_data['current_step'] > 0 and current_data['current_step'] <= MARTINGALE_STEPS:
-
-                    print(f"🚀 [IMMEDIATE MARTINGALE TRIGGERED] Executing Step {current_data['current_step']} trade immediately after loss confirmation.")
-                    
-                    # تنفيذ الصفقة المضاعفة فوراً
-                    execute_single_trade(email, current_data) 
-                    
-                    # إلغاء علم إعادة التشغيل الفوري بعد التنفيذ الناجح
-                    shared_pending_martingale_restart[email] = False
-                    
-                else:
-                     shared_pending_martingale_restart[email] = False # إعادة ضبط العلامة إذا كانت خاطئة
-                
-                # العودة إلى بداية حلقة 'while True' للانتظار حتى انتهاء الصفقة
-                time.sleep(0.5)
-                session_data = get_session_data(email)
-                continue 
-
-
-        def execute_single_trade(email, current_data):
-            is_martingale = current_data['current_step'] > 0
-            base_stake_to_use = current_data['base_stake']
-            currency_code = current_data['currency']
-            
-            config = TRADE_CONFIGS[0]
-            send_trade_orders(email, base_stake_to_use, currency_code, config['type'], config['label'], config['barrier'], is_martingale=is_martingale, shared_is_contract_open=shared_is_contract_open)
-
-        # -------------------------------------------------------------
-        # الدوال المساعدة (on_open_wrapper, on_message_wrapper, on_close_wrapper)
-        # -------------------------------------------------------------
-
-        def on_open_wrapper(ws):
-            current_data = get_session_data(email)
-            token = current_data.get('api_token')
-            asset = SYMBOL
-
-            ws.send(json.dumps({"authorize": token}))
-            ws.send(json.dumps({"ticks": asset, "subscribe": 1}))
-            if not current_data.get('is_balance_received'):
-                  ws.send(json.dumps({"balance": 1, "subscribe": 1}))
-
-        def on_message_wrapper(ws_app, message):
-            data = json.loads(message)
-            msg_type = data.get('msg_type')
-
-            current_data = get_session_data(email)
-
-            if not current_data.get('is_running'):
-                ws_app.close()
+            # 🛑 التجاهل: إذا كان هناك عقد مفتوح، لا نحلل التيك (التحقق قيد التشغيل)
+            if shared_is_contract_open.get(email, False):
                 return
 
-            if msg_type == 'balance':
-                current_balance = data['balance']['balance']
-                currency = data['balance']['currency']
+            current_timestamp = int(data['tick']['epoch'])
+            current_price = float(data['tick']['quote'])
 
-                current_data['current_balance'] = float(current_balance)
-                current_data['currency'] = currency
-                current_data['is_balance_received'] = True
-                save_session_data(email, current_data)
+            tick_data = {
+                "price": current_price,
+                "timestamp": current_timestamp
+            }
+            current_data['last_tick_data'] = tick_data 
 
-            elif msg_type == 'tick':
+            current_data['tick_history'].append(tick_data)
 
-                if current_data['is_balance_received'] == False:
-                    return
+            # تحديد حجم السجل
+            if len(current_data['tick_history']) > TICK_HISTORY_SIZE:
+                 current_data['tick_history'].pop(0)
+
+            
+            # تحديث قيم العرض
+            current_data['display_t1_price'] = current_data['tick_history'][0]['price'] if len(current_data['tick_history']) >= 1 else 0.0
+            current_data['display_t4_price'] = current_data['tick_history'][1]['price'] if len(current_data['tick_history']) >= 2 else 0.0
+            current_data['display_t3_price'] = current_data['tick_history'][2]['price'] if len(current_data['tick_history']) >= 3 else 0.0
+
+
+            # 🚨🚨 شروط الدخول: T1 D2 = 9|8 و T2 D2 = 9|8 و T3 D2 = 9|8 🚨🚨
+            if len(current_data['tick_history']) == TICK_HISTORY_SIZE: # أي 3 تيكات متوفرة
+
+                tick_T1_price = current_data['tick_history'][0]['price']
+                tick_T2_price = current_data['tick_history'][1]['price']
+                tick_T3_price = current_data['tick_history'][2]['price']
                 
-                # 🛑 التجاهل: إذا كانت هناك مضاعفة معلقة أو عقد مفتوح، لا نحلل التيك
-                if shared_pending_martingale_restart.get(email, False) or shared_is_contract_open.get(email, False):
-                    return
-
-                current_timestamp = int(data['tick']['epoch'])
-                current_price = float(data['tick']['quote'])
-
-                tick_data = {
-                    "price": current_price,
-                    "timestamp": current_timestamp
-                }
-                current_data['last_tick_data'] = tick_data 
-
-                current_data['tick_history'].append(tick_data)
-
-                if len(current_data['tick_history']) > TICK_HISTORY_SIZE:
-                     current_data['tick_history'].pop(0)
-
+                digits_T1 = get_target_digits(tick_T1_price)
+                digits_T2 = get_target_digits(tick_T2_price)
+                digits_T3 = get_target_digits(tick_T3_price)
                 
-                current_data['display_t1_price'] = current_data['tick_history'][0]['price'] if len(current_data['tick_history']) >= 1 else 0.0
-                current_data['display_t4_price'] = current_data['tick_history'][1]['price'] if len(current_data['tick_history']) >= 2 else 0.0
-                current_data['display_t3_price'] = 0.0
+                T1_D2 = digits_T1[1] if len(digits_T1) >= 2 else None 
+                T2_D2 = digits_T2[1] if len(digits_T2) >= 2 else None 
+                T3_D2 = digits_T3[1] if len(digits_T3) >= 2 else None 
+                
+                # الشرط: التيكات الثلاثة الأخيرة يجب أن تحتوي على 8 أو 9 في الخانة D2
+                condition_entry = (T1_D2 in [9, 8]) and (T2_D2 in [9, 8]) and (T3_D2 in [9, 8])
 
-
-                # 🚨 شرط الدخول الأساسي: يتم الدخول فقط إذا كان current_step = 0 (بداية صفقة جديدة)
-                if current_data['current_step'] == 0:
-
+                if condition_entry:
+                    
                     current_time_ms = time.time() * 1000
                     time_since_last_entry_ms = current_time_ms - current_data['last_entry_time']
                     
-                    is_time_gap_respected = time_since_last_entry_ms > 5000 
+                    # التحقق من فارق زمني بسيط لتجنب الأخطاء
+                    is_time_gap_respected = time_since_last_entry_ms > 100 
                     
-                    if not is_time_gap_respected:
-                        save_session_data(email, current_data)
-                        return
-
-                    # 🚨🚨 شروط الدخول: T1 D2 = 9 أو 8 و T2 D2 = 9 أو 8 🚨🚨
-                    if len(current_data['tick_history']) == TICK_HISTORY_SIZE:
-
-                        tick_T1_price = current_data['tick_history'][0]['price']
-                        tick_T2_price = current_data['tick_history'][1]['price']
+                    if is_time_gap_respected:
+                        execute_single_trade(email, current_data) 
+                        current_data['tick_history'] = []
                         
-                        digits_T1 = get_target_digits(tick_T1_price)
-                        digits_T2 = get_target_digits(tick_T2_price)
+                        entry_type = "BASE ENTRY" if current_data['current_step'] == 0 else f"MARTINGALE STEP {current_data['current_step']}"
+                        print(f"🚀 [{entry_type} CONFIRMED] Signal: T1 D2={T1_D2}, T2 D2={T2_D2}, T3 D2={T3_D2}. Executing OVER 2.")
+                    else:
+                         print("⚠️ [TIMING SKIP] Signal met but time gap too short. Skipping entry.")
                         
-                        T1_D2 = digits_T1[1] if len(digits_T1) >= 2 else None 
-                        T2_D2 = digits_T2[1] if len(digits_T2) >= 2 else None 
+                # تفريغ أقدم تيك بعد التحقق
+                if len(current_data['tick_history']) == TICK_HISTORY_SIZE:
+                    current_data['tick_history'].pop(0)
 
-                        condition_entry = (T1_D2 in [9, 8]) and (T2_D2 in [9, 8])
+                if not condition_entry:
+                     print(f"🔄 [3-TICK ANALYSIS] Condition not met. T1 D2:{T1_D2}, T2 D2:{T2_D2}, T3 D2:{T3_D2}. Waiting for signal.")
 
-                        if condition_entry:
-                            execute_single_trade(email, current_data) 
-                            current_data['tick_history'] = []
-                            print(f"🚀 [BASE ENTRY CONFIRMED] Signal: T1 D2={T1_D2} AND T2 D2={T2_D2}. Executing OVER 2 (Step: {current_data['current_step']}).")
+            save_session_data(email, current_data)
 
-                        else:
-                            if len(current_data['tick_history']) == TICK_HISTORY_SIZE:
-                                current_data['tick_history'].pop(0)
-
-                            print(f"🔄 [2-TICK ANALYSIS] Condition not met. T1 D2:{T1_D2}, T2 D2:{T2_D2}. Waiting for signal.")
-
-
-                save_session_data(email, current_data)
-
-        def on_close_wrapper(ws_app, code, msg):
-            print(f"❌ [WS Close {email}] Code: {code}, Message: {msg}")
-            if email in active_ws:
-                active_ws[email] = None
-            
-            # إذا كان هناك إعادة تشغيل مضاعفة معلقة، نترك الحلقة الرئيسية هي من تعيد الاتصال
-            if shared_pending_martingale_restart.get(email, False):
-                 print(f"⚠️ [WS RESTART] WS closed. Immediate martingale restart pending. Main loop will handle reconnect/trade.")
-            else:
-                 current_data = get_session_data(email)
-                 if current_data.get('is_running'):
-                      stop_bot(email, clear_data=False, stop_reason="WS Connection Lost")
-
-
-        def on_ping_wrapper(ws, message):
-            if not get_session_data(email).get('is_running'):
-                ws.close()
-
-        # -------------------------------------------------------------
-        # الجزء الذي يشغل WebSocket
-        # -------------------------------------------------------------
+    def on_close_wrapper(ws_app, code, msg):
+        print(f"❌ [WS Close {email}] Code: {code}, Message: {msg}")
+        if email in active_ws:
+            active_ws[email] = None
+        
         current_data = get_session_data(email)
-        is_open = shared_is_contract_open.get(email) if shared_is_contract_open is not None else False
-        is_immediate_restart = shared_pending_martingale_restart.get(email) if shared_pending_martingale_restart is not None else False
+        if current_data.get('is_running'):
+             print(f"⚠️ [WS RESTART] WS closed. Main loop will attempt to reconnect.")
+        else:
+             stop_bot(email, clear_data=False, stop_reason="WS Connection Lost")
 
-        # 💡 لا تحاول فتح WS إذا كان مفتوحاً أو كان هناك عقد قيد المراجعة
+    def on_ping_wrapper(ws, message):
+        if not get_session_data(email).get('is_running'):
+            ws.close()
+
+    # -------------------------------------------------------------
+    # الجزء الذي يشغل WebSocket
+    # -------------------------------------------------------------
+    while session_data.get('is_running'):
+        
+        is_open = shared_is_contract_open.get(email) if shared_is_contract_open is not None else False
+
         if active_ws.get(email) is None and is_open is False:
             
-            if is_immediate_restart:
-                print(f"🔗 [MARTINGALE RECONNECT] Forcing immediate WS reconnect to execute trade for {email}...")
-            else:
-                print(f"🔗 [PROCESS] Attempting to connect for {email} to {WSS_URL_UNIFIED}...")
-
+            print(f"🔗 [PROCESS] Attempting to connect for {email} to {WSS_URL_UNIFIED}...")
 
             try:
                 ws = websocket.WebSocketApp(
@@ -786,12 +710,9 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
             if not session_data.get('is_running'):
                 break
 
-            # إذا تم فقدان الاتصال وليس هناك مضاعفة فورية معلقة، ننتظر قبل إعادة المحاولة
-            if not is_immediate_restart:
-                 print(f"💤 [PROCESS] Waiting {RECONNECT_DELAY} seconds before retrying connection for {email}...")
-                 time.sleep(RECONNECT_DELAY)
+            print(f"💤 [PROCESS] Waiting {RECONNECT_DELAY} seconds before retrying connection for {email}...")
+            time.sleep(RECONNECT_DELAY)
         else:
-              # إذا كان WS نشطاً أو عقد مفتوح، ننتظر قليلاً ونكرر الحلقة
               time.sleep(0.5)
               
     print(f"🛑 [PROCESS] Bot process ended for {email}.")
@@ -800,6 +721,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
 # ==========================================================
 # FLASK APP SETUP AND ROUTES 
 # ==========================================================
+
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
 app.config['SESSION_PERMANENT'] = False
@@ -925,6 +847,10 @@ CONTROL_FORM = """
         color: #555;
         font-size: 0.9em;
     }
+    .tick-column {
+        flex-basis: 30%; /* تقسيم الثلاثة بالتساوي */
+        text-align: center;
+    }
 </style>
 <h1>Bot Control Panel | User: {{ email }}</h1>
 <hr>
@@ -943,14 +869,15 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = '2 Ticks (R_100, D2 analysis) -> Entry: DIGITOVER 2 (if T1 D2 & T2 D2 are 9 or 8) | Ticks: ' + TICK_HISTORY_SIZE|string + ' | Duration: ' + DURATION|string + ' Ticks | Martingale: ' + MARTINGALE_STEPS|string + ' Steps (x' + MARTINGALE_MULTIPLIER|string + ') | Max Losses: ' + max_consecutive_losses|string + (' | Immediate Martingale: ON (Only on Loss)' if True else '') %}
+    {% set strategy = '3 Ticks (R_100, D2 analysis) -> Entry: DIGITOVER 2 (if T1, T2, & T3 D2 are 8 or 9) | Ticks: ' + DURATION|string + ' | Martingale: ' + MARTINGALE_STEPS|string + ' Step (x' + MARTINGALE_MULTIPLIER|string + ') | Max Losses: ' + max_consecutive_losses|string %}
 
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
 
-    {# Display T1 Price and T2 Price & D2 Digit #}
+    {# Display T1, T2, T3 Prices and D2 Digits #}
     <div class="tick-box">
-        {# T1 Display #}
-        <div>
+        
+        {# T1 Display (Oldest) #}
+        <div class="tick-column">
             <span class="info-label">T1 Price:</span> <b>{% if session_data.display_t1_price %}{{ "%0.2f"|format(session_data.display_t1_price) }}{% else %}N/A{% endif %}</b>
             <br>
             <span class="info-label">T1 D2:</span>
@@ -962,15 +889,15 @@ CONTROL_FORM = """
             {{ d2_digit_t1 }}
             </b>
             <p style="font-weight: normal; font-size: 0.8em; color: {% if d2_digit_t1 in ['9', '8'] %}green{% else %}red{% endif %};">
-                Condition: T1 D2 = 9 or 8
+                Condition: T1 D2 = 8|9
             </p>
         </div>
         
         {# T2 Display #}
-        <div>
-            <span class="info-label">T2 Price (Latest):</span> <b>{% if session_data.display_t4_price %}{{ "%0.2f"|format(session_data.display_t4_price) }}{% else %}N/A{% endif %}</b>
+        <div class="tick-column">
+            <span class="info-label">T2 Price:</span> <b>{% if session_data.display_t4_price %}{{ "%0.2f"|format(session_data.display_t4_price) }}{% else %}N/A{% endif %}</b>
             <br>
-            <span class="info-label">T2 D2 (Latest):</span>
+            <span class="info-label">T2 D2:</span>
             <b class="current-digit">
             {% set price_str_t2 = "%0.2f"|format(session_data.display_t4_price) %}
             {% set price_parts_t2 = price_str_t2.split('.') %}
@@ -980,18 +907,40 @@ CONTROL_FORM = """
             </b>
             
             <p style="font-weight: normal; font-size: 0.8em; color: {% if d2_digit_t2 in ['9', '8'] %}green{% else %}red{% endif %};">
-                Condition: T2 D2 = 9 or 8
-            </p>
-            <p style="font-weight: normal; font-size: 0.8em; color: {% if d2_digit_t1 in ['9', '8'] and d2_digit_t2 in ['9', '8'] %}green{% else %}red{% endif %};">
-                Signal (Base Entry): 
-                {% if d2_digit_t1 in ['9', '8'] and d2_digit_t2 in ['9', '8'] %}
-                    OVER 2 (T1 & T2 D2 met)
-                {% else %}
-                    NONE (Waiting for analysis)
-                {% endif %}
+                Condition: T2 D2 = 8|9
             </p>
         </div>
 
+        {# T3 Display (Latest) #}
+        <div class="tick-column">
+            <span class="info-label">T3 Price (Latest):</span> <b>{% if session_data.display_t3_price %}{{ "%0.2f"|format(session_data.display_t3_price) }}{% else %}N/A{% endif %}</b>
+            <br>
+            <span class="info-label">T3 D2 (Latest):</span>
+            <b class="current-digit">
+            {% set price_str_t3 = "%0.2f"|format(session_data.display_t3_price) %}
+            {% set price_parts_t3 = price_str_t3.split('.') %}
+            {% set d2_digit_t3 = 'N/A' %}
+            {% if price_parts_t3|length > 1 and price_parts_t3[-1]|length >= 2 %}{% set d2_digit_t3 = price_parts_t3[-1][1] %}{% endif %}
+            {{ d2_digit_t3 }}
+            </b>
+            
+            <p style="font-weight: normal; font-size: 0.8em; color: {% if d2_digit_t3 in ['9', '8'] %}green{% else %}red{% endif %};">
+                Condition: T3 D2 = 8|9
+            </p>
+        </div>
+
+    </div>
+
+    {# الشرط النهائي (عرض في الأسفل) #}
+    <div style="text-align: center; margin-bottom: 15px;">
+         <p style="font-weight: bold; font-size: 1.0em; color: {% if d2_digit_t1 in ['9', '8'] and d2_digit_t2 in ['9', '8'] and d2_digit_t3 in ['9', '8'] %}green{% else %}red{% endif %};">
+            Final Signal: 
+            {% if d2_digit_t1 in ['9', '8'] and d2_digit_t2 in ['9', '8'] and d2_digit_t3 in ['9', '8'] %}
+                OVER 2 (T1 & T2 & T3 D2 met: 8 or 9)
+            {% else %}
+                NONE (Waiting for 3-Tick analysis)
+            {% endif %}
+        </p>
     </div>
 
     <div class="data-box">
@@ -1018,11 +967,7 @@ CONTROL_FORM = """
             {% if is_open %}
                 Waiting Check (1 Tick + 6s Delay) (Type: {{ session_data.last_trade_type if session_data.last_trade_type else 'N/A' }})
             {% else %}
-                {% if pending_martingale_restart.get(email) %}
-                    🔴 IMMEDIATE MARTINGALE PENDING! (Executing Trade...)
-                {% else %}
-                    0 (Ready for Base Signal/Analysis)
-                {% endif %}
+                 Ready (Waiting for Signal)
             {% endif %}
             </b>
         </p>
@@ -1033,14 +978,10 @@ CONTROL_FORM = """
                 {% set is_open = is_contract_open.get(email) if is_contract_open is not none else false %}
                 {% if is_open %}
                     Awaiting PNL Check (Stake: {{ session_data.current_total_stake|round(2) }})
+                {% elif session_data.current_step > 0 %}
+                    MARTINGALE STEP {{ session_data.current_step }} @ Stake: {{ session_data.current_total_stake|round(2) }} (Waiting for Signal)
                 {% else %}
-                    {% if pending_martingale_restart.get(email) %}
-                        MARTINGALE STEP {{ session_data.current_step }} @ Stake: {{ session_data.current_total_stake|round(2) }} (IMMEDIATE ENTRY)
-                    {% elif session_data.current_step > 0 %}
-                        Awaiting Immediate Martingale Entry (Stake: {{ session_data.current_total_stake|round(2) }})
-                    {% else %}
-                        BASE STAKE @ Stake: {{ session_data.current_stake|round(2) }} (Searching 2-Tick Signal)
-                    {% endif %}
+                    BASE STAKE @ Stake: {{ session_data.current_stake|round(2) }} (Searching 3-Tick Signal)
                 {% endif %}
             </b>
         </p>
@@ -1140,7 +1081,6 @@ def control_panel():
         max_consecutive_losses=MAX_CONSECUTIVE_LOSSES,
         is_contract_open=is_contract_open, 
         TRADE_CONFIGS=TRADE_CONFIGS,
-        pending_martingale_restart=pending_martingale_restart, 
     )
 
 
@@ -1206,13 +1146,13 @@ def start_bot():
         })
         save_session_data(email, initial_data)
 
-        if is_contract_open is None or pending_martingale_restart is None:
+        if is_contract_open is None:
               flash("Bot initialization failed (Shared state manager not ready). Please restart the service.", 'error')
               return redirect(url_for('control_panel'))
         
         process = multiprocessing.Process(
             target=bot_core_logic,
-            args=(email, token, stake, tp, account_type, currency, is_contract_open, pending_martingale_restart) 
+            args=(email, token, stake, tp, account_type, currency, is_contract_open) 
         )
         process.start()
         flask_local_processes[email] = process
@@ -1246,11 +1186,9 @@ def stop_route():
 try:
     manager = multiprocessing.Manager()
     is_contract_open = manager.dict() 
-    pending_martingale_restart = manager.dict() 
 except Exception as e:
     print(f"⚠️ [MANAGER INIT] Multiprocessing Manager failed to initialize: {e}. Defaulting shared state to None.")
     is_contract_open = None
-    pending_martingale_restart = None
 
 # ----------------------------------------------------------
 
