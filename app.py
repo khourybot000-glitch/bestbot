@@ -5,6 +5,7 @@ import multiprocessing
 import os
 import sys
 import fcntl
+import ssl
 from flask import Flask, request, render_template_string, redirect, url_for, session, flash
 from datetime import datetime, timezone
 
@@ -79,6 +80,7 @@ flask_local_processes = {}
 final_check_processes = {}
 active_ws = {}  
 is_contract_open = None  
+pending_martingale_restart = None 
 # ==========================================================
 
 
@@ -175,6 +177,7 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
     global flask_local_processes
     global final_check_processes
     global is_contract_open 
+    global pending_martingale_restart 
 
     current_data = get_session_data(email)
     current_data["is_running"] = False
@@ -209,6 +212,9 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
 
     if is_contract_open is not None and email in is_contract_open:
         is_contract_open[email] = False 
+    
+    if pending_martingale_restart is not None and email in pending_martingale_restart:
+        pending_martingale_restart[email] = False 
 
     if clear_data:
         delete_session_data(email) 
@@ -246,7 +252,10 @@ def calculate_martingale_stake(base_stake, current_step):
 def send_trade_orders(email, base_stake, currency_code, contract_type, label, barrier, is_martingale=False, shared_is_contract_open=None):
     global final_check_processes
 
-    if email not in active_ws or active_ws[email] is None: return
+    if email not in active_ws or active_ws[email] is None: 
+        print(f"❌ [TRADE ERROR] WebSocket not active for {email}. Cannot send trade.")
+        return
+        
     ws_app = active_ws[email]
 
     current_data = get_session_data(email)
@@ -265,22 +274,18 @@ def send_trade_orders(email, base_stake, currency_code, contract_type, label, ba
 
     current_data['current_stake'] = rounded_stake
     current_data['current_total_stake'] = rounded_stake 
-    current_data['last_entry_price'] = current_data['last_tick_data']['price'] if current_data.get('last_tick_data') else 0.0
     
+    # عند الدخول الفوري، قد لا يكون هناك آخر تيك مُسجَّل
+    current_data['last_entry_price'] = current_data['last_tick_data']['price'] if current_data.get('last_tick_data') else 0.0
     entry_digits = get_target_digits(current_data['last_entry_price'])
-    # عرض D2 فقط لأغراض التتبع/العرض
     current_data['last_entry_d2'] = entry_digits[1] if len(entry_digits) > 1 else 'N/A' 
-
     current_data['open_contract_ids'] = []
 
-    entry_msg = f"MARTINGALE STEP {current_data['current_step']}" if is_martingale else "BASE SIGNAL"
+    entry_msg = f"MARTINGALE STEP {current_data['current_step']} (Immediate)" if is_martingale else "BASE SIGNAL"
 
-    tick_T1_price = current_data['tick_history'][0]['price'] if len(current_data['tick_history']) >= 2 else 0.0
-    tick_T2_price = current_data['tick_history'][1]['price'] if len(current_data['tick_history']) >= 2 else 0.0
-    
-    # عرض D2 فقط لأغراض التتبع/العرض
-    t1_d2_entry = get_target_digits(tick_T1_price)[1] if len(get_target_digits(tick_T1_price)) >= 2 else 'N/A'
-    t2_d2_entry = get_target_digits(tick_T2_price)[1] if len(get_target_digits(tick_T2_price)) >= 2 else 'N/A'
+    # لا يمكن عرض T1/T2 D2 بشكل موثوق في المضاعفة الفورية (لأننا لم نحلل)
+    t1_d2_entry = 'N/A (Immediate Martingale)' 
+    t2_d2_entry = 'N/A (Immediate Martingale)'
 
     barrier_display = barrier if barrier is not None else 'N/A'
 
@@ -312,7 +317,10 @@ def send_trade_orders(email, base_stake, currency_code, contract_type, label, ba
         current_data['last_trade_type'] = contract_type
     except Exception as e:
         print(f"❌ [TRADE ERROR] Could not send trade order for {label}: {e}")
-        pass
+        # إذا فشل الإرسال، نعتبر العقد غير مفتوح
+        if shared_is_contract_open is not None:
+             shared_is_contract_open[email] = False
+        return
 
     if shared_is_contract_open is not None:
         shared_is_contract_open[email] = True 
@@ -336,6 +344,7 @@ def send_trade_orders(email, base_stake, currency_code, contract_type, label, ba
 def check_pnl_limits_by_balance(email, after_trade_balance):
     global MARTINGALE_STEPS
     global MAX_CONSECUTIVE_LOSSES
+    global pending_martingale_restart 
 
     current_data = get_session_data(email)
 
@@ -395,15 +404,20 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
                 current_data['current_stake'] = new_stake
                 current_data['current_total_stake'] = new_stake * 1 # صفقة واحدة
                 current_data['martingale_stake'] = new_stake
+                
+                # 🚨 تفعيل إشارة المضاعفة الفورية (Immediate Martingale)
+                if pending_martingale_restart is not None:
+                     pending_martingale_restart[email] = True 
+                     print(f"🚨 [IMMEDIATE MARTINGALE] Loss detected. Setting restart flag for Step {current_data['current_step']}.")
 
-                print(f"🚨 [MARTINGALE PENDING] Overall Loss Detected. Pending Step {current_data['current_step']} @ Total Stake: {current_data['current_total_stake']:.2f}. Restarting {TICK_HISTORY_SIZE}-tick analysis...")
-            
+
             else:
                 # تجاوز Max Martingale Steps (2)، يتم إعادة ضبط الخطوة إلى 0 والرهان إلى الأساسي
                 current_data['current_stake'] = current_data['base_stake']
                 current_data['current_total_stake'] = current_data['base_stake'] * 1
                 current_data['current_step'] = 0
 
+        # 💡 تفريغ سجل التيك فوراً لضمان عدم وجود تحليل في الدورة التالية
         current_data['tick_history'] = []
 
     current_data['pending_delayed_entry'] = False
@@ -552,7 +566,7 @@ def final_check_process(email, token, start_time_ms, time_to_wait_ms, shared_is_
 # CORE BOT LOGIC 
 # ==========================================================
 
-def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_is_contract_open):
+def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_is_contract_open, shared_pending_martingale_restart):
     global active_ws
     global WSS_URL_UNIFIED
 
@@ -563,6 +577,13 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
             shared_is_contract_open[email] = False
         else:
             shared_is_contract_open[email] = False
+            
+    if shared_pending_martingale_restart is not None:
+        if email not in shared_pending_martingale_restart:
+            shared_pending_martingale_restart[email] = False
+        else:
+            shared_pending_martingale_restart[email] = False
+
 
     session_data = get_session_data(email)
 
@@ -600,141 +621,189 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
     })
 
     save_session_data(email, session_data)
-
-    def execute_single_trade(email, current_data):
-        is_martingale = current_data['current_step'] > 0
-        base_stake_to_use = current_data['base_stake']
-        currency_code = current_data['currency']
+    
+    # 💡 حلقة خارجية تسمح بإعادة التشغيل الفوري بعد الخسارة
+    while session_data.get('is_running'):
         
-        # نستخدم الثوابت المعرفة لـ DIGITOVER 2
-        config = TRADE_CONFIGS[0]
-        send_trade_orders(email, base_stake_to_use, currency_code, config['type'], config['label'], config['barrier'], is_martingale=is_martingale, shared_is_contract_open=shared_is_contract_open)
+        is_immediate_restart = shared_pending_martingale_restart.get(email) if shared_pending_martingale_restart is not None else False
+        
+        if is_immediate_restart:
+            print("🚀 [IMMEDIATE MARTINGALE TRIGGERED] Executing Martingale trade immediately after loss confirmation.")
+            
+            current_data = get_session_data(email) 
+            
+            is_martingale = current_data['current_step'] > 0
+            base_stake_to_use = current_data['base_stake']
+            currency_code = current_data['currency']
+            config = TRADE_CONFIGS[0]
+            
+            # 🚨 تنفيذ الصفقة المضاعفة فوراً بدون انتظار تحليل تيك جديد 
+            execute_single_trade(email, current_data) 
+            
+            # إلغاء علم إعادة التشغيل الفوري
+            shared_pending_martingale_restart[email] = False
+            
+            # الانتظار حتى يتم فتح العقد وإغلاقه مرة أخرى (لأن الصفقة 1 تيك)
+            while shared_is_contract_open.get(email, False):
+                time.sleep(0.1)
+                session_data = get_session_data(email)
+                if not session_data.get('is_running'):
+                    return 
+            
+            # العودة إلى بداية حلقة 'while True' للتحقق من أي إشارات أخرى
+            continue 
 
-    def on_open_wrapper(ws):
-        current_data = get_session_data(email)
-        token = current_data.get('api_token')
-        asset = SYMBOL
 
-        ws.send(json.dumps({"authorize": token}))
-        ws.send(json.dumps({"ticks": asset, "subscribe": 1}))
-        if not current_data.get('is_balance_received'):
-              ws.send(json.dumps({"balance": 1, "subscribe": 1}))
+        def execute_single_trade(email, current_data):
+            is_martingale = current_data['current_step'] > 0
+            base_stake_to_use = current_data['base_stake']
+            currency_code = current_data['currency']
+            
+            # نستخدم الثوابت المعرفة لـ DIGITOVER 2
+            config = TRADE_CONFIGS[0]
+            send_trade_orders(email, base_stake_to_use, currency_code, config['type'], config['label'], config['barrier'], is_martingale=is_martingale, shared_is_contract_open=shared_is_contract_open)
 
-    def on_message_wrapper(ws_app, message):
-        data = json.loads(message)
-        msg_type = data.get('msg_type')
+        def on_open_wrapper(ws):
+            current_data = get_session_data(email)
+            token = current_data.get('api_token')
+            asset = SYMBOL
 
-        current_data = get_session_data(email)
+            ws.send(json.dumps({"authorize": token}))
+            ws.send(json.dumps({"ticks": asset, "subscribe": 1}))
+            if not current_data.get('is_balance_received'):
+                  ws.send(json.dumps({"balance": 1, "subscribe": 1}))
 
-        if not current_data.get('is_running'):
-            ws_app.close()
-            return
+        def on_message_wrapper(ws_app, message):
+            data = json.loads(message)
+            msg_type = data.get('msg_type')
 
-        if msg_type == 'balance':
-            current_balance = data['balance']['balance']
-            currency = data['balance']['currency']
+            current_data = get_session_data(email)
 
-            current_data['current_balance'] = float(current_balance)
-            current_data['currency'] = currency
-            current_data['is_balance_received'] = True
-
-            save_session_data(email, current_data)
-
-        elif msg_type == 'tick':
-
-            if current_data['is_balance_received'] == False:
+            if not current_data.get('is_running'):
+                ws_app.close()
                 return
 
-            current_timestamp = int(data['tick']['epoch'])
-            current_price = float(data['tick']['quote'])
+            if msg_type == 'balance':
+                current_balance = data['balance']['balance']
+                currency = data['balance']['currency']
 
-            tick_data = {
-                "price": current_price,
-                "timestamp": current_timestamp
-            }
-            current_data['last_tick_data'] = tick_data
+                current_data['current_balance'] = float(current_balance)
+                current_data['currency'] = currency
+                current_data['is_balance_received'] = True
 
-            current_data['tick_history'].append(tick_data)
+                save_session_data(email, current_data)
 
-            if len(current_data['tick_history']) > TICK_HISTORY_SIZE:
-                 current_data['tick_history'].pop(0)
+            elif msg_type == 'tick':
 
-            
-            # نستخدم D2 للتحليل
-            current_data['display_t1_price'] = current_data['tick_history'][0]['price'] if len(current_data['tick_history']) >= 1 else 0.0
-            current_data['display_t4_price'] = current_data['tick_history'][1]['price'] if len(current_data['tick_history']) >= 2 else 0.0
-            current_data['display_t3_price'] = 0.0
-
-
-            is_open = shared_is_contract_open.get(email) if shared_is_contract_open is not None else False
-
-            if is_open is False:
-
-                current_time_ms = time.time() * 1000
-                time_since_last_entry_ms = current_time_ms - current_data['last_entry_time']
-                # التأخير الإجباري بين الصفقات
-                is_time_gap_respected = time_since_last_entry_ms > 5000 
-
-                if not is_time_gap_respected:
-                    save_session_data(email, current_data)
+                if current_data['is_balance_received'] == False:
+                    return
+                
+                # إذا كانت هناك مضاعفة معلقة، نتجاهل التيك (لأن الدخول سيتم فوراً في الحلقة الرئيسية)
+                if shared_pending_martingale_restart.get(email, False):
                     return
 
-                # 🚨🚨 شروط الدخول: T1 D2 = 9 أو 8 و T2 D2 = 9 أو 8 🚨🚨
-                if len(current_data['tick_history']) == TICK_HISTORY_SIZE:
+                current_timestamp = int(data['tick']['epoch'])
+                current_price = float(data['tick']['quote'])
 
-                    tick_T1_price = current_data['tick_history'][0]['price']
-                    tick_T2_price = current_data['tick_history'][1]['price']
+                tick_data = {
+                    "price": current_price,
+                    "timestamp": current_timestamp
+                }
+                current_data['last_tick_data'] = tick_data # تحديث آخر تيك لأغراض الـ UI و PNL
+
+                current_data['tick_history'].append(tick_data)
+
+                if len(current_data['tick_history']) > TICK_HISTORY_SIZE:
+                     current_data['tick_history'].pop(0)
+
+                
+                # نستخدم D2 للتحليل (للدخول الأساسي فقط)
+                current_data['display_t1_price'] = current_data['tick_history'][0]['price'] if len(current_data['tick_history']) >= 1 else 0.0
+                current_data['display_t4_price'] = current_data['tick_history'][1]['price'] if len(current_data['tick_history']) >= 2 else 0.0
+                current_data['display_t3_price'] = 0.0
+
+
+                is_open = shared_is_contract_open.get(email) if shared_is_contract_open is not None else False
+
+                # 🚨 شرط الدخول الأساسي: يجب أن يكون current_step = 0 (ليس مضاعفة)
+                if is_open is False and current_data['current_step'] == 0:
+
+                    current_time_ms = time.time() * 1000
+                    time_since_last_entry_ms = current_time_ms - current_data['last_entry_time']
                     
-                    digits_T1 = get_target_digits(tick_T1_price)
-                    digits_T2 = get_target_digits(tick_T2_price)
+                    # شرط التأخير الإجباري بين صفقات الـ Base Stake (5 ثواني)
+                    is_time_gap_respected = time_since_last_entry_ms > 5000 
                     
-                    T1_D2 = digits_T1[1] if len(digits_T1) >= 2 else None 
-                    T2_D2 = digits_T2[1] if len(digits_T2) >= 2 else None 
+                    if not is_time_gap_respected:
+                        save_session_data(email, current_data)
+                        return
 
-                    trade_signal = None 
-                    trade_label = None
+                    # 🚨🚨 شروط الدخول: T1 D2 = 9 أو 8 و T2 D2 = 9 أو 8 🚨🚨
+                    if len(current_data['tick_history']) == TICK_HISTORY_SIZE:
 
-                    # الشرط الجديد: T1 D2 يجب أن يكون 9 أو 8 AND T2 D2 يجب أن يكون 9 أو 8
-                    condition_entry = (T1_D2 in [9, 8]) and (T2_D2 in [9, 8])
+                        tick_T1_price = current_data['tick_history'][0]['price']
+                        tick_T2_price = current_data['tick_history'][1]['price']
+                        
+                        digits_T1 = get_target_digits(tick_T1_price)
+                        digits_T2 = get_target_digits(tick_T2_price)
+                        
+                        T1_D2 = digits_T1[1] if len(digits_T1) >= 2 else None 
+                        T2_D2 = digits_T2[1] if len(digits_T2) >= 2 else None 
 
-                    if condition_entry:
-                        trade_signal = TRADE_CONFIGS[0]['type'] 
-                        trade_label = TRADE_CONFIGS[0]['label'] 
+                        trade_signal = None 
+                        trade_label = None
 
-                        execute_single_trade(email, current_data) 
+                        # الشرط: T1 D2 يجب أن يكون 9 أو 8 AND T2 D2 يجب أن يكون 9 أو 8
+                        condition_entry = (T1_D2 in [9, 8]) and (T2_D2 in [9, 8])
 
-                        current_data['tick_history'] = []
+                        if condition_entry:
+                            trade_signal = TRADE_CONFIGS[0]['type'] 
+                            trade_label = TRADE_CONFIGS[0]['label'] 
 
-                        print(f"🚀 [IMMEDIATE ENTRY CONFIRMED] {trade_label} Signal: T1 D2={T1_D2} AND T2 D2={T2_D2}. Executing {trade_signal} @ Barrier 2 (Step: {current_data['current_step']}).")
+                            execute_single_trade(email, current_data) 
 
-                    else:
-                        if len(current_data['tick_history']) == TICK_HISTORY_SIZE:
-                            current_data['tick_history'].pop(0)
+                            current_data['tick_history'] = []
 
-                        print(f"🔄 [2-TICK ANALYSIS] Condition not met. T1 D2:{T1_D2}, T2 D2:{T2_D2}. Waiting for signal.")
+                            print(f"🚀 [BASE ENTRY CONFIRMED] {trade_label} Signal: T1 D2={T1_D2} AND T2 D2={T2_D2}. Executing {trade_signal} @ Barrier 2 (Step: {current_data['current_step']}).")
+
+                        else:
+                            if len(current_data['tick_history']) == TICK_HISTORY_SIZE:
+                                current_data['tick_history'].pop(0)
+
+                            print(f"🔄 [2-TICK ANALYSIS] Condition not met. T1 D2:{T1_D2}, T2 D2:{T2_D2}. Waiting for signal.")
 
 
                 save_session_data(email, current_data)
 
-    def on_close_wrapper(ws_app, code, msg):
-        print(f"❌ [WS Close {email}] Code: {code}, Message: {msg}")
-        if email in active_ws:
-            active_ws[email] = None
+        def on_close_wrapper(ws_app, code, msg):
+            print(f"❌ [WS Close {email}] Code: {code}, Message: {msg}")
+            if email in active_ws:
+                active_ws[email] = None
+            
+            # إذا كان الإغلاق بسبب خسارة مضاعفة، نتأكد من أن الحلقة الرئيسية ستلتقط العلامة وتدخل فوراً.
+            if shared_pending_martingale_restart.get(email, False):
+                 print(f"⚠️ [WS RESTART] WS closed. Immediate martingale restart pending. Main loop will handle reconnect/trade.")
+            else:
+                 # نوقف الدورة إذا لم يكن هناك إعادة تشغيل مضاعفة معلقة
+                 current_data = get_session_data(email)
+                 if current_data.get('is_running'):
+                      stop_bot(email, clear_data=False, stop_reason="WS Connection Lost")
 
-    def on_ping_wrapper(ws, message):
-        if not get_session_data(email).get('is_running'):
-            ws.close()
 
-    while True:
+        def on_ping_wrapper(ws, message):
+            if not get_session_data(email).get('is_running'):
+                ws.close()
+
+        # -------------------------------------------------------------
+        # الجزء الذي يشغل WebSocket
+        # -------------------------------------------------------------
         current_data = get_session_data(email)
-
-        if not current_data.get('is_running'):
-            break
 
         if active_ws.get(email) is None:
             print(f"🔗 [PROCESS] Attempting to connect for {email} to {WSS_URL_UNIFIED}...")
 
             try:
+                # استخدام run_forever يسمح للبوت بالدخول في حلقة الـ tick
                 ws = websocket.WebSocketApp(
                     WSS_URL_UNIFIED, on_open=on_open_wrapper, on_message=on_message_wrapper,
                     on_error=lambda ws, err: print(f"[WS Error {email}] {err}"),
@@ -742,22 +811,26 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                 )
                 active_ws[email] = ws
                 ws.on_ping = on_ping_wrapper
-                ws.run_forever(ping_interval=20, ping_timeout=10)
+                
+                ws.run_forever(ping_interval=20, ping_timeout=10, sslopt={"cert_reqs": ssl.CERT_NONE} if sys.version_info < (3, 7) else {}) 
 
             except Exception as e:
                 print(f"❌ [ERROR] WebSocket failed for {email}: {e}")
 
-            if get_session_data(email).get('is_running') is False:
+            session_data = get_session_data(email)
+            if not session_data.get('is_running'):
                 break
 
-            print(f"💤 [PROCESS] Waiting {RECONNECT_DELAY} seconds before retrying connection for {email}...")
-            time.sleep(RECONNECT_DELAY)
+            # إذا تم فقدان الاتصال، ولكن ليست مضاعفة فورية (لأن المضاعفة الفورية تم التعامل معها في بداية حلقة while True)، ننتظر.
+            if not shared_pending_martingale_restart.get(email, False):
+                 print(f"💤 [PROCESS] Waiting {RECONNECT_DELAY} seconds before retrying connection for {email}...")
+                 time.sleep(RECONNECT_DELAY)
         else:
               time.sleep(0.5)
-
-
+              
     print(f"🛑 [PROCESS] Bot process ended for {email}.")
 
+# ... (بقية الكود الخاص بـ Flask و Shared State Manager كما هي)
 
 # ==========================================================
 # FLASK APP SETUP AND ROUTES 
@@ -905,7 +978,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = '2 Ticks (R_100, D2 analysis) -> Entry: DIGITOVER 2 (if T1 D2 & T2 D2 are 9 or 8) | Ticks: ' + TICK_HISTORY_SIZE|string + ' | Duration: ' + DURATION|string + ' Ticks | Martingale: ' + MARTINGALE_STEPS|string + ' Steps (x' + MARTINGALE_MULTIPLIER|string + ') | Max Losses: ' + max_consecutive_losses|string %}
+    {% set strategy = '2 Ticks (R_100, D2 analysis) -> Entry: DIGITOVER 2 (if T1 D2 & T2 D2 are 9 or 8) | Ticks: ' + TICK_HISTORY_SIZE|string + ' | Duration: ' + DURATION|string + ' Ticks | Martingale: ' + MARTINGALE_STEPS|string + ' Steps (x' + MARTINGALE_MULTIPLIER|string + ') | Max Losses: ' + max_consecutive_losses|string + (' | Immediate Martingale: ON' if True else '') %}
 
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
 
@@ -945,7 +1018,7 @@ CONTROL_FORM = """
                 Condition: T2 D2 = 9 or 8
             </p>
             <p style="font-weight: normal; font-size: 0.8em; color: {% if d2_digit_t1 in ['9', '8'] and d2_digit_t2 in ['9', '8'] %}green{% else %}red{% endif %};">
-                Signal: 
+                Signal (Base Entry): 
                 {% if d2_digit_t1 in ['9', '8'] and d2_digit_t2 in ['9', '8'] %}
                     OVER 2 (T1 & T2 D2 met)
                 {% else %}
@@ -980,7 +1053,11 @@ CONTROL_FORM = """
             {% if is_open %}
                 Waiting Check (1 Tick + 6s Delay) (Type: {{ session_data.last_trade_type if session_data.last_trade_type else 'N/A' }})
             {% else %}
-                0 (Ready for Signal)
+                {% if pending_martingale_restart.get(email) %}
+                    🔴 IMMEDIATE MARTINGALE PENDING! (Executing Trade...)
+                {% else %}
+                    0 (Ready for Base Signal)
+                {% endif %}
             {% endif %}
             </b>
         </p>
@@ -993,7 +1070,7 @@ CONTROL_FORM = """
                     Awaiting PNL Check (Stake: {{ session_data.current_total_stake|round(2) }})
                 {% else %}
                     {% if session_data.current_step > 0 %}
-                        MARTINGALE STEP {{ session_data.current_step }} @ Stake: {{ session_data.current_total_stake|round(2) }} (Searching 2-Tick Signal)
+                        MARTINGALE STEP {{ session_data.current_step }} @ Stake: {{ session_data.current_total_stake|round(2) }} (IMMEDIATE ENTRY)
                     {% else %}
                         BASE STAKE @ Stake: {{ session_data.current_stake|round(2) }} (Searching 2-Tick Signal)
                     {% endif %}
@@ -1085,6 +1162,8 @@ def control_panel():
     email = session['email']
     session_data = get_session_data(email)
 
+    is_martingale_pending = pending_martingale_restart.get(email, False) if pending_martingale_restart is not None else False
+
     return render_template_string(CONTROL_FORM,
         email=email,
         session_data=session_data,
@@ -1095,7 +1174,8 @@ def control_panel():
         martingale_multiplier=MARTINGALE_MULTIPLIER,
         max_consecutive_losses=MAX_CONSECUTIVE_LOSSES,
         is_contract_open=is_contract_open, 
-        TRADE_CONFIGS=TRADE_CONFIGS
+        TRADE_CONFIGS=TRADE_CONFIGS,
+        pending_martingale_restart=pending_martingale_restart, 
     )
 
 
@@ -1161,13 +1241,13 @@ def start_bot():
         })
         save_session_data(email, initial_data)
 
-        if is_contract_open is None:
+        if is_contract_open is None or pending_martingale_restart is None:
               flash("Bot initialization failed (Shared state manager not ready). Please restart the service.", 'error')
               return redirect(url_for('control_panel'))
         
         process = multiprocessing.Process(
             target=bot_core_logic,
-            args=(email, token, stake, tp, account_type, currency, is_contract_open)
+            args=(email, token, stake, tp, account_type, currency, is_contract_open, pending_martingale_restart) 
         )
         process.start()
         flask_local_processes[email] = process
@@ -1197,13 +1277,16 @@ def stop_route():
 # ==========================================================
 # Gunicorn/Local Execution Entry Point & Shared State Setup 
 # ==========================================================
+# يجب استيراد ssl في الأعلى
 
 try:
     manager = multiprocessing.Manager()
     is_contract_open = manager.dict() 
+    pending_martingale_restart = manager.dict() 
 except Exception as e:
     print(f"⚠️ [MANAGER INIT] Multiprocessing Manager failed to initialize: {e}. Defaulting shared state to None.")
     is_contract_open = None
+    pending_martingale_restart = None
 
 # ----------------------------------------------------------
 
