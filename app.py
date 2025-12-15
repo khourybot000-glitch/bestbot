@@ -321,7 +321,7 @@ def send_trade_orders(email, base_stake, currency_code, contract_type, label, ba
 
     save_session_data(email, current_data)
 
-    # 🌟 التعديل: وقت التحقق النهائي 6 ثواني (6000 ميلي ثانية)
+    # وقت التحقق النهائي 6 ثواني (6000 ميلي ثانية)
     check_time_ms = 6000 
 
     final_check = multiprocessing.Process(
@@ -679,7 +679,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                     save_session_data(email, current_data)
                     return
 
-                # 🚨🚨 شروط الدخول: T1 D2 = 0 أو 1 و T2 D2 = 0 أو 1 🚨🚨
+                # 🚨🚨 شروط الدخول: T1 D2 = 9 أو 8 و T2 D2 = 9 أو 8 🚨🚨
                 if len(current_data['tick_history']) == TICK_HISTORY_SIZE:
 
                     tick_T1_price = current_data['tick_history'][0]['price']
@@ -694,8 +694,8 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                     trade_signal = None 
                     trade_label = None
 
-                    # الشرط: T1 D2 يجب أن يكون 0 أو 1 AND T2 D2 يجب أن يكون 0 أو 1
-                    condition_entry = (T1_D2 in [0, 1]) and (T2_D2 in [0, 1])
+                    # الشرط الجديد: T1 D2 يجب أن يكون 9 أو 8 AND T2 D2 يجب أن يكون 9 أو 8
+                    condition_entry = (T1_D2 in [9, 8]) and (T2_D2 in [9, 8])
 
                     if condition_entry:
                         trade_signal = TRADE_CONFIGS[0]['type'] 
@@ -905,7 +905,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = '2 Ticks (R_100, D2 analysis) -> Entry: DIGITOVER 2 (if T1 D2 & T2 D2 are 0 or 1) | Ticks: ' + TICK_HISTORY_SIZE|string + ' | Duration: ' + DURATION|string + ' Ticks | Martingale: ' + MARTINGALE_STEPS|string + ' Steps (x' + MARTINGALE_MULTIPLIER|string + ') | Max Losses: ' + max_consecutive_losses|string %}
+    {% set strategy = '2 Ticks (R_100, D2 analysis) -> Entry: DIGITOVER 2 (if T1 D2 & T2 D2 are 9 or 8) | Ticks: ' + TICK_HISTORY_SIZE|string + ' | Duration: ' + DURATION|string + ' Ticks | Martingale: ' + MARTINGALE_STEPS|string + ' Steps (x' + MARTINGALE_MULTIPLIER|string + ') | Max Losses: ' + max_consecutive_losses|string %}
 
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
 
@@ -923,8 +923,8 @@ CONTROL_FORM = """
             {% if price_parts|length > 1 and price_parts[-1]|length >= 2 %}{% set d2_digit_t1 = price_parts[-1][1] %}{% endif %}
             {{ d2_digit_t1 }}
             </b>
-            <p style="font-weight: normal; font-size: 0.8em; color: {% if d2_digit_t1 in ['0', '1'] %}green{% else %}red{% endif %};">
-                Condition: T1 D2 = 0 or 1
+            <p style="font-weight: normal; font-size: 0.8em; color: {% if d2_digit_t1 in ['9', '8'] %}green{% else %}red{% endif %};">
+                Condition: T1 D2 = 9 or 8
             </p>
         </div>
         
@@ -941,12 +941,12 @@ CONTROL_FORM = """
             {{ d2_digit_t2 }}
             </b>
             
-            <p style="font-weight: normal; font-size: 0.8em; color: {% if d2_digit_t2 in ['0', '1'] %}green{% else %}red{% endif %};">
-                Condition: T2 D2 = 0 or 1
+            <p style="font-weight: normal; font-size: 0.8em; color: {% if d2_digit_t2 in ['9', '8'] %}green{% else %}red{% endif %};">
+                Condition: T2 D2 = 9 or 8
             </p>
-            <p style="font-weight: normal; font-size: 0.8em; color: {% if d2_digit_t1 in ['0', '1'] and d2_digit_t2 in ['0', '1'] %}green{% else %}red{% endif %};">
+            <p style="font-weight: normal; font-size: 0.8em; color: {% if d2_digit_t1 in ['9', '8'] and d2_digit_t2 in ['9', '8'] %}green{% else %}red{% endif %};">
                 Signal: 
-                {% if d2_digit_t1 in ['0', '1'] and d2_digit_t2 in ['0', '1'] %}
+                {% if d2_digit_t1 in ['9', '8'] and d2_digit_t2 in ['9', '8'] %}
                     OVER 2 (T1 & T2 D2 met)
                 {% else %}
                     NONE
