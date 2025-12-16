@@ -17,21 +17,21 @@ SYMBOL = "R_100"
 # مدة الصفقة 1 تيك
 DURATION = 1          
 DURATION_UNIT = "t"
-# ✅ أقصى خطوة مضاعفة 1
+# أقصى خطوة مضاعفة 1
 MARTINGALE_STEPS = 1          
-# ✅ الحد الأقصى للخسائر المتتالية 2 
+# الحد الأقصى للخسائر المتتالية 2 
 MAX_CONSECUTIVE_LOSSES = 2    
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 # تحليل 2 تيك
 TICK_HISTORY_SIZE = 2   
-# ✅ مُضاعِف مارتينجال 14.0
-MARTINGALE_MULTIPLIER = 14.0 
+# ✅ مُضاعِف مارتينجال 9.0
+MARTINGALE_MULTIPLIER = 9.0 
 
-# نوع العقد: DIGITDIFF 0
+# ✅ نوع العقد: DIGITUNDER 8 (بدون بارير)
 TRADE_CONFIGS = [
-    {"type": "DIGITDIFF", "barrier": 0, "label": "DIGITDIFF_0_ENTRY"}, 
+    {"type": "DIGITOVER", "barrier": 1, "label": "DIGITOVER_1_ENTRY"}, 
 ]
 
 # ==========================================================
@@ -228,18 +228,18 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
 
 def calculate_martingale_stake(base_stake, current_step):
     """
-    يحسب قيمة الرهان للمضاعفة باستخدام x14.0 (خطوة واحدة).
+    يحسب قيمة الرهان للمضاعفة باستخدام x9.0 (خطوة واحدة).
     """
     if current_step == 0:
         return base_stake
 
-    # ✅ استخدام Martingale Multiplier 14.0
+    # ✅ استخدام Martingale Multiplier 9.0
     stake = base_stake
-    # الخطوة 1 هي المضاعفة الأولى، الخطوة 2 هي المضاعفة الثانية
+    # الخطوة 1 هي المضاعفة
     for i in range(1, current_step + 1):
         stake *= MARTINGALE_MULTIPLIER
 
-    # ✅ الحد الأقصى خطوة واحدة للمضاعفة (Martingale Steps = 1)
+    # الحد الأقصى خطوة واحدة للمضاعفة (Martingale Steps = 1)
     if current_step > MARTINGALE_STEPS:
          return base_stake
     
@@ -294,7 +294,7 @@ def send_trade_orders(email, base_stake, currency_code, contract_type, label, ba
         }
     }
     
-    # إضافة البارير (0) لـ DIGITDIFF
+    # ✅ إضافة البارير (8) لـ DIGITUNDER
     if barrier is not None:
         trade_request["parameters"]["barrier"] = str(barrier)
     
@@ -375,14 +375,14 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
         current_data['consecutive_losses'] += 1
         current_data['last_trade_type'] = None
 
-        # ✅ الحد الأقصى للخسائر المتتالية 2 (خسارة الأساس + خسارة المضاعفة)
+        # الحد الأقصى للخسائر المتتالية 2 (خسارة الأساس + خسارة المضاعفة)
         if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES:
             stop_triggered = f"SL Reached ({MAX_CONSECUTIVE_LOSSES} Consecutive Loss)"
 
         else:
             current_data['current_step'] += 1
             
-            # ✅ الحد الأقصى للمضاعفة 1 (خطوة واحدة)
+            # الحد الأقصى للمضاعفة 1 (خطوة واحدة)
             if current_data['current_step'] <= MARTINGALE_STEPS:
                 new_stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
 
@@ -566,7 +566,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
         currency_code = current_data['currency']
         
         config = TRADE_CONFIGS[0]
-        # إرسال البارير المناسب لـ DIGITDIFF (وهو 0)
+        # إرسال البارير المناسب لـ DIGITUNDER (وهو 8)
         send_trade_orders(email, base_stake_to_use, currency_code, config['type'], config['label'], config['barrier'], current_step, shared_is_contract_open=shared_is_contract_open)
 
     # -------------------------------------------------------------
@@ -631,7 +631,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
             current_data['display_t2_price'] = current_data['tick_history'][1]['price'] if len(current_data['tick_history']) >= 2 else 0.0
 
 
-            # 🚨🚨 شروط الدخول: T2 D2 = 9 و T2 < T1 🚨🚨
+            # 🚨🚨 شروط الدخول: T1 D2 = 9 و T2 D2 = 0 أو 1 🚨🚨
             if len(current_data['tick_history']) == TICK_HISTORY_SIZE: # أي 2 تيك متوفر
 
                 tick_T1_data = current_data['tick_history'][0]
@@ -640,18 +640,20 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                 tick_T1_price = tick_T1_data['price']
                 tick_T2_price = tick_T2_data['price']
                 
+                digits_T1 = get_target_digits(tick_T1_price)
                 digits_T2 = get_target_digits(tick_T2_price)
                 
                 # D2 هو الخانة الثانية (index 1)
+                T1_D2 = digits_T1[1] if len(digits_T1) >= 2 else None 
                 T2_D2 = digits_T2[1] if len(digits_T2) >= 2 else None 
                 
-                # الشرط 1: T2 D2 = 9
-                condition_d2 = (T2_D2 == 9)
+                # ✅ الشرط 1: T1 D2 = 9
+                condition_t1_d2 = (T1_D2 == 9)
                 
-                # الشرط 2: T2 < T1
-                condition_price = (tick_T2_price < tick_T1_price)
+                # ✅ الشرط 2: T2 D2 = 0 أو 1
+                condition_t2_d2 = (T2_D2 == 0 or T2_D2 == 1)
 
-                condition_entry = condition_d2 and condition_price
+                condition_entry = condition_t1_d2 and condition_t2_d2
 
                 if condition_entry:
                     
@@ -665,7 +667,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                         current_data['tick_history'] = []
                         
                         entry_type = "BASE ENTRY" if current_data['current_step'] == 0 else f"MARTINGALE STEP {current_data['current_step']}"
-                        print(f"🚀 [{entry_type} CONFIRMED] Signal: T2 D2={T2_D2} & T2 < T1. Executing DIGITDIFF 0.")
+                        print(f"🚀 [{entry_type} CONFIRMED] Signal: T1 D2={T1_D2} & T2 D2={T2_D2}. Executing DIGITUNDER 8.")
                     else:
                          print("⚠️ [TIMING SKIP] Signal met but time gap too short. Skipping entry.")
                         
@@ -674,7 +676,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                     current_data['tick_history'].pop(0)
 
                 if not condition_entry:
-                     print(f"🔄 [2-TICK ANALYSIS] Condition not met. T2 D2:{T2_D2} (Req: 9), T2 < T1: {condition_price}. Waiting for signal.")
+                     print(f"🔄 [2-TICK ANALYSIS] Condition not met. T1 D2:{T1_D2} (Req: 9), T2 D2:{T2_D2} (Req: 0 or 1). Waiting for signal.")
 
             save_session_data(email, current_data)
 
@@ -882,7 +884,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = '2 Ticks (R_100, D2 analysis) -> Entry: DIGITDIFF 0 (if T2 D2=9 AND T2 < T1) | Ticks: ' + DURATION|string + ' | Martingale: ' + MARTINGALE_STEPS|string + ' Step (x' + MARTINGALE_MULTIPLIER|string + ') | Max Losses: ' + max_consecutive_losses|string %}
+    {% set strategy = '2 Ticks (R_100, D2 analysis) -> Entry: DIGITUNDER 8 (if T1 D2=9 AND T2 D2=0 or 1) | Ticks: ' + DURATION|string + ' | Martingale: ' + MARTINGALE_STEPS|string + ' Step (x' + MARTINGALE_MULTIPLIER|string + ') | Max Losses: ' + max_consecutive_losses|string %}
 
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
 
@@ -901,8 +903,8 @@ CONTROL_FORM = """
             {% if price_parts|length > 1 and price_parts[-1]|length >= 2 %}{% set d2_digit_t1 = price_parts[-1][1] %}{% endif %}
             {{ d2_digit_t1 }}
             </b>
-            <p style="font-weight: normal; font-size: 0.8em; color: #555;">
-                
+            <p style="font-weight: normal; font-size: 0.8em; color: {% if d2_digit_t1 == '9' %}green{% else %}red{% endif %};">
+                Condition: T1 D2 = 9
             </p>
         </div>
         
@@ -919,22 +921,23 @@ CONTROL_FORM = """
             {{ d2_digit_t2 }}
             </b>
             
-            <p style="font-weight: normal; font-size: 0.8em; color: {% if d2_digit_t2 == '9' %}green{% else %}red{% endif %};">
-                Condition: T2 D2 = 9
+            <p style="font-weight: normal; font-size: 0.8em; color: {% if d2_digit_t2 == '0' or d2_digit_t2 == '1' %}green{% else %}red{% endif %};">
+                Condition: T2 D2 = 0 or 1
             </p>
         </div>
     </div>
 
     {# الشرط النهائي (عرض في الأسفل) #}
     <div style="text-align: center; margin-bottom: 15px;">
-         {% set t2_is_smaller = (session_data.display_t2_price < session_data.display_t1_price) and session_data.display_t1_price > 0 %}
+        {% set t1_d2_ok = d2_digit_t1 == '9' %}
+        {% set t2_d2_ok = d2_digit_t2 == '0' or d2_digit_t2 == '1' %}
 
-         <p style="font-weight: bold; font-size: 1.0em; color: {% if d2_digit_t2 == '9' and t2_is_smaller %}green{% else %}red{% endif %};">
+         <p style="font-weight: bold; font-size: 1.0em; color: {% if t1_d2_ok and t2_d2_ok %}green{% else %}red{% endif %};">
             Final Signal: 
-            {% if d2_digit_t2 == '9' and t2_is_smaller %}
-                DIGITDIFF 0 (T2 D2=9 AND T2 < T1)
+            {% if t1_d2_ok and t2_d2_ok %}
+                DIGITUNDER 8 (T1 D2=9 AND T2 D2 $\in \{0, 1\}$)
             {% else %}
-                NONE (T2 D2={{ d2_digit_t2 }} | T2 < T1: {{ t2_is_smaller }})
+                NONE (T1 D2={{ d2_digit_t1 }} | T2 D2={{ d2_digit_t2 }})
             {% endif %}
         </p>
     </div>
