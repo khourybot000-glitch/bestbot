@@ -31,7 +31,7 @@ MARTINGALE_MULTIPLIER = 4.0
 
 # ✅ نوع العقد: CALL مع حاجز -0.6
 TRADE_CONFIGS = [
-    {"type": "CALL", "barrier": -0.6, "label": "CALL_M_0.6_ENTRY"}, 
+    {"type": "PUT", "barrier": +0.6, "label": "CALL_M_0.6_ENTRY"}, 
 ]
 
 # ==========================================================
