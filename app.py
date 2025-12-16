@@ -653,7 +653,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                 T2_D3 = digits_T2[2] if len(digits_T2) >= 3 else None 
                 
                 # الشرط 1: T2 D3 = 2
-                condition_d3 = (T2_D3 == 2)
+                condition_d3 = (T2_D3 == 9)
                 
                 # الشرط 2: T2 > T1
                 condition_price = (tick_T2_price > tick_T1_price)
