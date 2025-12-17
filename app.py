@@ -15,24 +15,25 @@ WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 # الزوج R_100
 SYMBOL = "R_100"
 # مدة الصفقة 1 تيك
-DURATION = 1          
+DURATION = 5          
 DURATION_UNIT = "t"
 # أقصى خطوة مضاعفة 1
-MARTINGALE_STEPS = 1          
+MARTINGALE_STEPS = 0          
 # الحد الأقصى للخسائر المتتالية 2 
-MAX_CONSECUTIVE_LOSSES = 2    
+MAX_CONSECUTIVE_LOSSES = 1    
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 # تحليل 2 تيك
-TICK_HISTORY_SIZE = 2   
+TICK_HISTORY_SIZE = 5   
 # ✅ مُضاعِف مارتينجال 9.0
 MARTINGALE_MULTIPLIER = 9.0 
 
 # ✅ نوع العقد: DIGITUNDER 8 (بدون بارير)
-TRADE_CONFIGS = [
-    {"type": "DIGITUNDER", "barrier": 8, "label": "DIGITUNDER_8_ENTRY"}, 
-]
+TRADE_CONFIGS = {
+    "CALL": {"type": "CALL", "barrier": "-0.6", "label": "CALL_STRATEGY"},
+    "PUT": {"type": "PUT", "barrier": "+0.6", "label": "PUT_STRATEGY"}
+}
 
 # ==========================================================
 # BOT RUNTIME STATE
@@ -272,14 +273,17 @@ def send_trade_orders(email, base_stake, currency_code, contract_type, label, ba
     current_data['current_total_stake'] = rounded_stake 
     
     current_data['last_entry_price'] = current_data['last_tick_data']['price'] if current_data.get('last_tick_data') else 0.0
+    
+    # الحفاظ على حسابات الديجيت كما هي في كودك الأصلي بدون حذف
     entry_digits = get_target_digits(current_data['last_entry_price'])
-    # D2 هو الخانة الثانية بعد الفاصلة (index 1)
     current_data['last_entry_d2'] = entry_digits[1] if len(entry_digits) > 1 else 'N/A' 
+    
     current_data['open_contract_ids'] = []
 
+    # تعديل نص الرسالة ليناسب نوع العملية
     entry_msg = f"MARTINGALE STEP {current_step}" if current_step > 0 else "BASE SIGNAL (Analysis)"
 
-    # بناء طلب التداول للصفقة الواحدة
+    # بناء طلب التداول مع الحفاظ على الهيكل الأصلي
     trade_request = {
         "buy": 1,
         "price": rounded_stake,
@@ -290,17 +294,16 @@ def send_trade_orders(email, base_stake, currency_code, contract_type, label, ba
             "duration": DURATION,        
             "duration_unit": DURATION_UNIT,
             "symbol": SYMBOL,
-            "contract_type": contract_type,
+            "contract_type": contract_type, # سيأخذ CALL أو PUT من التحليل
         }
     }
     
-    # ✅ إضافة البارير (8) لـ DIGITUNDER
+    # ✅ تعديل منطق البارير ليكون مرناً (يستقبل +0.6 أو -0.6 أو أي قيمة ترسلها)
     if barrier is not None:
         trade_request["parameters"]["barrier"] = str(barrier)
     
     barrier_display = barrier if barrier is not None else 'N/A'
     print(f"\n💰 [TRADE START] Stake: {current_data['current_total_stake']:.2f} ({entry_msg}) | Contract: {contract_type} @ Barrier: {barrier_display}")
-
 
     try:
         ws_app.send(json.dumps(trade_request))
@@ -319,7 +322,7 @@ def send_trade_orders(email, base_stake, currency_code, contract_type, label, ba
 
     save_session_data(email, current_data)
 
-    check_time_ms = 6000 
+    check_time_ms = 16000 
 
     final_check = multiprocessing.Process(
         target=final_check_process,
@@ -328,7 +331,6 @@ def send_trade_orders(email, base_stake, currency_code, contract_type, label, ba
     final_check.start()
     final_check_processes[email] = final_check
     print(f"✅ [TRADE START] Final check process started in background (Waiting {check_time_ms / 1000}s).")
-
 
 def check_pnl_limits_by_balance(email, after_trade_balance):
     global MARTINGALE_STEPS
@@ -560,14 +562,28 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
     save_session_data(email, session_data)
     
     
-    def execute_single_trade(email, current_data):
-        current_step = current_data['current_step']
-        base_stake_to_use = current_data['base_stake']
-        currency_code = current_data['currency']
-        
-        config = TRADE_CONFIGS[0]
-        # إرسال البارير المناسب لـ DIGITUNDER (وهو 8)
-        send_trade_orders(email, base_stake_to_use, currency_code, config['type'], config['label'], config['barrier'], current_step, shared_is_contract_open=shared_is_contract_open)
+   def execute_single_trade(email, current_data, contract_type, barrier_value):
+    """
+    تم تعديل الدالة لاستقبال نوع العقد والبارير بناءً على نتيجة تحليل الـ 5 تيكات
+    """
+    current_step = current_data['current_step']
+    base_stake_to_use = current_data['base_stake']
+    currency_code = current_data['currency']
+    
+    # التسمية التوضيحية للصفقة في السجلات
+    label = f"{contract_type}_STRATEGY"
+    
+    # إرسال الأمر مع المعايير الديناميكية (CALL+0.6 أو PUT-0.6)
+    send_trade_orders(
+        email, 
+        base_stake_to_use, 
+        currency_code, 
+        contract_type,  # CALL أو PUT
+        label, 
+        barrier_value,  # +0.6 أو -0.6
+        current_step, 
+        shared_is_contract_open=shared_is_contract_open
+    )
 
     # -------------------------------------------------------------
     # الدوال المساعدة (on_open_wrapper, on_message_wrapper, on_close_wrapper)
@@ -602,8 +618,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
             current_data['is_balance_received'] = True
             save_session_data(email, current_data)
 
-        elif msg_type == 'tick':
-
+       elif msg_type == 'tick':
             if current_data['is_balance_received'] == False:
                 return
             
@@ -619,64 +634,64 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
             }
             current_data['last_tick_data'] = tick_data 
 
+            # إضافة التيك الجديد للسجل
             current_data['tick_history'].append(tick_data)
 
-            # تحديد حجم السجل (2 تيك)
-            if len(current_data['tick_history']) > TICK_HISTORY_SIZE:
+            # تعديل حجم السجل ليحتفظ بـ 5 تيكات (TICK_HISTORY_SIZE يجب أن تكون 5 في الثوابت)
+            if len(current_data['tick_history']) > 5:
                  current_data['tick_history'].pop(0)
 
-            
-            # تحديث قيم العرض
-            current_data['display_t1_price'] = current_data['tick_history'][0]['price'] if len(current_data['tick_history']) >= 1 else 0.0
-            current_data['display_t2_price'] = current_data['tick_history'][1]['price'] if len(current_data['tick_history']) >= 2 else 0.0
+            # تحديث قيم العرض للواجهة (اختياري لمتابعة السعرين)
+            if len(current_data['tick_history']) >= 5:
+                current_data['display_t1_price'] = current_data['tick_history'][0]['price']
+                current_data['display_t5_price'] = current_data['tick_history'][4]['price']
 
+            # 🚨🚨 استراتيجية الـ 5 تيكات: تحليل الفرق T5 - T1 🚨🚨
+            if len(current_data['tick_history']) == 5: 
+                t1_price = current_data['tick_history'][0]['price'] # التيك الأقدم
+                t5_price = current_data['tick_history'][4]['price'] # التيك الأحدث
+                
+                # حساب الفرق
+                diff = round(t5_price - t1_price, 4)
+                current_data['display_diff'] = diff # لعرض الفرق في الواجهة
 
-            # 🚨🚨 شروط الدخول: T1 D2 = 9 و T2 D2 = 0 أو 1 🚨🚨
-            if len(current_data['tick_history']) == TICK_HISTORY_SIZE: # أي 2 تيك متوفر
+                # تجهيز شروط الدخول
+                # 1. حالة CALL: الفرق >= +0.4
+                is_call_signal = (diff >= 0.4)
+                # 2. حالة PUT: الفرق <= -0.4
+                is_put_signal = (diff <= -0.4)
 
-                tick_T1_data = current_data['tick_history'][0]
-                tick_T2_data = current_data['tick_history'][1]
-                
-                tick_T1_price = tick_T1_data['price']
-                tick_T2_price = tick_T2_data['price']
-                
-                digits_T1 = get_target_digits(tick_T1_price)
-                digits_T2 = get_target_digits(tick_T2_price)
-                
-                # D2 هو الخانة الثانية (index 1)
-                T1_D2 = digits_T1[1] if len(digits_T1) >= 2 else None 
-                T2_D2 = digits_T2[1] if len(digits_T2) >= 2 else None 
-                
-                # ✅ الشرط 1: T1 D2 = 9
-                condition_t1_d2 = (T1_D2 == 9)
-                
-                # ✅ الشرط 2: T2 D2 = 0 أو 1
-                condition_t2_d2 = (T2_D2 == 0 or T2_D2 == 1)
-
-                condition_entry = condition_t1_d2 and condition_t2_d2
-
-                if condition_entry:
-                    
+                if is_call_signal or is_put_signal:
                     current_time_ms = time.time() * 1000
                     time_since_last_entry_ms = current_time_ms - current_data['last_entry_time']
                     
-                    is_time_gap_respected = time_since_last_entry_ms > 100 
-                    
-                    if is_time_gap_respected:
-                        execute_single_trade(email, current_data) 
+                    # احترام الفاصل الزمني بين الصفقات
+                    if time_since_last_entry_ms > 100:
+                        
+                        # تحديد نوع العقد والـ Barrier بناءً على الإشارة
+                        if is_call_signal:
+                            contract_type = "CALL"
+                            barrier = "-0.6"
+                        else:
+                            contract_type = "PUT"
+                            barrier = "+0.6"
+
+                        # تنفيذ الصفقة (يجب التأكد أن دالة execute_single_trade تستقبل الـ barrier)
+                        # ملاحظة: إذا كانت دالتك القديمة لا تدعم النوع الجديد، يفضل استخدام send_trade_orders
+                        execute_single_trade(email, current_data, contract_type, barrier) 
+                        
+                        # تفريغ السجل بعد الدخول لبدء تحليل جديد
                         current_data['tick_history'] = []
                         
                         entry_type = "BASE ENTRY" if current_data['current_step'] == 0 else f"MARTINGALE STEP {current_data['current_step']}"
-                        print(f"🚀 [{entry_type} CONFIRMED] Signal: T1 D2={T1_D2} & T2 D2={T2_D2}. Executing DIGITUNDER 8.")
+                        print(f"🚀 [{entry_type} CONFIRMED] Signal: Diff {diff}. Executing {contract_type} with Barrier {barrier}")
                     else:
-                         print("⚠️ [TIMING SKIP] Signal met but time gap too short. Skipping entry.")
-                        
-                # تفريغ أقدم تيك بعد التحقق
-                if len(current_data['tick_history']) == TICK_HISTORY_SIZE:
+                        print("⚠️ [TIMING SKIP] Signal met but time gap too short.")
+                
+                else:
+                    # تصفير أقدم تيك للسماح بدخول تيك جديد في اللفة القادمة (تحليل مستمر)
                     current_data['tick_history'].pop(0)
-
-                if not condition_entry:
-                     print(f"🔄 [2-TICK ANALYSIS] Condition not met. T1 D2:{T1_D2} (Req: 9), T2 D2:{T2_D2} (Req: 0 or 1). Waiting for signal.")
+                    # print(f"🔄 [5-TICK ANALYSIS] Waiting... Current Diff: {diff}")
 
             save_session_data(email, current_data)
 
