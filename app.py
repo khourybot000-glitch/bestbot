@@ -31,7 +31,7 @@ MARTINGALE_MULTIPLIER = 9.0
 
 # ✅ نوع العقد: DIGITUNDER 8 (بدون بارير)
 TRADE_CONFIGS = [
-    {"type": "DIGITOVER", "barrier": 1, "label": "DIGITOVER_1_ENTRY"}, 
+    {"type": "DIGITUNDER", "barrier": 8, "label": "DIGITUNDER_8_ENTRY"}, 
 ]
 
 # ==========================================================
