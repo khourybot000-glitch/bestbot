@@ -630,7 +630,6 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
             save_session_data(email, current_data)
 
        elif msg_type == 'tick':
-
             if current_data['is_balance_received'] == False:
                 return
 
@@ -648,7 +647,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
 
             # الحفاظ على حجم التاريخ المطلوب
             if len(current_data['tick_history']) > TICK_HISTORY_SIZE:
-                 current_data['tick_history'].pop(0)
+                current_data['tick_history'].pop(0)
 
             # واجهة العرض (UI)
             current_data['display_t1_price'] = current_data['tick_history'][0]['price'] if len(current_data['tick_history']) >= 1 else 0.0
@@ -658,7 +657,6 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
             is_open = shared_is_contract_open.get(email) if shared_is_contract_open is not None else False
 
             if is_open is False:
-
                 # التحقق من فاصل الأمان الزمني (5 ثوانٍ بين الصفقات)
                 current_time_ms = time.time() * 1000
                 time_since_last_entry_ms = current_time_ms - current_data['last_entry_time']
@@ -670,7 +668,6 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
 
                 # تحليل الـ 5 تيكات بالشرط التتابعي (T1 إلى T5)
                 if len(current_data['tick_history']) == TICK_HISTORY_SIZE:
-
                     t1 = current_data['tick_history'][0]['price']
                     t2 = current_data['tick_history'][1]['price']
                     t3 = current_data['tick_history'][2]['price']
@@ -681,7 +678,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                     is_sequential_up = t2 > t1 and t3 > t2 and t4 > t3 and t5 > t4
                     is_sequential_down = t2 < t1 and t3 < t2 and t4 < t3 and t5 < t4
 
-                    # --- إذا تحقق أي من الشرطين يتم الدخول المزدوج ---
+                    # إذا تحقق أي من الشرطين يتم الدخول المزدوج
                     if is_sequential_up or is_sequential_down:
                         is_martingale = current_data['current_step'] > 0
                         
@@ -709,10 +706,9 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
 
                         # تصفير التاريخ فور الدخول لمنع تكرار الإشارة
                         current_data['tick_history'] = []
-                        print(f"🚀 [DOUBLE ENTRY] Executed CALL {trade_barrier} & PUT {trade_barrier}")
+                        print(f"🚀 [DOUBLE ENTRY] Executed CALL -0.6 & PUT +0.6")
 
                     else:
-                        # اختياري: طباعة لمراقبة تحليل الأسعار الحالي
                         if int(time.time()) % 2 == 0: 
                             print(f"🔄 [5-TICK ANALYSIS] Waiting for sequence... T5: {t5}")
 
