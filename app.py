@@ -685,15 +685,15 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                     
                     # 1. صعود مستمر: كل تيك أعلى من قبله -> دخول PUT بحاجز +0.6
                     if t2 > t1 and t3 > t2 and t4 > t3 and t5 > t4:
-                        trade_signal = "PUT"
-                        trade_label = "PUT_ENTRY"
-                        trade_barrier = +0.6
-                    
-                    # 2. هبوط مستمر: كل تيك أدنى من قبله -> دخول CALL بحاجز -0.6
-                    elif t2 < t1 and t3 < t2 and t4 < t3 and t5 < t4:
                         trade_signal = "CALL"
                         trade_label = "CALL_ENTRY"
                         trade_barrier = -0.6
+                    
+                    # 2. هبوط مستمر: كل تيك أدنى من قبله -> دخول CALL بحاجز -0.6
+                    elif t2 < t1 and t3 < t2 and t4 < t3 and t5 < t4:
+                        trade_signal = "PUT"
+                        trade_label = "PUT_ENTRY"
+                        trade_barrier = +0.6
 
                     # إرسال الصفقة إذا تحقق الشرط
                     if trade_signal:
