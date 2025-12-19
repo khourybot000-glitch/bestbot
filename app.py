@@ -34,7 +34,7 @@ SYNC_SECONDS = []
 # نوع العقد: سيتم تحديده ديناميكياً CALL/PUT
 TRADE_CONFIGS = [
     {"type": "CALL", "barrier": -0.6, "label": "CALL_ENTRY"}, 
-    {"type": "PUT", "barrier": 0.6, "label": "PUT_ENTRY"}, 
+    {"type": "PUT", "barrier": +0.6, "label": "PUT_ENTRY"}, 
 ]
 
 # ==========================================================
@@ -683,7 +683,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                     elif diff <= -0.4:
                         trade_signal = "PUT"
                         trade_label = "PUT_ENTRY"
-                        trade_barrier = 0.6
+                        trade_barrier = +0.6
 
                     if trade_signal:
                         is_martingale = current_data['current_step'] > 0
