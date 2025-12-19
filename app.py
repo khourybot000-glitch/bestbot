@@ -281,6 +281,7 @@ def send_trade_orders(email, base_stake, currency_code, contract_type, label, ba
     print(f"\n💰 [TRADE START] Stake: {current_data['current_total_stake']:.2f} ({entry_msg}) | Contract: {contract_type} @ Barrier: {barrier_display}")
 
     # بناء طلب التداول للصفقة الواحدة
+    # بناء طلب التداول الأساسي
     trade_request = {
         "buy": 1,
         "price": rounded_stake,
@@ -295,9 +296,12 @@ def send_trade_orders(email, base_stake, currency_code, contract_type, label, ba
         }
     }
     
-    # إضافة الحاجز (Barrier) إذا كان موجوداً
+    # --- التعديل هنا لضمان إرسال الإشارة الصحيحة ---
     if barrier is not None:
-        trade_request["parameters"]["barrier"] = str(barrier)
+        # إذا كان الحاجز أكبر من 0، نضيف إشارة + يدوياً (مثل +0.6)
+        # إذا كان الحاجز أصغر من 0، الإشارة - موجودة أصلاً في الرقم (مثل -0.6)
+        barrier_prefix = "+" if float(barrier) > 0 else ""
+        trade_request["parameters"]["barrier"] = f"{barrier_prefix}{barrier}"
 
 
     try:
