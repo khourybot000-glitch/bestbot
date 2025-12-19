@@ -679,15 +679,15 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                     # 🚨 الشرط الجديد:
                     # إذا T5 - T1 >= +0.4 يدخل CALL بحاجز -0.6
                     if diff >= 0.4:
-                        trade_signal = "CALL"
-                        trade_label = "CALL_ENTRY"
-                        trade_barrier = -0.6
-                    
-                    # إذا T5 - T1 <= -0.4 يدخل PUT بحاجز +0.6
-                    elif diff <= -0.4:
                         trade_signal = "PUT"
                         trade_label = "PUT_ENTRY"
                         trade_barrier = +0.6
+                    
+                    # إذا T5 - T1 <= -0.4 يدخل PUT بحاجز +0.6
+                    elif diff <= -0.4:
+                        trade_signal = "CALL"
+                        trade_label = "CALL_ENTRY"
+                        trade_barrier = -0.6
 
                     if trade_signal:
                         is_martingale = current_data['current_step'] > 0
