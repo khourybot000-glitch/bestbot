@@ -629,8 +629,8 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
 
             save_session_data(email, current_data)
 
-       elif msg_type == 'tick':
-            if current_data['is_balance_received'] == False:
+        elif msg_type == 'tick':
+            if current_data.get('is_balance_received') == False:
                 return
 
             current_timestamp = int(data['tick']['epoch'])
@@ -675,44 +675,30 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                     t5 = current_data['tick_history'][4]['price']
 
                     # فحص الشروط التتابعية (صعود أو هبوط)
-                    is_sequential_up = t2 > t1 and t3 > t2 and t4 > t3 and t5 > t4
-                    is_sequential_down = t2 < t1 and t3 < t2 and t4 < t3 and t5 < t4
+                    is_seq_up = t2 > t1 and t3 > t2 and t4 > t3 and t5 > t4
+                    is_seq_down = t2 < t1 and t3 < t2 and t4 < t3 and t5 < t4
 
-                    # إذا تحقق أي من الشرطين يتم الدخول المزدوج
-                    if is_sequential_up or is_sequential_down:
+                    # --- الدخول المزدوج ---
+                    if is_seq_up or is_seq_down:
                         is_martingale = current_data['current_step'] > 0
                         
-                        # الصفقة الأولى (Higher)
+                        # الصفقة الأولى
                         trade_signal = "CALL"
                         trade_label = "CALL_ENTRY"
                         trade_barrier = +0.05
-                        
-                        send_trade_orders(
-                            email, current_data['base_stake'], current_data['currency'], 
-                            trade_signal, trade_label, trade_barrier, 
-                            is_martingale=is_martingale, shared_is_contract_open=shared_is_contract_open
-                        )
+                        send_trade_orders(email, current_data['base_stake'], current_data['currency'], trade_signal, trade_label, trade_barrier, is_martingale=is_martingale, shared_is_contract_open=shared_is_contract_open)
 
-                        # الصفقة الثانية (Lower)
+                        # الصفقة الثانية
                         trade_signal = "PUT"
                         trade_label = "PUT_ENTRY"
                         trade_barrier = -0.05
-                        
-                        send_trade_orders(
-                            email, current_data['base_stake'], current_data['currency'], 
-                            trade_signal, trade_label, trade_barrier, 
-                            is_martingale=is_martingale, shared_is_contract_open=shared_is_contract_open
-                        )
+                        send_trade_orders(email, current_data['base_stake'], current_data['currency'], trade_signal, trade_label, trade_barrier, is_martingale=is_martingale, shared_is_contract_open=shared_is_contract_open)
 
-                        # تصفير التاريخ فور الدخول لمنع تكرار الإشارة
                         current_data['tick_history'] = []
-                        print(f"🚀 [DOUBLE ENTRY] Executed CALL -0.6 & PUT +0.6")
-
-                    else:
-                        if int(time.time()) % 2 == 0: 
-                            print(f"🔄 [5-TICK ANALYSIS] Waiting for sequence... T5: {t5}")
+                        print(f"🚀 [DOUBLE ENTRY] CALL & PUT Executed")
 
                 save_session_data(email, current_data)
+
     def on_close_wrapper(ws_app, code, msg):
         print(f"❌ [WS Close {email}] Code: {code}, Message: {msg}")
         if email in active_ws:
