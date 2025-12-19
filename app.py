@@ -649,9 +649,9 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
             # وظيفة لاستخراج الرقم العشري الثاني D2
             def get_d2(price):
                 try:
-                    # تحويل السعر لنص وتنسيقه لخانين عشريين
-                    s_price = "{:.2f}".format(price)
-                    return int(s_price[-1]) # الرقم الأخير في التنسيق هو D2
+                    # تحويل السعر لنص وتنسيقه لخانين عشريين لضمان الدقة
+                    s_price = "{:.2f}".format(float(price))
+                    return int(s_price[-1]) # الرقم الأخير في التنسيق .XX هو D2
                 except:
                     return None
 
@@ -661,7 +661,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                 "timestamp": int(data['tick']['epoch'])
             }
 
-            # تحديث التاريخ (نحتاج 3 تيكات فقط للتحليل)
+            # تحديث التاريخ (نحتاج 3 تيكات فقط للتحليل: T1, T2, T3)
             current_data['tick_history'].append(tick_info)
             if len(current_data['tick_history']) > 3:
                 current_data['tick_history'].pop(0)
@@ -669,22 +669,20 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
             is_open = shared_is_contract_open.get(email, False)
             
             if not is_open and len(current_data['tick_history']) == 3:
-                t1 = current_data['tick_history'][0]['price']
-                t2 = current_data['tick_history'][1]['price']
-                t3 = current_data['tick_history'][2]['price']
+                # استخراج D2 لكل تيك في التاريخ
+                d2_t1 = current_data['tick_history'][0]['d2']
+                d2_t2 = current_data['tick_history'][1]['d2'] # متوفر إذا احتجت استخدامه لاحقاً
                 d2_t3 = current_data['tick_history'][2]['d2']
 
-                # --- تطبيق شروط الاستراتيجية ---
-                # الحالة الأولى: صعود متتالي + D2 التيك الثالث هو 4
-                cond_up = (t2 > t1) and (t3 > t2) and (d2_t3 == 4)
-                
-                # الحالة الثانية: هبوط متتالي + D2 التيك الثالث هو 4
-                cond_down = (t2 < t1) and (t3 < t2) and (d2_t3 == 4)
-
-                if cond_up or cond_down:
+                # --- تطبيق الاستراتيجية الجديدة ---
+                # الشرط: الرقم العشري الثاني للتيك الأول هو 4 وَ الرقم العشري الثاني للتيك الثالث هو 4
+                if d2_t1 == 4 and d2_t3 == 4:
                     is_martingale = current_data['current_step'] > 0
                     stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
                     
+                    # تسجيل الرصيد الحالي كـ "رصيد ما قبل الصفقة" لضمان دقة حساب الـ PNL لاحقاً
+                    current_data['before_trade_balance'] = current_data.get('current_balance', 0.0)
+
                     trade_request = {
                         "buy": 1,
                         "price": stake,
@@ -706,10 +704,10 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                         current_data['last_entry_time'] = time.time() * 1000
                         current_data['current_stake'] = stake
                         
-                        # تصفير التاريخ بعد الدخول لمنع التكرار
+                        # تصفير التاريخ بعد الدخول لمنع التكرار على نفس الإشارة
                         current_data['tick_history'] = []
 
-                        # فحص النتيجة بعد 5 ثوانٍ
+                        # فحص النتيجة بعد 5 ثوانٍ (أو 6 ثوانٍ لضمان استلام نتيجة المضاعفة بدقة)
                         check_proc = multiprocessing.Process(
                             target=final_check_process,
                             args=(email, current_data['api_token'], current_data['last_entry_time'], 5000, shared_is_contract_open)
@@ -717,8 +715,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                         check_proc.start()
                         final_check_processes[email] = check_proc
                         
-                        direction = "UP" if cond_up else "DOWN"
-                        print(f"🎯 [DIGITDIFF4] Direction: {direction} | T3_D2: {d2_t3} | Stake: {stake}")
+                        print(f"🎯 [STRATEGY MATCH] D2_T1: {d2_t1} | D2_T3: {d2_t3} | Entering DIGITDIFF4 | Stake: {stake}")
                     except Exception as e:
                         print(f"❌ [ORDER ERROR] {e}")
 
