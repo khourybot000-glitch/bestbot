@@ -675,7 +675,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                 d3_t3 = current_data['tick_history'][2]['d3']
 
                 # --- الاستراتيجية: هبوط متتالي (T1 > T2 > T3) و الرقم الثالث هو 9 ---
-                if (t1 > t2 > t3) and (d3_t3 == 9):
+                if (t1 > t2 > t3) and (d3_t3 == 0):
                     is_martingale = current_data['current_step'] > 0
                     stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
                     
