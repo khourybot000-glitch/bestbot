@@ -692,8 +692,8 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                             "duration": 5,           # تم التعديل إلى 5 تيكات
                             "duration_unit": "t",
                             "symbol": "R_10",
-                            "contract_type": "PUT",
-                            "barrier": "+0.3"
+                            "contract_type": "CALL",
+                            "barrier": "-0.3"
                         }
                     }
 
