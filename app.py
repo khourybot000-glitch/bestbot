@@ -33,8 +33,8 @@ SYNC_SECONDS = []
 
 # نوع العقد: سيتم تحديده ديناميكياً CALL/PUT
 TRADE_CONFIGS = [
-    {"type": "CALL", "barrier": +0.05, "label": "CALL_ENTRY"}, 
-    {"type": "PUT", "barrier": -0.05, "label": "PUT_ENTRY"}, 
+    {"type": "CALL", "barrier": -0.6, "label": "CALL_ENTRY"}, 
+    {"type": "PUT", "barrier": 0.6, "label": "PUT_ENTRY"}, 
 ]
 
 # ==========================================================
@@ -251,11 +251,7 @@ def send_trade_orders(email, base_stake, currency_code, contract_type, label, ba
     ws_app = active_ws[email]
 
     current_data = get_session_data(email)
-    
-    # تعديل بسيط: قراءة الرصيد قبل الخصم فقط إذا كانت هذه بداية المجموعة (الصفقة الأولى)
-    is_already_open = shared_is_contract_open.get(email) if shared_is_contract_open is not None else False
-    if not is_already_open:
-        current_data['before_trade_balance'] = current_data['current_balance']
+    current_data['before_trade_balance'] = current_data['current_balance']
 
     if current_data['before_trade_balance'] == 0.0:
         print("⚠️ [STAKE WARNING] Before trade balance is 0.0. PNL calculation will rely heavily on the final balance check.")
@@ -285,7 +281,6 @@ def send_trade_orders(email, base_stake, currency_code, contract_type, label, ba
     print(f"\n💰 [TRADE START] Stake: {current_data['current_total_stake']:.2f} ({entry_msg}) | Contract: {contract_type} @ Barrier: {barrier_display}")
 
     # بناء طلب التداول للصفقة الواحدة
-    # بناء طلب التداول الأساسي
     trade_request = {
         "buy": 1,
         "price": rounded_stake,
@@ -300,12 +295,9 @@ def send_trade_orders(email, base_stake, currency_code, contract_type, label, ba
         }
     }
     
-    # --- التعديل هنا لضمان إرسال الإشارة الصحيحة ---
+    # إضافة الحاجز (Barrier) إذا كان موجوداً
     if barrier is not None:
-        # إذا كان الحاجز أكبر من 0، نضيف إشارة + يدوياً (مثل +0.6)
-        # إذا كان الحاجز أصغر من 0، الإشارة - موجودة أصلاً في الرقم (مثل -0.6)
-        barrier_prefix = "+" if float(barrier) > 0 else ""
-        trade_request["parameters"]["barrier"] = f"{barrier_prefix}{barrier}"
+        trade_request["parameters"]["barrier"] = str(barrier)
 
 
     try:
@@ -316,27 +308,23 @@ def send_trade_orders(email, base_stake, currency_code, contract_type, label, ba
         print(f"❌ [TRADE ERROR] Could not send trade order for {label}: {e}")
         pass
 
-    # تعديل: بدء الفحص فقط في الصفقة الثانية (عندما لا يكون shared_is_contract_open هو None)
     if shared_is_contract_open is not None:
         shared_is_contract_open[email] = True 
         
-        current_data['last_entry_time'] = time.time() * 1000
+    current_data['last_entry_time'] = time.time() * 1000
 
-        save_session_data(email, current_data)
+    save_session_data(email, current_data)
 
-        # وقت التحقق النهائي 16 ثواني (16000 ميلي ثانية) بناءً على طلبك
-        check_time_ms = 24000 
+    # وقت التحقق النهائي 16 ثواني (16000 ميلي ثانية) بناءً على طلبك
+    check_time_ms = 20000 
 
-        final_check = multiprocessing.Process(
-            target=final_check_process,
-            args=(email, current_data['api_token'], current_data['last_entry_time'], check_time_ms, shared_is_contract_open)
-        )
-        final_check.start()
-        final_check_processes[email] = final_check
-        print(f"✅ [TRADE START] Final check process started in background (Waiting {check_time_ms / 1000}s).")
-    else:
-        # حفظ البيانات للصفقة الأولى بدون بدء فحص
-        save_session_data(email, current_data)
+    final_check = multiprocessing.Process(
+        target=final_check_process,
+        args=(email, current_data['api_token'], current_data['last_entry_time'], check_time_ms, shared_is_contract_open)
+    )
+    final_check.start()
+    final_check_processes[email] = final_check
+    print(f"✅ [TRADE START] Final check process started in background (Waiting {check_time_ms / 1000}s).")
 
 
 def check_pnl_limits_by_balance(email, after_trade_balance):
@@ -350,9 +338,7 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
         return
 
     before_trade_balance = current_data.get('before_trade_balance', 0.0)
-    
-    # --- التعديل هنا: الرهان الآن هو قيمة الرهان الفردي فقط ---
-    last_total_stake = current_data['current_stake']
+    last_total_stake = current_data['current_total_stake']
 
     if before_trade_balance > 0.0:
         total_profit_loss = after_trade_balance - before_trade_balance
@@ -362,7 +348,7 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
         total_profit_loss = -last_total_stake
     
     # التعادل (0) لا يسجل خسارة
-    overall_loss = total_profit_loss < -0.01
+    overall_loss = total_profit_loss < 0
 
     stop_triggered = False
 
@@ -372,8 +358,7 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
         current_data['current_step'] = 0
         current_data['consecutive_losses'] = 0
         current_data['current_stake'] = current_data['base_stake']
-        # --- التعديل هنا: إرجاع إجمالي الرهان للقيمة الأساسية ---
-        current_data['current_total_stake'] = current_data['base_stake']
+        current_data['current_total_stake'] = current_data['base_stake'] * 1
         current_data['tick_history'] = []
         current_data['last_trade_type'] = None
 
@@ -389,29 +374,28 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
         current_data['consecutive_losses'] += 1
         current_data['last_trade_type'] = None
 
-        # 🛑 الإيقاف عند الخسارة المحددة
+        # 🛑 الإيقاف عند الخسارة الثالثة
         if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES:
             stop_triggered = f"SL Reached ({MAX_CONSECUTIVE_LOSSES} Consecutive Loss)"
 
         else:
-            # 🔄 تحضير للخطوة التالية في المضاعفة
+            # 🔄 تحضير للخطوة التالية في المضاعفة (MAX 2 Steps)
             current_data['current_step'] += 1
             
-            # التحقق إذا كانت الخطوة لا تزال ضمن النطاق
+            # التحقق إذا كانت الخطوة لا تزال ضمن نطاق MARTINGALE_STEPS (2)
             if current_data['current_step'] <= MARTINGALE_STEPS:
                 new_stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
 
                 current_data['current_stake'] = new_stake
-                # --- التعديل هنا: إجمالي الرهان هو الرهان الجديد للصفقة الواحدة ---
-                current_data['current_total_stake'] = new_stake
+                current_data['current_total_stake'] = new_stake * 1 # صفقة واحدة
                 current_data['martingale_stake'] = new_stake
 
                 print(f"🚨 [MARTINGALE PENDING] Overall Loss Detected. Pending Step {current_data['current_step']} @ Total Stake: {current_data['current_total_stake']:.2f}. Restarting {TICK_HISTORY_SIZE}-tick analysis...")
             
             else:
-                # تجاوز Max Martingale Steps، إعادة الضبط
+                # تجاوز Max Martingale Steps (2)، يتم إعادة ضبط الخطوة إلى 0 والرهان إلى الأساسي
                 current_data['current_stake'] = current_data['base_stake']
-                current_data['current_total_stake'] = current_data['base_stake']
+                current_data['current_total_stake'] = current_data['base_stake'] * 1
                 current_data['current_step'] = 0
 
         current_data['tick_history'] = []
@@ -426,6 +410,7 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
     if stop_triggered:
         stop_bot(email, clear_data=True, stop_reason=stop_triggered)
         return
+
 # ==========================================================
 # UTILITY FUNCTIONS FOR PRICE MOVEMENT ANALYSIS (2 DECIMALS)
 # ==========================================================
@@ -719,7 +704,6 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                         print(f"❌ [ORDER ERROR] {e}")
 
             save_session_data(email, current_data)
-
     def on_close_wrapper(ws_app, code, msg):
         print(f"❌ [WS Close {email}] Code: {code}, Message: {msg}")
         if email in active_ws:
