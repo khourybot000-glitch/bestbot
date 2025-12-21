@@ -27,7 +27,7 @@ ACTIVE_SESSIONS_FILE = "active_sessions.json"
 # تحليل 5 تيك (تم التعديل حسب طلبك)
 TICK_HISTORY_SIZE = 3   
 # مُضاعِف مارتينجال 4.0 (تم التعديل)
-MARTINGALE_MULTIPLIER = 14.0 
+MARTINGALE_MULTIPLIER = 99.0 
 CANDLE_TICK_SIZE = 0
 SYNC_SECONDS = []
 
