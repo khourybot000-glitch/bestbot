@@ -15,7 +15,7 @@ WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 # الزوج R_100
 SYMBOL = "R_10"
 # مدة الصفقة 5 تيك (تم التعديل حسب طلبك)
-DURATION = 5          
+DURATION = 6          
 DURATION_UNIT = "t"
 # تفعيل المضاعفة 2 خطوات (تم التعديل)
 MARTINGALE_STEPS = 1          
@@ -27,7 +27,7 @@ ACTIVE_SESSIONS_FILE = "active_sessions.json"
 # تحليل 5 تيك (تم التعديل حسب طلبك)
 TICK_HISTORY_SIZE = 3   
 # مُضاعِف مارتينجال 4.0 (تم التعديل)
-MARTINGALE_MULTIPLIER = 99.0 
+MARTINGALE_MULTIPLIER = 49.0 
 CANDLE_TICK_SIZE = 0
 SYNC_SECONDS = []
 
@@ -325,7 +325,7 @@ def send_trade_orders(email, base_stake, currency_code, contract_type, label, ba
         save_session_data(email, current_data)
 
         # وقت التحقق النهائي 16 ثواني (16000 ميلي ثانية) بناءً على طلبك
-        check_time_ms = 18000 
+        check_time_ms = 20000 
 
         final_check = multiprocessing.Process(
             target=final_check_process,
@@ -689,11 +689,11 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                             "amount": stake,
                             "basis": "stake",
                             "currency": current_data['currency'],
-                            "duration": 5,           # تم التعديل إلى 5 تيكات
+                            "duration": 6,           # تم التعديل إلى 5 تيكات
                             "duration_unit": "t",
                             "symbol": "R_10",
                             "contract_type": "PUT",
-                            "barrier": "+0.6"
+                            "barrier": "+0.5"
                         }
                     }
 
