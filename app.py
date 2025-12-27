@@ -18,16 +18,16 @@ SYMBOL = "R_75"
 DURATION = 1          
 DURATION_UNIT = "t"
 # تفعيل المضاعفة 2 خطوات (تم التعديل)
-MARTINGALE_STEPS = 1          
+MARTINGALE_STEPS = 2          
 # الحد الأقصى للخسائر المتتالية 3 (تم التعديل)
-MAX_CONSECUTIVE_LOSSES = 2    
+MAX_CONSECUTIVE_LOSSES = 3    
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 # تحليل 5 تيك (تم التعديل حسب طلبك)
 TICK_HISTORY_SIZE = 1   
 # مُضاعِف مارتينجال 4.0 (تم التعديل)
-MARTINGALE_MULTIPLIER = 14.0 
+MARTINGALE_MULTIPLIER = 6.0 
 CANDLE_TICK_SIZE = 0
 SYNC_SECONDS = []
 
@@ -661,7 +661,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
             is_open = shared_is_contract_open.get(email, False)
 
             # --- الشرط: إذا كان الرقم العشري الرابع هو 0 ولم تكن هناك صفقة مفتوحة ---
-            if not is_open and d4_current == 0:
+            if not is_open and d4_current == 9:
                 stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
                 
                 # تسجيل الرصيد قبل الصفقة
