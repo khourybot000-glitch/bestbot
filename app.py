@@ -678,7 +678,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                         "duration": 1,          # مدة الصفقة تيك واحد
                         "duration_unit": "t",
                         "symbol": "R_75",        # الزوج المطلوب
-                        "contract_type": "DIGITDIFF",
+                        "contract_type": "DIGITOVER",
                         "barrier": 1            # التوقع: الرقم لن يكون 0
                     }
                 }
