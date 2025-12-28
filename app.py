@@ -13,9 +13,9 @@ from datetime import datetime, timezone
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 # الزوج R_100
-SYMBOL = "R_75"
+SYMBOL = "R_100"
 # مدة الصفقة 5 تيك (تم التعديل حسب طلبك)
-DURATION = 6          
+DURATION = 1          
 DURATION_UNIT = "t"
 # تفعيل المضاعفة 2 خطوات (تم التعديل)
 MARTINGALE_STEPS = 1          
@@ -25,9 +25,9 @@ RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 # تحليل 5 تيك (تم التعديل حسب طلبك)
-TICK_HISTORY_SIZE = 2   
+TICK_HISTORY_SIZE = 3   
 # مُضاعِف مارتينجال 4.0 (تم التعديل)
-MARTINGALE_MULTIPLIER = 29.0 
+MARTINGALE_MULTIPLIER = 14.0 
 CANDLE_TICK_SIZE = 0
 SYNC_SECONDS = []
 
@@ -325,7 +325,7 @@ def send_trade_orders(email, base_stake, currency_code, contract_type, label, ba
         save_session_data(email, current_data)
 
         # وقت التحقق النهائي 16 ثواني (16000 ميلي ثانية) بناءً على طلبك
-        check_time_ms = 20000 
+        check_time_ms = 8000 
 
         final_check = multiprocessing.Process(
             target=final_check_process,
@@ -641,82 +641,94 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
             save_session_data(email, current_data)
 
         elif msg_type == 'tick':
-            if not current_data.get('is_balance_received'):
-                return
+    if not current_data.get('is_balance_received'):
+        return
 
-            current_price = float(data['tick']['quote'])
-            
-            # وظيفة استخراج الرقم العشري الأول D1
-            def get_d1(price):
-                try:
-                    s_price = "{:.2f}".format(float(price))
-                    decimal_part = s_price.split('.')[1]
-                    return int(decimal_part[0])
-                except:
-                    return None
+    current_price = float(data['tick']['quote'])
+    
+    # وظيفة استخراج الرقم العشري الثاني D2
+    def get_d2(price):
+        try:
+            s_price = "{:.2f}".format(float(price))
+            return int(s_price[-1]) 
+        except:
+            return None
 
-            tick_info = {
-                "price": current_price,
-                "d1": get_d1(current_price)
+    # 1. إدارة تاريخ التيكات (تخزين آخر 3 أسعار)
+    if 'tick_history' not in current_data:
+        current_data['tick_history'] = []
+    
+    current_data['tick_history'].append(current_price)
+    
+    # الاحتفاظ بآخر 3 تيكات فقط
+    if len(current_data['tick_history']) > 3:
+        current_data['tick_history'].pop(0)
+
+    # التحقق من وجود 3 تيكات على الأقل للبدء بالتحليل
+    if len(current_data['tick_history']) < 3:
+        return
+
+    # تعريف المتغيرات T1, T2, T3 (T3 هو الأحدث)
+    t1 = current_data['tick_history'][0]
+    t2 = current_data['tick_history'][1]
+    t3 = current_data['tick_history'][2]
+    
+    # استخراج D2 الخاص بـ T2
+    d2_t2 = get_d2(t2)
+    
+    is_open = shared_is_contract_open.get(email, False)
+
+    # --- المنطق الجديد ---
+    # الشرط الأول: هبوط (T2 < T1 و T3 < T2) مع T2D2 == 0
+    condition_down = (t2 < t1) and (t3 < t2) and (d2_t2 == 0)
+    
+    # الشرط الثاني: صعود (T2 > T1 و T3 > T2) مع T2D2 == 0
+    condition_up = (t2 > t1) and (t3 > t2) and (d2_t2 == 0)
+
+    if not is_open and (condition_down or condition_up):
+        # تحديد نوع الحالة للطباعة فقط
+        trend_type = "H_DOWN ⬇️" if condition_down else "H_UP ⬆️"
+        
+        stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
+        
+        current_data['before_trade_balance'] = current_data.get('current_balance', 0.0)
+        save_session_data(email, current_data)
+
+        trade_request = {
+            "buy": 1,
+            "price": stake,
+            "parameters": {
+                "amount": stake,
+                "basis": "stake",
+                "currency": current_data['currency'],
+                "duration": 1,
+                "duration_unit": "t",
+                "symbol": "R_100",
+                "contract_type": "DIGITDIFF",
+                "barrier": 0  # تغيير الحاجز إلى 0 كما طلبت
             }
+        }
 
-            # تحديث سجل التيكات (آخر تيكين)
-            if 'tick_history' not in current_data:
-                current_data['tick_history'] = []
-                
-            current_data['tick_history'].append(tick_info)
-            if len(current_data['tick_history']) > 2:
-                current_data['tick_history'].pop(0)
-
-            is_open = shared_is_contract_open.get(email, False)
+        try:
+            active_ws[email].send(json.dumps(trade_request))
+            shared_is_contract_open[email] = True
+            current_data['last_entry_time'] = time.time() * 1000
             
-            # التحقق من الشروط: T2 < T1 و D1 لـ T2 هو 0
-            if not is_open and len(current_data['tick_history']) == 2:
-                t1 = current_data['tick_history'][0]['price'] # السابق
-                t2 = current_data['tick_history'][1]['price'] # الحالي
-                d1_t2 = current_data['tick_history'][1]['d1']
+            # تفريغ التاريخ بعد دخول الصفقة لتجنب التكرار الفوري بنفس البيانات
+            current_data['tick_history'] = []
+            
+            check_proc = multiprocessing.Process(
+                target=final_check_process,
+                args=(email, current_data['api_token'], current_data['last_entry_time'], 8000, shared_is_contract_open)
+            )
+            check_proc.start()
+            final_check_processes[email] = check_proc
+            
+            print(f"🎯 [DIGITDIFF] تحليل: {trend_type} | T2D2=0 | دخول Barrier: 0")
+        except Exception as e:
+            print(f"❌ [ORDER ERROR] {e}")
 
-                if (t2 < t1) and (d1_t2 == 0):
-                    stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
-                    
-                    current_data['before_trade_balance'] = current_data.get('current_balance', 0.0)
-                    save_session_data(email, current_data)
-
-                    trade_request = {
-                        "buy": 1,
-                        "price": stake,
-                        "parameters": {
-                            "amount": stake,
-                            "basis": "stake",
-                            "currency": current_data['currency'],
-                            "duration": 6,           # مدة الصفقة 6 تيكات
-                            "duration_unit": "t",
-                            "symbol": "R_75",
-                            "contract_type": "PUT",
-                            "barrier": "+35"         # الحاجز المطلوب
-                        }
-                    }
-
-                    try:
-                        active_ws[email].send(json.dumps(trade_request))
-                        shared_is_contract_open[email] = True
-                        current_data['last_entry_time'] = time.time() * 1000
-                        
-                        # تصفير السجل للبدء بتحليل جديد بعد الصفقة
-                        current_data['tick_history'] = []
-
-                        # فحص النتيجة بعد 20 ثانية (20000 مللي ثانية)
-                        check_proc = multiprocessing.Process(
-                            target=final_check_process,
-                            args=(email, current_data['api_token'], current_data['last_entry_time'], 20000, shared_is_contract_open)
-                        )
-                        check_proc.start()
-                        
-                        print(f"📉 [TRADE] T2 < T1 و D1=0 | دخول PUT +35 | المدة: 6 تيك | انتظار: 20 ثانية")
-                    except Exception as e:
-                        print(f"❌ [ORDER ERROR] {e}")
-
-            save_session_data(email, current_data)
+    save_session_data(email, current_data)
     def on_close_wrapper(ws_app, code, msg):
         print(f"❌ [WS Close {email}] Code: {code}, Message: {msg}")
         if email in active_ws:
