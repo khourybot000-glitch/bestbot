@@ -9,7 +9,6 @@ CORS(app)
 
 def get_direction(symbol, count):
     try:
-        # الاتصال بـ API دريف لجلب بيانات الشموع
         ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=8)
         ws.send(json.dumps({
             "ticks_history": f"frx{symbol.replace('/', '')}",
@@ -21,12 +20,10 @@ def get_direction(symbol, count):
         result = json.loads(ws.recv())
         ws.close()
         prices = result.get("history", {}).get("prices", [])
-        
         if len(prices) >= count:
-            # المنطق العادي: صعود إذا كان السعر الحالي أكبر من السعر قبل 600 تيك
+            # الاتجاه الفعلي للسوق
             return "call" if prices[-1] > prices[0] else "put"
-    except Exception as e:
-        print(f"Error: {e}")
+    except:
         return None
     return None
 
@@ -37,24 +34,23 @@ def check_signal():
     m = now.minute
     s = now.second
 
-    # --- لحظة دخول الصفقة (الدقيقة 9 والثانية 56) ---
-    if m % 10 == 9 and s == 58:
-        actual_dir = get_direction(pair, 600) # التحليل الفني الحقيقي
-        if actual_dir:
-            # عكس الإشارة: إذا كان السوق صاعداً ندخل هبوط (Put) والعكس صحيح
-            action = "put" if actual_dir == "call" else "call"
-            return jsonify({"status": "trade", "action": action})
+    # 1. لحظة دخول الصفقة (الدقيقة 9:56)
+    if m % 10 == 9 and s == 56:
+        market_dir = get_direction(pair, 600) # تحليل الـ 10 دقائق
+        if market_dir:
+            # نحن ندخل عكس اتجاه السوق
+            my_action = "put" if market_dir == "call" else "call"
+            return jsonify({"status": "trade", "action": my_action})
 
-    # --- لحظة فحص النتيجة (الدقيقة 0 والثانية 58) ---
+    # 2. لحظة فحص النتيجة (الدقيقة 0:58)
     if m % 10 == 0 and s == 58:
-        result_dir = get_direction(pair, 60) # اتجاه أول دقيقة فعلياً
-        if result_dir:
-            # نعكس النتيجة هنا أيضاً لتتوافق مع دخولنا العكسي في نظام المضاعفات
-            reversed_result = "put" if result_dir == "call" else "call"
-            return jsonify({"status": "check_result", "direction": reversed_result})
+        real_market_result = get_direction(pair, 60) # ما حدث فعلياً في أول دقيقة
+        if real_market_result:
+            # هام جداً: نرسل الاتجاه الحقيقي للسوق كما هو
+            # البوت في المتصفح سيقارن (هل دخولي العكسي == ما حدث في السوق؟)
+            return jsonify({"status": "check_result", "direction": real_market_result})
 
     return jsonify({"status": "scanning"})
 
 if __name__ == '__main__':
-    # تشغيل السيرفر على بورت 10000 المتوافق مع Render
     app.run(host='0.0.0.0', port=10000)
