@@ -21,7 +21,7 @@ def get_direction(symbol, count):
         ws.close()
         prices = result.get("history", {}).get("prices", [])
         if len(prices) >= count:
-            return "put" if prices[-1] > prices[0] else "call"
+            return "call" if prices[-1] > prices[0] else "put"
     except:
         return None
     return None
