@@ -1,6 +1,4 @@
 flask
-requests
-websocket-client
-numpy
-pandas
+flask-cors
+ccxt
 gunicorn
