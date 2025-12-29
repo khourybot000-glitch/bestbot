@@ -1,4 +1,4 @@
 flask
 flask-cors
-ccxt
+websocket-client
 gunicorn
