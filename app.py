@@ -38,7 +38,7 @@ def check_signal():
     s = now.second
 
     # --- لحظة دخول الصفقة (الدقيقة 9 والثانية 56) ---
-    if m % 10 == 9 and s == 56:
+    if m % 10 == 9 and s == 58:
         actual_dir = get_direction(pair, 600) # التحليل الفني الحقيقي
         if actual_dir:
             # عكس الإشارة: إذا كان السوق صاعداً ندخل هبوط (Put) والعكس صحيح
