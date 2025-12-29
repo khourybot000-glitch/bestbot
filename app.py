@@ -5,82 +5,74 @@ import json
 import datetime
 
 app = Flask(__name__)
+# تفعيل CORS للسماح للمتصفح بالاتصال بالسيرفر بدون مشاكل أمنية
 CORS(app)
 
-# مخزن ديناميكي لكل الأزواج
-db = {}
-
-def get_deriv_price(symbol):
+def get_60s_analysis(symbol):
+    """فتح اتصال سريع، تحليل اتجاهين متتاليين، ثم الإغلاق"""
     try:
-        # اتصال سريع للحصول على السعر اللحظي من Deriv
-        ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=5)
-        ws.send(json.dumps({"ticks": f"frx{symbol.replace('/', '')}"}))
-        r = json.loads(ws.recv())
-        ws.close()
-        return r["tick"]["quote"] if "tick" in r else None
-    except:
-        return None
-
-@app.route('/check_signal')
-def check_signal():
-    # استلام الزوج المختار من المتصفح
-    pair = request.args.get('pair')
-    if not pair:
-        return jsonify({"status": "error", "message": "No pair selected"})
-
-    now = datetime.datetime.now()
-    m, s = now.minute, now.second
-    
-    # إنشاء مخزن بيانات خاص بهذا الزوج إذا لم يكن موجوداً
-    if pair not in db:
-        db[pair] = {"open10": None, "open1": None, "last_trade_min": -1}
-
-    # 1. تسجيل سعر فتح الـ 10 دقائق (عند الدقائق 00, 10, 20...)
-    if m % 10 == 0 and s <= 2:
-        price = get_deriv_price(pair)
-        if price: 
-            db[pair]["open10"] = price
-            print(f"[{pair}] Recorded 10m Open: {price}")
-
-    # 2. تسجيل سعر فتح الدقيقة التاسعة (عند الدقائق 09, 19, 29...)
-    if m % 10 == 9 and s <= 2:
-        price = get_deriv_price(pair)
-        if price: 
-            db[pair]["open1"] = price
-            print(f"[{pair}] Recorded 1m Open: {price}")
-
-    # 3. تحليل الإشارة عند الثانية 56 من الدقيقة التاسعة
-    if m % 10 == 9 and s >= 56 and db[pair]["last_trade_min"] != m:
-        o10 = db[pair]["open10"]
-        o1 = db[pair]["open1"]
-        current_price = get_deriv_price(pair)
+        # الاتصال بـ Deriv عبر WebSocket
+        ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=8)
         
-        if o10 and o1 and current_price:
-            signal = ""
-            # شروط الاستراتيجية الخاصة بك
-            if current_price > o10 and current_price > o1: signal = "put"
-            elif current_price < o10 and current_price < o1: signal = "call"
-            
-            if signal:
-                db[pair]["last_trade_min"] = m 
-                return jsonify({
-                    "status": "trade", 
-                    "action": signal, 
-                    "pair": pair,
-                    "details": f"Price:{current_price} | O10:{o10} | O1:{o1}"
-                })
+        # طلب آخر 60 ثانية من الأسعار
+        ws.send(json.dumps({
+            "ticks_history": f"frx{symbol.replace('/', '')}",
+            "adjust_start_time": 1,
+            "count": 60,
+            "end": "latest",
+            "style": "ticks"
+        }))
+        
+        result = json.loads(ws.recv())
+        ws.close() # إغلاق الاتصال فوراً بعد استلام البيانات
+        
+        prices = result.get("history", {}).get("prices", [])
+        
+        if len(prices) >= 60:
+            # تقسيم الدقيقة إلى نصفين (30 ثانية لكل نصف)
+            first_half = prices[0:30]
+            second_half = prices[30:60]
 
-    return jsonify({
-        "status": "scanning", 
-        "pair": pair,
-        "time": f"{m}:{s}",
-        "o10": db[pair]["open10"], 
-        "o1": db[pair]["open1"]
-    })
+            # تحديد اتجاه النصف الأول
+            first_trend = "up" if first_half[-1] > first_half[0] else "down"
+            
+            # تحديد اتجاه النصف الثاني
+            second_trend = "up" if second_half[-1] > second_half[0] else "down"
+
+            # الشرط: يجب أن يكون النصفان بنفس الاتجاه (صعود مستمر أو هبوط مستمر)
+            if first_trend == "up" and second_trend == "up":
+                return "call"
+            elif first_trend == "down" and second_trend == "down":
+                return "put"
+                
+        return None
+    except Exception as e:
+        print(f"Socket Error: {e}")
+        return None
 
 @app.route('/')
 def home():
-    return "KHOURY BOT V3.9 - Multi-Pair Engine Active", 200
+    return "KHOURY AI ENGINE V7.1 IS RUNNING", 200
+
+@app.route('/check_signal')
+def check_signal():
+    pair = request.args.get('pair', 'EURUSD')
+    now = datetime.datetime.now()
+    s = now.second
+
+    # تفعيل التحليل فقط في نافذة الثانية 56 لضمان دقة الشمعة القادمة
+    if 55 <= s <= 58:
+        action = get_60s_analysis(pair)
+        if action:
+            return jsonify({
+                "status": "trade",
+                "action": action,
+                "pair": pair,
+                "msg": f"Confirmed {action.upper()} trend in 30/30 window"
+            })
+
+    return jsonify({"status": "scanning", "sec": s})
 
 if __name__ == '__main__':
+    # تشغيل السيرفر على بورت 10000 المعتمد في Render
     app.run(host='0.0.0.0', port=10000)
