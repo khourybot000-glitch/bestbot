@@ -7,7 +7,6 @@ CORS(app)
 
 def get_prices_data(symbol, count):
     try:
-        # تحويل اسم الزوج ليتناسب مع Deriv (مثلاً EURUSD تصبح frxEURUSD)
         ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=10)
         ws.send(json.dumps({"ticks_history": f"frx{symbol.replace('/', '')}", "count": count, "end": "latest", "style": "ticks"}))
         result = json.loads(ws.recv())
@@ -20,39 +19,40 @@ def check_signal():
     pair = request.args.get('pair', 'EURUSD')
     now = datetime.datetime.now()
     s = now.second
-    m = now.minute
 
-    # --- القسم الأول: تحليل الابتلاع ودخول الصفقة (عند الثانية 58) ---
+    # التحليل عند الثانية 58
     if s == 58:
-        # جلب 30 تيك (تمثل دقيقة واحدة عندك)
+        # جلب 30 تيك (الدقيقة كاملة حسب نظامك)
         prices = get_prices_data(pair, 30)
         if len(prices) >= 30:
-            # تقسيم الدقيقة لشمعتين (كل شمعة 15 تيك تقريباً)
-            o1, c1 = prices[0], prices[15]
-            o2, c2 = prices[15], prices[29]
+            t0 = prices[0]   # نقطة البداية المشتركة
+            t15 = prices[15] # نهاية الشمعة الصغيرة (الجزء)
+            t29 = prices[29] # نهاية الشمعة الكبيرة (الكل)
 
-            action = ""
-            # منطق الشمعة الابتلاعية
-            if (c2 > o2) and (c1 < o1) and (c2 > o1): # ابتلاع شرائي
-                action = "call"
-            elif (c2 < o2) and (c1 > o1) and (c2 < o1): # ابتلاع بيعي
-                action = "put"
+            # 1. اتجاه الشمعة الصغيرة (الجزء من 0 لـ 15)
+            # صاعدة إذا كان تيك 15 أكبر من تيك 0، وهابطة إذا كان أصغر
+            dir_small = "up" if t15 > t0 else "down"
             
-            if action:
-                return jsonify({"status": "trade", "action": action})
+            # 2. اتجاه الشمعة الكبيرة (الكل من 0 لـ 29)
+            # صاعدة إذا كان تيك 29 أكبر من تيك 0، وهابطة إذا كان أصغر
+            dir_large = "up" if t29 > t0 else "down"
 
-    # --- القسم الثاني: فحص نتيجة الصفقة السابقة (عند الثانية 58) ---
-    # الـ Bookmark ينتظر "check_result" ليقرر المضاعفة القادمة
+            # الشرط الجوهري: اتجاه الجزء (0-15) عكس اتجاه الكل (0-29)
+            if dir_small != dir_large:
+                # الصفقة تكون باتجاه الشمعة الكبيرة (التي ابتلعت الاتجاه الأول)
+                action = "call" if dir_large == "up" else "put"
+                return jsonify({
+                    "status": "trade", 
+                    "action": action
+                })
+
+    # فحص النتيجة (عند الثانية 58 من الدقيقة التالية) لربطها بالـ Bookmark
     if s == 58:
-        # بما أن الدقيقة 30 تيك، نقارن السعر الحالي بالسعر قبل 30 تيك
         prices = get_prices_data(pair, 35)
         if len(prices) >= 30:
-            # تحديد اتجاه السعر في الدقيقة الماضية
-            res_dir = "call" if prices[-1] > prices[-30] else "put"
-            return jsonify({
-                "status": "check_result", 
-                "direction": res_dir
-            })
+            # مقارنة السعر الحالي بسعر الدخول قبل 30 تيك
+            res = "call" if prices[-1] > prices[-30] else "put"
+            return jsonify({"status": "check_result", "direction": res})
 
     return jsonify({"status": "scanning"})
 
