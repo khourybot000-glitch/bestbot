@@ -5,110 +5,132 @@ import websocket, json, time, datetime
 app = Flask(__name__)
 CORS(app)
 
-data_store = {
-    "is_waiting_result": False,
-    "entry_price": None,
-    "last_trade_minute": -1,
-    "last_action": None,
-    "loss_count": 0,
-    "next_clicks": 1,
-    "win_count": 0,
-    "target_wins": 15,
-    "bot_stopped": False,
-    "entry_time": 0 
-}
+# دالة لإعادة ضبط البيانات للصفر
+def get_initial_data():
+    return {
+        "is_waiting_result": False,
+        "entry_price": None,
+        "last_trade_minute": -1,
+        "last_action": None,
+        "loss_count": 0,
+        "next_clicks": 1,
+        "win_count": 0,
+        "target_wins": 15,
+        "bot_stopped": False,
+        "entry_time": 0,
+        "last_request_time": time.time()
+    }
 
-def analyze_strategy_v6(symbol):
-    try:
-        s = symbol.replace("/", "").replace(" ", "").upper()
-        target = f"frx{s}"
-        ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=20)
-        # سحب 3000 تيك لرسم مستويات الدعم والمقاومة التاريخية
-        ws.send(json.dumps({"ticks_history": target, "count": 3000, "end": "latest", "style": "ticks"}))
-        result = json.loads(ws.recv())
-        ws.close()
-        
-        ticks = [float(p) for p in result.get("history", {}).get("prices", [])]
-        if len(ticks) < 30: return None, None
+data_store = get_initial_data()
 
-        current_p = ticks[-1]
-        # استخراج مستويات الدعم والمقاومة من كامل البيانات ما عدا آخر 30 تيك
-        historical_ticks = ticks[:-30]
-        res_level = max(historical_ticks)
-        sup_level = min(historical_ticks)
-        
-        last_30 = ticks[-30:]
-        open_30 = last_30[0]
-        close_30 = last_30[-1]
-
-        # 1. تحليل اتجاه الـ 30 تيك
-        trend_30 = "up" if close_30 > open_30 else "down"
-
-        # 2. تحليل اتجاه آخر 5 تيكات (متتالية)
-        last_5 = ticks[-5:]
-        is_last_5_up = all(last_5[i] < last_5[i+1] for i in range(len(last_5)-1))
-        is_last_5_down = all(last_5[i] > last_5[i+1] for i in range(len(last_5)-1))
-
-        # 3. فحص الاختراق (Breakout Check)
-        # اختراق مقاومة: كان تحتها وأصبح فوقها
-        is_resistance_broken = (open_30 <= res_level) and (close_30 > res_level)
-        # اختراق دعم: كان فوقه وأصبح تحته
-        is_support_broken = (open_30 >= sup_level) and (close_30 < sup_level)
-
-        # --- منطق القرار الصارم ---
-        
-        # دخول CALL: 
-        # اتجاه 30 صاعد + آخر 5 صاعدين + بعيد عن المقاومة + لم يخترق المقاومة للتو
-        if trend_30 == "up" and is_last_5_up and not is_resistance_broken:
-            if close_30 < (res_level - 0.00003):
-                return "call", current_p
+def find_recent_color_levels(ticks_list):
+    # تحويل التيكات لـ 20 شمعة (30 تيك لكل شمعة)
+    candles = []
+    for i in range(0, len(ticks_list), 30):
+        seg = ticks_list[i:i+30]
+        if len(seg) == 30:
+            color = "green" if seg[-1] > seg[0] else "red"
+            candles.append({
+                "high": max(seg), 
+                "low": min(seg), 
+                "color": color
+            })
+    
+    recent_res = None
+    recent_sup = None
+    
+    # 1. البحث عن أقرب مقاومة (خضراء تليها حمراء) في الـ 19 شمعة السابقة
+    for i in range(len(candles)-2, 0, -1):
+        if candles[i-1]["color"] == "green" and candles[i]["color"] == "red":
+            recent_res = max(candles[i-1]["high"], candles[i]["high"])
+            break
             
-        # دخول PUT: 
-        # اتجاه 30 هابط + آخر 5 هابطين + بعيد عن الدعم + لم يخترق الدعم للتو
-        elif trend_30 == "down" and is_last_5_down and not is_support_broken:
-            if close_30 > (sup_level + 0.00003):
-                return "put", current_p
-
-        return None, None
-    except:
-        return None, None
+    # 2. البحث عن أقرب دعم (حمراء تليها خضراء) في الـ 19 شمعة السابقة
+    for i in range(len(candles)-2, 0, -1):
+        if candles[i-1]["color"] == "red" and candles[i]["color"] == "green":
+            recent_sup = min(candles[i-1]["low"], candles[i]["low"])
+            break
+            
+    return recent_res, recent_sup
 
 @app.route('/check_signal')
 def check_signal():
     global data_store
+    
+    # ميزة الحذف التلقائي بعد دقيقتين خمول
+    current_time = time.time()
+    if current_time - data_store["last_request_time"] > 120:
+        data_store = get_initial_data()
+    data_store["last_request_time"] = current_time
+
     pair = request.args.get('pair', 'EURUSD')
-    now_ts, now_dt = time.time(), datetime.datetime.now()
+    now_dt = datetime.datetime.now()
     minute, second = now_dt.minute, now_dt.second
 
     if data_store["bot_stopped"]:
-        return jsonify({"status": "target_reached", "msg": f"WIN: {data_store['win_count']}"})
+        return jsonify({"status": "target_reached", "msg": f"Target: {data_store['win_count']}"})
 
+    # فحص النتيجة بعد مرور 5 دقائق (300 ثانية)
     if data_store["is_waiting_result"]:
-        if (now_ts - data_store["entry_time"]) >= 58:
+        if (current_time - data_store["entry_time"]) >= 298:
             try:
                 ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=5)
                 ws.send(json.dumps({"ticks": f"frx{pair.replace('/', '')}"}))
                 curr_p = float(json.loads(ws.recv()).get("tick", {}).get("quote"))
                 ws.close()
+                
                 is_win = (curr_p > data_store["entry_price"] and data_store["last_action"] == "call") or \
                          (curr_p < data_store["entry_price"] and data_store["last_action"] == "put")
+                
                 if is_win:
                     data_store["win_count"] += 1
                     data_store["loss_count"], data_store["next_clicks"] = 0, 1
                 else:
                     data_store["loss_count"] += 1
                     data_store["next_clicks"] = 2 if data_store["loss_count"] == 1 else 6
-                    if data_store["loss_count"] > 2: return jsonify({"status": "total_loss", "msg": "STOP"})
+                    if data_store["loss_count"] > 2: 
+                        data_store["bot_stopped"] = True
+                        return jsonify({"status": "total_loss", "msg": "STOP"})
+                
                 data_store["is_waiting_result"] = False
                 return jsonify({"status":"check_result","win":"true" if is_win else "false","msg":f"W:{data_store['win_count']}","next_clicks":data_store["next_clicks"]})
             except: pass
     else:
+        # التحليل عند الثانية 56 من كل دقيقة
         if second == 56:
             if data_store["last_trade_minute"] != minute:
-                action, entry_p = analyze_strategy_v6(pair)
-                if action:
-                    data_store.update({"is_waiting_result":True, "entry_price":entry_p, "last_trade_minute":minute, "last_action":action, "entry_time":now_ts})
-                    return jsonify({"status": "trade", "action": action, "clicks": data_store["next_clicks"]})
+                try:
+                    s = pair.replace("/", "").replace(" ", "").upper()
+                    target = f"frx{s}"
+                    ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=20)
+                    ws.send(json.dumps({"ticks_history": target, "count": 600, "end": "latest", "style": "ticks"}))
+                    result = json.loads(ws.recv())
+                    ws.close()
+                    
+                    ticks = [float(p) for p in result.get("history", {}).get("prices", [])]
+                    res_level, sup_level = find_color_based_levels(ticks)
+                    
+                    last_open = ticks[-30] # بداية الدقيقة الأخيرة
+                    last_close = ticks[-1] # إغلاق الدقيقة الأخيرة
+                    
+                    action = None
+                    # شرط اختراق المقاومة (شمعة صاعدة)
+                    if res_level and last_open <= res_level and last_close > res_level:
+                        action = "call"
+                    # شرط اختراق الدعم (شمعة هابطة)
+                    elif sup_level and last_open >= sup_level and last_close < sup_level:
+                        action = "put"
+
+                    if action:
+                        data_store.update({
+                            "is_waiting_result": True,
+                            "entry_price": last_close,
+                            "last_trade_minute": minute,
+                            "last_action": action,
+                            "entry_time": current_time
+                        })
+                        return jsonify({"status": "trade", "action": action, "clicks": data_store["next_clicks"]})
+                except: pass
 
     return jsonify({"status": "scanning"})
 
