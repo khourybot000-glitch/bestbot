@@ -7,74 +7,87 @@ CORS(app)
 
 # مخزن البيانات والحالة
 data_store = {
-    "tick_0": None,
-    "tick_30": None,
+    "is_waiting_result": False,
     "entry_price": None,
-    "is_waiting_result": False
+    "last_trade_period": -1  # تخزين رقم الربع ساعة لمنع التكرار
 }
 
-def get_current_price(symbol):
+def get_ticks_analysis(symbol, count=450):
     try:
+        s = symbol.replace("/", "").replace(" ", "").upper()
+        target = f"frx{s}"
         ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=10)
-        ws.send(json.dumps({"ticks": f"frx{symbol.replace('/', '')}", "subscribe": 0}))
+        
+        request_data = {
+            "ticks_history": target,
+            "count": count,
+            "end": "latest",
+            "style": "ticks"
+        }
+        ws.send(json.dumps(request_data))
         result = json.loads(ws.recv())
         ws.close()
-        return result.get("tick", {}).get("quote")
-    except: return None
+        
+        prices = result.get("history", {}).get("prices", [])
+        if len(prices) >= count:
+            first_tick = float(prices[0])
+            last_tick = float(prices[-1])
+            if last_tick > first_tick: return "call", last_tick
+            if last_tick < first_tick: return "put", last_tick
+        return None, None
+    except:
+        return None, None
 
 @app.route('/check_signal')
 def check_signal():
     global data_store
     pair = request.args.get('pair', 'EURUSD')
     now = datetime.datetime.now()
-    s = now.second
-
-    # --- القيد الصارم: إذا كان هناك صفقة، لا تسجل أي أسعار ---
+    minute = now.minute
+    second = now.second
     
-    # 1. عند الثانية 0: يسجل السعر فقط إذا لم نكن ننتظر نتيجة صفقة سابقة
-    if s == 0 and not data_store["is_waiting_result"]:
-        data_store["tick_0"] = get_current_price(pair)
+    # تحديد رقم الربع ساعة الحالية (0, 15, 30, 45)
+    current_period = (minute // 15) * 15
+    # تحديد الدقيقة الأخيرة من الربع ساعة
+    target_minutes = [14, 29, 44, 59]
 
-    # 2. عند الثانية 30: يسجل السعر فقط إذا لم نكن ننتظر نتيجة صفقة سابقة
-    if s == 30 and not data_store["is_waiting_result"]:
-        data_store["tick_30"] = get_current_price(pair)
+    # --- 1. قسم النتيجة (مع نافذة سماح 5 ثوانٍ) ---
+    if data_store["is_waiting_result"]:
+        # السماح بطلب النتيجة من الثانية 58 حتى الثانية 03 من الدقيقة التالية
+        if 58 <= second <= 59 or 0 <= second <= 3:
+            try:
+                ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=5)
+                ws.send(json.dumps({"ticks": f"frx{pair.replace('/', '')}"}))
+                res_data = json.loads(ws.recv())
+                ws.close()
+                
+                current_p = float(res_data.get("tick", {}).get("quote"))
+                res_dir = "call" if current_p > data_store["entry_price"] else "put"
+                
+                # تصفير الحالة للعودة للتحليل
+                data_store["is_waiting_result"] = False
+                data_store["entry_price"] = None
+                print(f"[{pair}] Result Sent (Window active).")
+                return jsonify({"status": "check_result", "direction": res_dir})
+            except:
+                pass
 
-    # 3. عند الثانية 58: (لحظة القرار أو لحظة النتيجة)
-    if s == 58:
-        current_58 = get_current_price(pair)
+    # --- 2. قسم التحليل والدخول (مع نافذة سماح 5 ثوانٍ) ---
+    else:
+        # التحليل فقط في الدقائق المستهدفة وبدءاً من الثانية 57 حتى الثانية 02 من الدقيقة التالية
+        is_in_time_window = (minute in target_minutes and second >= 57) or (minute == (current_period + 15) % 60 and second <= 2)
         
-        # الحالة الأولى: إذا كنا ننتظر نتيجة (هنا الأولوية القصوى)
-        if data_store["is_waiting_result"]:
-            res_dir = "call" if current_58 > data_store["entry_price"] else "put"
-            
-            # بمجرد إرسال النتيجة، نقوم بتصفير كل شيء
-            data_store["is_waiting_result"] = False
-            data_store["entry_price"] = None
-            data_store["tick_0"] = None  # لضمان عدم وجود بيانات قديمة
-            data_store["tick_30"] = None
-            
-            return jsonify({"status": "check_result", "direction": res_dir})
-
-        # الحالة الثانية: لا توجد صفقة، نقوم بالتحليل
-        else:
-            t0 = data_store["tick_0"]
-            t30 = data_store["tick_30"]
-            
-            # لن يحلل إلا إذا توفرت أسعار الدقيقة الحالية (0 و 30)
-            if t0 is not None and t30 is not None and current_58 is not None:
-                is_small_up = t30 > t0
-                is_small_down = t30 < t0
-                is_large_up = current_58 > t0
-                is_large_down = current_58 < t0
-
-                action = None
-                if is_small_up and is_large_down: action = "put"
-                elif is_small_down and is_large_up: action = "call"
-
-                if action:
+        if is_in_time_window:
+            # التأكد أننا لم ندخل صفقة لهذا الربع ساعة بالفعل
+            if data_store["last_trade_period"] != current_period:
+                direction, entry_p = get_ticks_analysis(pair, 450)
+                
+                if direction:
                     data_store["is_waiting_result"] = True
-                    data_store["entry_price"] = current_58
-                    return jsonify({"status": "trade", "action": action})
+                    data_store["entry_price"] = entry_p
+                    data_store["last_trade_period"] = current_period
+                    print(f"[{pair}] Trade Sent at second {second}. Window handled delay.")
+                    return jsonify({"status": "trade", "action": direction})
 
     return jsonify({"status": "scanning"})
 
