@@ -6,7 +6,7 @@ from telebot import types
 # --- الإعدادات ---
 app = Flask(__name__)
 # توكن التلغرام الخاص بك
-bot = telebot.TeleBot("7964867752:AAGbokJYY-qrHWp8tXP_vfxEHxf1fh-0u6o")
+bot = telebot.TeleBot("8537803087:AAGstLM6g2IA6JbrGi7YRXMzJnjjXXdaZ5E")
 
 manager = multiprocessing.Manager()
 shared_config = manager.dict({
