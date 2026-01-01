@@ -4,7 +4,8 @@ import telebot
 from telebot import types
 
 app = Flask(__name__)
-bot = telebot.TeleBot("8537803087:AAGstLM6g2IA6JbrGi7YRXMzJnjjXXdaZ5E")
+# Your Telegram Bot Token
+bot = telebot.TeleBot("8444912981:AAEaU8YoqZD2ryb6x8dQBh0-aii0-fr4thY")
 
 manager = multiprocessing.Manager()
 shared_config = manager.dict({
@@ -59,25 +60,25 @@ def start(message):
     shared_config["chat_id"] = message.chat.id
     markup = types.ReplyKeyboardMarkup(one_time_keyboard=True, resize_keyboard=True)
     markup.add('Demo 🛠️', 'Live 💰')
-    bot.send_message(message.chat.id, "🤖 استراتيجية الـ 30 تكة (توقيت 70 ثانية)\nاختر الحساب:", reply_markup=markup)
+    bot.send_message(message.chat.id, "🤖 **30-Tick Strategy Bot**\n\nSelect Account Type:", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text in ['Demo 🛠️', 'Live 💰'])
 def step_account(message):
     shared_config["currency"] = "USD" if "Demo" in message.text else "tUSDT"
-    msg = bot.send_message(message.chat.id, f"✅ تم اختيار {shared_config['currency']}\nأرسل API Token الحساب:", reply_markup=types.ReplyKeyboardRemove())
+    msg = bot.send_message(message.chat.id, f"✅ Selected: {shared_config['currency']}\nEnter **API Token**:", reply_markup=types.ReplyKeyboardRemove())
     bot.register_next_step_handler(msg, step_api)
 
 def step_api(message):
     shared_config["api_token"] = message.text.strip()
-    msg = bot.send_message(message.chat.id, "أدخل مبلغ الصفقة (Stake):")
+    msg = bot.send_message(message.chat.id, "Enter **Initial Stake**:")
     bot.register_next_step_handler(msg, step_stake)
 
 def step_stake(message):
     try:
         shared_config["stake"] = shared_config["next_stake"] = float(message.text)
-        msg = bot.send_message(message.chat.id, "أدخل هدف الربح (TP):")
+        msg = bot.send_message(message.chat.id, "Enter **Take Profit (TP)**:")
         bot.register_next_step_handler(msg, step_tp)
-    except: bot.send_message(message.chat.id, "خطأ! أرسل /start")
+    except: bot.send_message(message.chat.id, "Error! Send /start")
 
 def step_tp(message):
     try:
@@ -85,13 +86,13 @@ def step_tp(message):
         shared_config["is_running"] = True
         stop_markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
         stop_markup.add('Stop 🛑')
-        bot.send_message(message.chat.id, "⚡ تم البدء! فحص عند :58 والتحقق بعد 70 ثانية.", reply_markup=stop_markup)
-    except: bot.send_message(message.chat.id, "خطأ! أرسل /start")
+        bot.send_message(message.chat.id, "⚡ **Bot Running!** Analyzing at :58 sec.", reply_markup=stop_markup)
+    except: bot.send_message(message.chat.id, "Error! Send /start")
 
 @bot.message_handler(func=lambda m: m.text == 'Stop 🛑')
 def manual_stop(message):
     reset_all_data()
-    bot.send_message(message.chat.id, "🛑 توقف البوت تماماً.")
+    bot.send_message(message.chat.id, "🛑 Bot Stopped & Data Wiped.", reply_markup=types.ReplyKeyboardRemove())
 
 def trading_engine(config):
     last_min = -1
@@ -101,7 +102,7 @@ def trading_engine(config):
             if now.second == 58 and now.minute != last_min:
                 last_min = now.minute 
                 
-                # اتصال 1: جلب البيانات
+                # Connection 1: Fetch Ticks
                 data = quick_request({"ticks_history": "R_100", "count": 30, "end": "latest", "style": "ticks"})
                 
                 if data and "history" in data:
@@ -113,15 +114,14 @@ def trading_engine(config):
                     elif t15 < t1 and t30 < t15: action = "put"
                     
                     if action:
-                        # اتصال 2: تنفيذ الصفقة
+                        # Connection 2: Place Trade
                         cid, err = place_trade_on_demand(action, config["next_stake"], config["api_token"], config["currency"])
                         if cid:
-                            bot.send_message(config["chat_id"], f"📥 دخلت {action.upper()}.. بانتظار 70 ثانية للنتيجة.")
+                            bot.send_message(config["chat_id"], f"📥 **Entered {action.upper()}**\nWaiting 70s for result...")
                             
-                            # انتظار 70 ثانية بعيداً عن السيرفر
-                            time.sleep(70)
+                            time.sleep(70) # Wait 70 seconds
                             
-                            # اتصال 3: فحص النتيجة
+                            # Connection 3: Check Result
                             try:
                                 ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929")
                                 ws.send(json.dumps({"authorize": config["api_token"]}))
@@ -132,19 +132,29 @@ def trading_engine(config):
                                 
                                 profit = float(res.get("proposal_open_contract", {}).get("profit", 0))
                                 config["total_profit"] += profit
+                                
                                 if profit > 0:
+                                    config["win_count"] += 1
                                     config["current_losses"] = 0
                                     config["next_stake"] = config["stake"]
-                                    res_txt = "✅ ربح"
+                                    res_txt = "✅ WIN"
                                 else:
+                                    config["loss_count"] += 1
                                     config["current_losses"] += 1
                                     config["next_stake"] = round(config["next_stake"] * 2.2, 2)
-                                    res_txt = "❌ خسارة"
+                                    res_txt = "❌ LOSS"
                                 
-                                bot.send_message(config["chat_id"], f"{res_txt}: {profit}\nالإجمالي: {round(config['total_profit'], 2)}")
+                                stats_msg = (
+                                    f"Result: {res_txt} ({profit})\n"
+                                    f"Total Profit: {round(config['total_profit'], 2)}\n"
+                                    f"Wins: {config['win_count']} | Losses: {config['loss_count']}\n"
+                                    f"Consecutive Losses: {config['current_losses']}/5"
+                                )
+                                bot.send_message(config["chat_id"], stats_msg)
                                 
                                 if config["current_losses"] >= 5 or config["total_profit"] >= config["tp"]:
-                                    bot.send_message(config["chat_id"], "🏁 تم بلوغ الهدف أو الحد الأقصى للخسارة.")
+                                    reason = "Max Losses" if config["current_losses"] >= 5 else "Take Profit reached"
+                                    bot.send_message(config["chat_id"], f"🏁 **Session Finished!**\nReason: {reason}\nData cleared.")
                                     reset_all_data()
                             except: pass
         time.sleep(0.5)
