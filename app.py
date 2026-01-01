@@ -4,8 +4,8 @@ import telebot
 from telebot import types
 
 app = Flask(__name__)
-# Your Telegram Bot Token
-bot = telebot.TeleBot("8444912981:AAEaU8YoqZD2ryb6x8dQBh0-aii0-fr4thY")
+# IMPORTANT: Use your VALID Telegram token from BotFather
+bot = telebot.TeleBot("8505324540:AAFjk41yRlEwS3iWYc3eOXngLMQuk-RsXIU")
 
 manager = multiprocessing.Manager()
 shared_config = manager.dict({
@@ -14,6 +14,11 @@ shared_config = manager.dict({
     "total_profit": 0.0, "is_running": False, "is_trading": False,
     "next_stake": 0.0, "chat_id": None
 })
+
+# --- Route for UptimeRobot to keep the bot alive ---
+@app.route('/')
+def index():
+    return "<h1>Bot Status: Active</h1><p>Monitoring Ticks with 0.2 Filter.</p>"
 
 def reset_all_data():
     shared_config.update({
@@ -52,7 +57,7 @@ def place_trade_on_demand(action, amount, token, currency):
         ws.close()
         if "buy" in res: return res["buy"]["contract_id"], None
         return None, res.get("error", {}).get("message")
-    except Exception as e: return None, str(e)
+    except: return None, "Connection Error"
 
 @bot.message_handler(commands=['start'])
 def start(message):
@@ -60,25 +65,25 @@ def start(message):
     shared_config["chat_id"] = message.chat.id
     markup = types.ReplyKeyboardMarkup(one_time_keyboard=True, resize_keyboard=True)
     markup.add('Demo 🛠️', 'Live 💰')
-    bot.send_message(message.chat.id, "🤖 **30-Tick Strategy Bot**\n\nSelect Account Type:", reply_markup=markup)
+    bot.send_message(message.chat.id, "🤖 **Momentum Bot (English)**\nUptime Monitoring Enabled.", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text in ['Demo 🛠️', 'Live 💰'])
 def step_account(message):
     shared_config["currency"] = "USD" if "Demo" in message.text else "tUSDT"
-    msg = bot.send_message(message.chat.id, f"✅ Selected: {shared_config['currency']}\nEnter **API Token**:", reply_markup=types.ReplyKeyboardRemove())
+    msg = bot.send_message(message.chat.id, f"✅ Account: {shared_config['currency']}\nEnter **API Token**:", reply_markup=types.ReplyKeyboardRemove())
     bot.register_next_step_handler(msg, step_api)
 
 def step_api(message):
     shared_config["api_token"] = message.text.strip()
-    msg = bot.send_message(message.chat.id, "Enter **Initial Stake**:")
+    msg = bot.send_message(message.chat.id, "Stake Amount:")
     bot.register_next_step_handler(msg, step_stake)
 
 def step_stake(message):
     try:
         shared_config["stake"] = shared_config["next_stake"] = float(message.text)
-        msg = bot.send_message(message.chat.id, "Enter **Take Profit (TP)**:")
+        msg = bot.send_message(message.chat.id, "Take Profit Goal:")
         bot.register_next_step_handler(msg, step_tp)
-    except: bot.send_message(message.chat.id, "Error! Send /start")
+    except: bot.send_message(message.chat.id, "Error! Start again.")
 
 def step_tp(message):
     try:
@@ -86,42 +91,43 @@ def step_tp(message):
         shared_config["is_running"] = True
         stop_markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
         stop_markup.add('Stop 🛑')
-        bot.send_message(message.chat.id, "⚡ **Bot Running!** Analyzing at :58 sec.", reply_markup=stop_markup)
-    except: bot.send_message(message.chat.id, "Error! Send /start")
+        bot.send_message(message.chat.id, "⚡ **Bot Active!** Waiting for 0.2 momentum.", reply_markup=stop_markup)
+    except: bot.send_message(message.chat.id, "Error! Start again.")
 
 @bot.message_handler(func=lambda m: m.text == 'Stop 🛑')
 def manual_stop(message):
     reset_all_data()
-    bot.send_message(message.chat.id, "🛑 Bot Stopped & Data Wiped.", reply_markup=types.ReplyKeyboardRemove())
+    bot.send_message(message.chat.id, "🛑 Stopped & Data Cleared.")
 
 def trading_engine(config):
-    last_min = -1
+    last_processed_min = -1
+    MIN_MOVE = 0.2
+
     while True:
         if config["is_running"]:
             now = datetime.datetime.now()
-            if now.second == 58 and now.minute != last_min:
-                last_min = now.minute 
+            if now.second == 58 and now.minute != last_processed_min:
+                last_processed_min = now.minute
                 
-                # Connection 1: Fetch Ticks
                 data = quick_request({"ticks_history": "R_100", "count": 30, "end": "latest", "style": "ticks"})
                 
                 if data and "history" in data:
                     ticks = data["history"]["prices"]
                     t1, t15, t30 = ticks[0], ticks[14], ticks[29]
                     
+                    diff1 = t15 - t1
+                    diff2 = t30 - t15
+                    
                     action = None
-                    if t15 > t1 and t30 > t15: action = "call"
-                    elif t15 < t1 and t30 < t15: action = "put"
+                    if diff1 > MIN_MOVE and diff2 > MIN_MOVE: action = "call"
+                    elif diff1 < -MIN_MOVE and diff2 < -MIN_MOVE: action = "put"
                     
                     if action:
-                        # Connection 2: Place Trade
                         cid, err = place_trade_on_demand(action, config["next_stake"], config["api_token"], config["currency"])
                         if cid:
-                            bot.send_message(config["chat_id"], f"📥 **Entered {action.upper()}**\nWaiting 70s for result...")
+                            bot.send_message(config["chat_id"], f"📥 **Trade Placed: {action.upper()}**\nAnalyzing next in 70s...")
+                            time.sleep(70)
                             
-                            time.sleep(70) # Wait 70 seconds
-                            
-                            # Connection 3: Check Result
                             try:
                                 ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929")
                                 ws.send(json.dumps({"authorize": config["api_token"]}))
@@ -144,20 +150,17 @@ def trading_engine(config):
                                     config["next_stake"] = round(config["next_stake"] * 2.2, 2)
                                     res_txt = "❌ LOSS"
                                 
-                                stats_msg = (
-                                    f"Result: {res_txt} ({profit})\n"
-                                    f"Total Profit: {round(config['total_profit'], 2)}\n"
-                                    f"Wins: {config['win_count']} | Losses: {config['loss_count']}\n"
-                                    f"Consecutive Losses: {config['current_losses']}/5"
-                                )
-                                bot.send_message(config["chat_id"], stats_msg)
+                                stats = (f"Result: {res_txt} ({profit})\n"
+                                         f"Total: {round(config['total_profit'], 2)}\n"
+                                         f"Wins: {config['win_count']} | Losses: {config['loss_count']}\n"
+                                         f"Streak: {config['current_losses']}/5")
+                                bot.send_message(config["chat_id"], stats)
                                 
                                 if config["current_losses"] >= 5 or config["total_profit"] >= config["tp"]:
-                                    reason = "Max Losses" if config["current_losses"] >= 5 else "Take Profit reached"
-                                    bot.send_message(config["chat_id"], f"🏁 **Session Finished!**\nReason: {reason}\nData cleared.")
+                                    bot.send_message(config["chat_id"], "🏁 Session End: Goal/Limit reached.")
                                     reset_all_data()
                             except: pass
-        time.sleep(0.5)
+        time.sleep(0.1)
 
 if __name__ == '__main__':
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000)).start()
