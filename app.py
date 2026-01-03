@@ -82,7 +82,7 @@ def place_trade(action):
             "buy": 1, "price": float(state["current_stake"]),
             "parameters": {
                 "amount": float(state["current_stake"]), "basis": "stake",
-                "contract_type": "CALL" if action == "call" else "PUT",
+                "contract_type": "CALL" if action == "put" else "PUT",
                 "currency": state["currency"], "duration": 6, "duration_unit": "t",
                 "symbol": "R_100", "barrier": barrier
             }
