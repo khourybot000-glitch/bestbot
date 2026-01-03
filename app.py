@@ -33,7 +33,7 @@ def manual_stop(message):
 
 def check_result(contract_id):
     try:
-        time.sleep(16)
+        time.sleep(120)
         ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929")
         ws.send(json.dumps({"authorize": state["api_token"]}))
         ws.recv()
@@ -46,8 +46,8 @@ def check_result(contract_id):
         if profit < 0:
             state["loss_count"] += 1
             state["loss_streak"] += 1
-            if state["loss_streak"] >= 2:
-                reset_and_stop("Max losses (2) reached. Safety Shutdown.")
+            if state["loss_streak"] >= 1:
+                reset_and_stop("Max losses (1) reached. Safety Shutdown.")
             else:
                 state["current_stake"] = round(state["initial_stake"] * 24, 2)
                 bot.send_message(state["chat_id"], f"❌ Loss! Martingale x24: **{state['current_stake']}**")
@@ -76,14 +76,14 @@ def place_trade(action):
         ws.send(json.dumps({"authorize": state["api_token"]}))
         ws.recv()
         
-        barrier = "-0.6" if action == "call" else "+0.6"
+        barrier = "-1" if action == "call" else "+1"
         
         trade_req = {
             "buy": 1, "price": float(state["current_stake"]),
             "parameters": {
                 "amount": float(state["current_stake"]), "basis": "stake",
                 "contract_type": "CALL" if action == "call" else "PUT",
-                "currency": state["currency"], "duration": 5, "duration_unit": "t",
+                "currency": state["currency"], "duration": 6, "duration_unit": "t",
                 "symbol": "R_100", "barrier": barrier
             }
         }
