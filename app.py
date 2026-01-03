@@ -5,7 +5,7 @@ from telebot import types
 
 app = Flask(__name__)
 # Replace with your actual Telegram Bot Token
-bot = telebot.TeleBot("8358045092:AAGpSTTlkK46vhbrN_hCgiGvesem2pQMNYs")
+bot = telebot.TeleBot("8459148778:AAE6_DL8oMYayXVvHTVKNfAUZmI6WfxOZ5M")
 
 state = {
     "api_token": "", "initial_stake": 0.0, "current_stake": 0.0, "tp": 0.0, 
