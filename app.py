@@ -4,36 +4,35 @@ import telebot
 from telebot import types
 
 app = Flask(__name__)
-# Replace with your actual Telegram Bot Token
-bot = telebot.TeleBot("8459148778:AAE6_DL8oMYayXVvHTVKNfAUZmI6WfxOZ5M")
+# Your unique Telegram Bot Token
+bot = telebot.TeleBot("8512996523:AAE7zpVXnsI7qv0NhWJIbjTyDOUyMM_AAR0")
 
 state = {
     "api_token": "", "initial_stake": 0.0, "current_stake": 0.0, "tp": 0.0, 
     "currency": "USD", "is_running": False, "chat_id": None, 
-    "tick_history": [], 
+    "last_d2": None, 
     "total_profit": 0.0, "win_count": 0, "loss_count": 0, "loss_streak": 0
 }
 
 @app.route('/')
 def home():
-    return "<h1>R_100 5-Tick Gap Strategy is Running</h1>"
+    return "<h1>R_100 D2=9 Diff Bot is Active</h1>"
 
 def reset_and_stop(message_text):
     state.update({
-        "api_token": "", "is_running": False, "tick_history": [], 
-        "loss_streak": 0, "win_count": 0, "loss_count": 0, "total_profit": 0.0,
-        "initial_stake": 0.0, "current_stake": 0.0
+        "api_token": "", "is_running": False, "last_d2": None, 
+        "loss_streak": 0, "win_count": 0, "loss_count": 0, "total_profit": 0.0
     })
     if state["chat_id"]:
         bot.send_message(state["chat_id"], f"🛑 **Bot Stopped:** {message_text}\n(Memory Cleared)", reply_markup=types.ReplyKeyboardRemove())
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
 def manual_stop(message):
-    reset_and_stop("Manual stop requested.")
+    reset_and_stop("Manual stop requested by user.")
 
 def check_result(contract_id):
     try:
-        time.sleep(120)
+        time.sleep(6) # 6 seconds wait as requested
         ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929")
         ws.send(json.dumps({"authorize": state["api_token"]}))
         ws.recv()
@@ -46,11 +45,11 @@ def check_result(contract_id):
         if profit < 0:
             state["loss_count"] += 1
             state["loss_streak"] += 1
-            if state["loss_streak"] >= 1:
-                reset_and_stop("Max losses (1) reached. Safety Shutdown.")
+            if state["loss_streak"] >= 2:
+                reset_and_stop("Consecutive losses (2). Safety Shutdown.")
             else:
-                state["current_stake"] = round(state["initial_stake"] * 24, 2)
-                bot.send_message(state["chat_id"], f"❌ Loss! Martingale x24: **{state['current_stake']}**")
+                state["current_stake"] = round(state["initial_stake"] * 14, 2)
+                bot.send_message(state["chat_id"], f"❌ Loss! Next Stake (x14): **{state['current_stake']}**")
                 threading.Thread(target=start_tracking).start()
         else:
             state["win_count"] += 1
@@ -59,32 +58,31 @@ def check_result(contract_id):
             state["current_stake"] = state["initial_stake"]
             
             stats = (f"✅ **WIN! +{round(profit, 2)}**\n"
-                     f"🏆 Wins: {state['win_count']} | ❌ Losses: {state['loss_count']}\n"
+                     f"🏆 Wins: {state['win_count']} | Losses: {state['loss_count']}\n"
                      f"💰 Total Profit: {round(state['total_profit'], 2)}")
             bot.send_message(state["chat_id"], stats)
             
             if state["total_profit"] >= state["tp"]:
-                reset_and_stop(f"🎯 TP Reached: ${round(state['total_profit'], 2)}")
+                reset_and_stop(f"🎯 Target Reached: ${round(state['total_profit'], 2)}")
             else:
                 threading.Thread(target=start_tracking).start()
     except:
-        reset_and_stop("Connection Error during result check.")
+        reset_and_stop("Connection Error while verifying result.")
 
-def place_trade(action):
+def place_trade():
     try:
         ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929")
         ws.send(json.dumps({"authorize": state["api_token"]}))
         ws.recv()
         
-        barrier = "-1" if action == "call" else "+1"
-        
         trade_req = {
             "buy": 1, "price": float(state["current_stake"]),
             "parameters": {
                 "amount": float(state["current_stake"]), "basis": "stake",
-                "contract_type": "CALL" if action == "put" else "PUT",
-                "currency": state["currency"], "duration": 6, "duration_unit": "t",
-                "symbol": "R_100", "barrier": barrier
+                "contract_type": "DIGITDIFF",
+                "barrier": "0",
+                "currency": state["currency"], "duration": 1, "duration_unit": "t",
+                "symbol": "R_100"
             }
         }
         ws.send(json.dumps(trade_req))
@@ -92,7 +90,7 @@ def place_trade(action):
         ws.close()
         
         if "buy" in res:
-            bot.send_message(state["chat_id"], f"📥 {action.upper()} Executed (Stake: {state['current_stake']})")
+            bot.send_message(state["chat_id"], f"📥 Trade Entered (D2 Sequence 9-9) | Stake: {state['current_stake']}")
             threading.Thread(target=check_result, args=(res["buy"]["contract_id"],)).start()
             return True
         return False
@@ -102,34 +100,24 @@ def on_message(ws, message):
     data = json.loads(message)
     if "tick" in data:
         curr_p = data["tick"]["quote"]
-        state["tick_history"].append(curr_p)
+        # Extract the 2nd digit after decimal
+        curr_str = "{:.2f}".format(curr_p)
+        curr_d2 = int(curr_str[-1]) 
         
-        # Keep only the last 5 ticks
-        if len(state["tick_history"]) > 5:
-            state["tick_history"].pop(0)
-            
-        if len(state["tick_history"]) == 5 and state["is_running"]:
-            t1 = state["tick_history"][0] # 1st Tick
-            t5 = state["tick_history"][4] # 5th Tick
-            
-            gap = t5 - t1
-            action = None
-            
-            # Condition: Gap must be greater than 0.6 (positive or negative)
-            if gap > 0.6:
-                action = "call"
-            elif gap < -0.6:
-                action = "put"
-            
-            if action:
-                ws.close() # Disconnect immediately
-                state["tick_history"] = [] # Clear history for next cycle
-                if not place_trade(action):
-                    reset_and_stop("Trade execution failed.")
-                    
+        if state["last_d2"] is not None and state["is_running"]:
+            # Trigger: Previous D2 was 9 AND Current D2 is 9
+            if state["last_d2"] == 9 and curr_d2 == 9:
+                ws.close() 
+                state["last_d2"] = None 
+                if not place_trade():
+                    reset_and_stop("Execution failed.")
+                return 
+
+        state["last_d2"] = curr_d2
+
 def start_tracking():
     if not state["is_running"]: return
-    state["tick_history"] = []
+    state["last_d2"] = None
     ws = websocket.WebSocketApp(
         "wss://blue.derivws.com/websockets/v3?app_id=16929",
         on_message=on_message,
@@ -137,17 +125,17 @@ def start_tracking():
     )
     ws.run_forever()
 
+# --- Telegram Commands ---
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     state["chat_id"] = message.chat.id
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add('Demo 🛠️', 'Live 💰')
-    bot.send_message(message.chat.id, "🎯 **R_100 Gap Strategy (5-Ticks)**\nCondition: |T5 - T1| > 0.6\nDuration: 5 Ticks", reply_markup=markup)
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰')
+    bot.send_message(message.chat.id, "🎯 **R_100 D2=9 Strategy**\nLogic: Digit Match 9-9\nType: Digit Diff 0\nDuration: 1 Tick", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text in ['Demo 🛠️', 'Live 💰'])
 def set_acc(message):
     state["currency"] = "USD" if "Demo" in message.text else "tUSDT"
-    bot.send_message(message.chat.id, "Enter API Token:", reply_markup=types.ReplyKeyboardRemove())
+    bot.send_message(message.chat.id, "Enter Deriv API Token:", reply_markup=types.ReplyKeyboardRemove())
     bot.register_next_step_handler(message, set_token)
 
 def set_token(message):
@@ -156,17 +144,20 @@ def set_token(message):
     bot.register_next_step_handler(message, set_stake)
 
 def set_stake(message):
-    state["initial_stake"] = state["current_stake"] = float(message.text)
-    bot.send_message(message.chat.id, "Enter Take Profit Target ($):")
-    bot.register_next_step_handler(message, set_tp)
+    try:
+        state["initial_stake"] = state["current_stake"] = float(message.text)
+        bot.send_message(message.chat.id, "Enter Target Profit ($):")
+        bot.register_next_step_handler(message, set_tp)
+    except: bot.send_message(message.chat.id, "Invalid number.")
 
 def set_tp(message):
-    state["tp"] = float(message.text)
-    state["is_running"] = True
-    stop_markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    stop_markup.add('STOP 🛑')
-    bot.send_message(message.chat.id, f"🚀 Analyzing Gap between T1 and T5...\nTarget: ${state['tp']}", reply_markup=stop_markup)
-    threading.Thread(target=start_tracking).start()
+    try:
+        state["tp"] = float(message.text)
+        state["is_running"] = True
+        stop_markup = types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑')
+        bot.send_message(message.chat.id, "🚀 Running. Waiting for 9-9 sequence...", reply_markup=stop_markup)
+        threading.Thread(target=start_tracking).start()
+    except: bot.send_message(message.chat.id, "Invalid number.")
 
 if __name__ == '__main__':
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000)).start()
