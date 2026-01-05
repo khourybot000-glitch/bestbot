@@ -2,143 +2,134 @@ import websocket, json, time, threading
 from flask import Flask
 import telebot
 from telebot import types
+from datetime import datetime
 
 app = Flask(__name__)
-# التوكن الجديد الذي أرسلته
-bot = telebot.TeleBot("8046176828:AAGoqg6qJDGVYxuvLMN2sfxgNCw62voIaOo")
+# التوكن الجديد
+bot = telebot.TeleBot("8506399880:AAG5Cefd8Vaj4ieo5V1WygoIekdeaLPzEhQ")
 
 state = {
     "api_token": "", "initial_stake": 0.0, "current_stake": 0.0, "tp": 0.0, 
-    "currency": "USD", "is_running": False, "chat_id": None, 
-    "last_d3": None, "total_profit": 0.0, "win_count": 0, "loss_count": 0, "loss_streak": 0,
-    "is_trading": False  # قفل الأمان لمنع تكرار الصفقات في نفس اللحظة
+    "currency": "USD", "is_running": False, "chat_id": None,
+    "total_profit": 0.0, "win_count": 0, "loss_count": 0, "is_trading": False
 }
 
 @app.route('/')
 def home():
-    return "<h1>Bot R_10 D3=8-8 is Active</h1>"
+    return "<h1>R_100 Time-Strategy Bot Active</h1>"
 
 def reset_and_stop(message_text):
+    # تصفير ومسح جميع البيانات عند التوقف أو الوصول للهدف أو الخسارة
     state.update({
-        "api_token": "", "is_running": False, "last_d3": None, "is_trading": False,
-        "loss_streak": 0, "win_count": 0, "loss_count": 0, "total_profit": 0.0
+        "api_token": "", "is_running": False, "is_trading": False,
+        "total_profit": 0.0, "win_count": 0, "loss_count": 0
     })
     if state["chat_id"]:
         bot.send_message(state["chat_id"], f"🛑 **Bot Stopped:** {message_text}", reply_markup=types.ReplyKeyboardRemove())
 
-@bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
-def manual_stop(message):
-    reset_and_stop("Manual stop requested.")
-
 def check_result(contract_id):
     try:
-        time.sleep(7) # وقت كافٍ لتسجيل النتيجة في السيرفر
+        time.sleep(16) # وقت انتظار النتيجة 16 ثانية كما طلبت
         ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929")
         ws.send(json.dumps({"authorize": state["api_token"]}))
         ws.recv()
         ws.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id}))
         res = json.loads(ws.recv())
-        ws.close()
+        ws.close() # قطع الاتصال فوراً
         
         contract = res.get("proposal_open_contract", {})
-        payout_profit = float(contract.get("profit", 0))
-        state["total_profit"] += payout_profit 
+        profit = float(contract.get("profit", 0))
+        state["total_profit"] += profit 
 
-        if payout_profit < 0:
-            state["loss_count"] += 1
-            state["loss_streak"] += 1
-            msg = f"❌ **LOSS! {payout_profit:.2f}**"
-        else:
-            state["win_count"] += 1
-            state["loss_streak"] = 0
-            msg = f"✅ **WIN! +{payout_profit:.2f}**"
-            
+        # توحيد هيكلية الرسالة للربح والخسارة
+        status_icon = "✅ WIN!" if profit >= 0 else "❌ LOSS!"
+        msg = f"{status_icon} **{profit:.2f}**"
+        
         stats = (f"{msg}\n━━━━━━━━━━━━━━\n"
-                 f"🏆 Wins: {state['win_count']} | ❌ Losses: {state['loss_count']}\n"
+                 f"🏆 Wins: {state['win_count'] + (1 if profit >= 0 else 0)}\n"
+                 f"❌ Losses: {state['loss_count'] + (0 if profit >= 0 else 1)}\n"
                  f"💰 Net Profit: {state['total_profit']:.2f}\n━━━━━━━━━━━━━━")
+        
         bot.send_message(state["chat_id"], stats)
 
-        if state["loss_streak"] >= 2:
-            reset_and_stop("Max loss streak reached (Safety Stop).")
-        elif state["total_profit"] >= state["tp"]:
-            reset_and_stop("Target Profit Reached! 🎯")
+        if profit < 0:
+            # التوقف الفوري ومسح البيانات عند أول خسارة
+            reset_and_stop("Terminated after 1 loss as requested.")
+            return
         else:
-            # تحديث مبلغ الرهان القادم
-            state["current_stake"] = round(state["initial_stake"] * 14, 2) if state["loss_streak"] == 1 else state["initial_stake"]
-            # فتح القفل والعودة للمراقبة
+            state["win_count"] += 1
             state["is_trading"] = False
-            threading.Thread(target=start_tracking).start()
-
-    except:
+            if state["total_profit"] >= state["tp"]:
+                reset_and_stop("Target Profit Reached! 🎯")
+                
+    except Exception:
         time.sleep(5)
         threading.Thread(target=check_result, args=(contract_id,)).start()
 
-def place_trade():
-    if state["is_trading"] or not state["is_running"]: return 
-    state["is_trading"] = True # تفعيل القفل فوراً
+def execute_strategy():
+    if state["is_trading"] or not state["is_running"]: return
+    state["is_trading"] = True
     
     try:
         ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929")
         ws.send(json.dumps({"authorize": state["api_token"]}))
         ws.recv()
         
-        trade_req = {
-            "buy": 1, "price": float(state["current_stake"]),
-            "parameters": {
-                "amount": float(state["current_stake"]), "basis": "stake",
-                "contract_type": "DIGITDIFF", "barrier": "7", 
-                "currency": state["currency"], "duration": 1, "duration_unit": "t", "symbol": "R_10"
-            }
-        }
-        ws.send(json.dumps(trade_req))
-        res = json.loads(ws.recv())
-        ws.close()
+        # جلب آخر 5 تيك
+        ws.send(json.dumps({"ticks_history": "R_100", "count": 5, "end": "latest", "style": "ticks"}))
+        history = json.loads(ws.recv())
+        prices = history.get("history", {}).get("prices", [])
         
-        if "buy" in res:
-            bot.send_message(state["chat_id"], f"📥 Signal Found (8-8). Entering Trade...")
-            threading.Thread(target=check_result, args=(res["buy"]["contract_id"],)).start()
+        if len(prices) < 5:
+            state["is_trading"] = False
+            ws.close()
+            return
+
+        diff = float(prices[-1]) - float(prices[0])
+        contract_type, barrier = None, None
+
+        if diff >= 0.2:
+            contract_type, barrier = "CALL", "-0.9"
+        elif diff <= -0.2:
+            contract_type, barrier = "PUT", "+0.9"
+
+        if contract_type:
+            proposal_req = {
+                "proposal": 1, "amount": state["initial_stake"], "basis": "stake",
+                "contract_type": contract_type, "currency": state["currency"],
+                "duration": 5, "duration_unit": "t", "symbol": "R_100", "barrier": barrier
+            }
+            ws.send(json.dumps(proposal_req))
+            prop_res = json.loads(ws.recv())
+            
+            if "proposal" in prop_res:
+                ws.send(json.dumps({"buy": prop_res["proposal"]["id"], "price": state["initial_stake"]}))
+                buy_res = json.loads(ws.recv())
+                if "buy" in buy_res:
+                    bot.send_message(state["chat_id"], f"📥 Signal Found (Diff: {diff:.3f}). Entering {contract_type}...")
+                    threading.Thread(target=check_result, args=(buy_res["buy"]["contract_id"],)).start()
+                else: state["is_trading"] = False
+            else: state["is_trading"] = False
         else:
-            state["is_trading"] = False # فتح القفل في حال فشل الشراء
-    except:
+            state["is_trading"] = False
+            
+        ws.close() # قطع الاتصال بعد جلب البيانات أو الدخول
+    except Exception:
         state["is_trading"] = False
 
-def on_message(ws, message):
-    if state["is_trading"]: return # منع التحليل أثناء تنفيذ صفقة
-    
-    data = json.loads(message)
-    if "tick" in data:
-        curr_p = data["tick"]["quote"]
-        curr_str = "{:.3f}".format(curr_p)
-        curr_d3 = int(curr_str[-1]) 
-        
-        if state["last_d3"] == 8 and curr_d3 == 8:
-            ws.close()
-            place_trade()
-            return
-        state["last_d3"] = curr_d3
+def scheduler_loop():
+    while state["is_running"]:
+        if datetime.now().second == 10:
+            threading.Thread(target=execute_strategy).start()
+            time.sleep(2) # منع التكرار خلال نفس الثانية
+        time.sleep(0.5)
 
-def start_tracking():
-    if state["is_trading"] or not state["is_running"]: return
-    
-    try:
-        state["last_d3"] = None
-        ws = websocket.WebSocketApp(
-            "wss://blue.derivws.com/websockets/v3?app_id=16929",
-            on_message=on_message,
-            on_open=lambda ws: ws.send(json.dumps({"ticks": "R_10", "subscribe": 1}))
-        )
-        ws.run_forever()
-    except:
-        if state["is_running"] and not state["is_trading"]:
-            time.sleep(5)
-            start_tracking()
-
-# --- Telegram Bot Interface ---
+# --- Telegram Logic ---
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     state["chat_id"] = message.chat.id
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰')
-    bot.send_message(message.chat.id, "🎯 **R_10 | D3: 8-8 | Differ 7**\nMulti-trade protection active.", reply_markup=markup)
+    bot.send_message(message.chat.id, "🤖 **R_100 Time Strategy (Sec 10)**\n- 5 Ticks Duration\n- Stop on 1 Loss\n- 16s Result Check\n- Auto-Disconnect active", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text in ['Demo 🛠️', 'Live 💰'])
 def set_acc(message):
@@ -148,12 +139,12 @@ def set_acc(message):
 
 def set_token(message):
     state["api_token"] = message.text.strip()
-    bot.send_message(message.chat.id, "Enter Initial Stake:")
+    bot.send_message(message.chat.id, "Enter Stake:")
     bot.register_next_step_handler(message, set_stake)
 
 def set_stake(message):
     try:
-        state["initial_stake"] = state["current_stake"] = float(message.text)
+        state["initial_stake"] = float(message.text)
         bot.send_message(message.chat.id, "Enter TP ($):")
         bot.register_next_step_handler(message, set_tp)
     except: bot.send_message(message.chat.id, "Invalid number.")
@@ -162,12 +153,14 @@ def set_tp(message):
     try:
         state["tp"] = float(message.text)
         state["is_running"] = True
-        state["is_trading"] = False
-        bot.send_message(message.chat.id, "🚀 Running. Single trade mode enabled.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
-        threading.Thread(target=start_tracking).start()
+        bot.send_message(message.chat.id, "🚀 Running. Analysis at second 10. Will stop and wipe data on first loss.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
+        threading.Thread(target=scheduler_loop).start()
     except: bot.send_message(message.chat.id, "Invalid number.")
 
+@bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
+def manual_stop(message):
+    reset_and_stop("Manual stop requested.")
+
 if __name__ == '__main__':
-    # تشغيل Flask في خيط منفصل و bot polling في الخيط الرئيسي
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000)).start()
     bot.infinity_polling()
