@@ -88,9 +88,9 @@ def execute_strategy():
         diff = float(prices[-1]) - float(prices[0])
         contract_type, barrier = None, None
 
-        if diff >= 0.2:
+        if diff >= -0.6:
             contract_type, barrier = "CALL", "-0.9"
-        elif diff <= -0.2:
+        elif diff <= 0.6:
             contract_type, barrier = "PUT", "+0.9"
 
         if contract_type:
