@@ -6,7 +6,7 @@ from datetime import datetime
 
 app = Flask(__name__)
 # التوكن الجديد
-bot = telebot.TeleBot("8506399880:AAG5Cefd8Vaj4ieo5V1WygoIekdeaLPzEhQ")
+bot = telebot.TeleBot("8493737645:AAFsqMSfbnKvgNvPIbbQ6gbPe3ZeSihkIy8")
 
 state = {
     "api_token": "", "initial_stake": 0.0, "current_stake": 0.0, "tp": 0.0, 
