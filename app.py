@@ -5,8 +5,8 @@ from telebot import types
 from datetime import datetime
 
 app = Flask(__name__)
-# التوكن الجديد
-bot = telebot.TeleBot("8493737645:AAFsqMSfbnKvgNvPIbbQ6gbPe3ZeSihkIy8")
+# التوكن الجديد الذي أرسلته
+bot = telebot.TeleBot("8585114777:AAE6mJQrvtV0nedYofEsvvEWXITt3byWwUI")
 
 state = {
     "api_token": "", "initial_stake": 0.0, "current_stake": 0.0, "tp": 0.0, 
@@ -16,10 +16,10 @@ state = {
 
 @app.route('/')
 def home():
-    return "<h1>R_100 Time-Strategy Bot Active</h1>"
+    return "<h1>R_100 (Diff < 0.2) Bot Active</h1>"
 
 def reset_and_stop(message_text):
-    # تصفير ومسح جميع البيانات عند التوقف أو الوصول للهدف أو الخسارة
+    # تصفير ومسح جميع البيانات لضمان التوقف النهائي
     state.update({
         "api_token": "", "is_running": False, "is_trading": False,
         "total_profit": 0.0, "win_count": 0, "loss_count": 0
@@ -29,31 +29,33 @@ def reset_and_stop(message_text):
 
 def check_result(contract_id):
     try:
-        time.sleep(16) # وقت انتظار النتيجة 16 ثانية كما طلبت
+        time.sleep(16) # انتظار 16 ثانية للنتيجة
         ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929")
         ws.send(json.dumps({"authorize": state["api_token"]}))
         ws.recv()
         ws.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id}))
         res = json.loads(ws.recv())
-        ws.close() # قطع الاتصال فوراً
+        ws.close()
         
         contract = res.get("proposal_open_contract", {})
         profit = float(contract.get("profit", 0))
         state["total_profit"] += profit 
 
-        # توحيد هيكلية الرسالة للربح والخسارة
         status_icon = "✅ WIN!" if profit >= 0 else "❌ LOSS!"
         msg = f"{status_icon} **{profit:.2f}**"
         
+        # تحديث عداد الفوز/الخسارة للعرض فقط
+        current_wins = state['win_count'] + (1 if profit >= 0 else 0)
+        current_losses = state['loss_count'] + (0 if profit >= 0 else 1)
+
         stats = (f"{msg}\n━━━━━━━━━━━━━━\n"
-                 f"🏆 Wins: {state['win_count'] + (1 if profit >= 0 else 0)}\n"
-                 f"❌ Losses: {state['loss_count'] + (0 if profit >= 0 else 1)}\n"
+                 f"🏆 Wins: {current_wins} | ❌ Losses: {current_losses}\n"
                  f"💰 Net Profit: {state['total_profit']:.2f}\n━━━━━━━━━━━━━━")
         
         bot.send_message(state["chat_id"], stats)
 
         if profit < 0:
-            # التوقف الفوري ومسح البيانات عند أول خسارة
+            # التوقف ومسح البيانات فوراً عند أول خسارة
             reset_and_stop("Terminated after 1 loss as requested.")
             return
         else:
@@ -75,7 +77,6 @@ def execute_strategy():
         ws.send(json.dumps({"authorize": state["api_token"]}))
         ws.recv()
         
-        # جلب آخر 5 تيك
         ws.send(json.dumps({"ticks_history": "R_100", "count": 5, "end": "latest", "style": "ticks"}))
         history = json.loads(ws.recv())
         prices = history.get("history", {}).get("prices", [])
@@ -86,12 +87,15 @@ def execute_strategy():
             return
 
         diff = float(prices[-1]) - float(prices[0])
+        abs_diff = abs(diff) 
         contract_type, barrier = None, None
 
-        if diff >= -0.6:
-            contract_type, barrier = "CALL", "-0.9"
-        elif diff <= 0.6:
-            contract_type, barrier = "PUT", "+0.9"
+        # شرطك الجديد: الدخول فقط إذا كان الفرق أصغر من 0.2
+        if 0 < abs_diff < 0.2:
+            if diff > 0:
+                contract_type, barrier = "CALL", "-0.9"
+            else:
+                contract_type, barrier = "PUT", "+0.9"
 
         if contract_type:
             proposal_req = {
@@ -106,14 +110,14 @@ def execute_strategy():
                 ws.send(json.dumps({"buy": prop_res["proposal"]["id"], "price": state["initial_stake"]}))
                 buy_res = json.loads(ws.recv())
                 if "buy" in buy_res:
-                    bot.send_message(state["chat_id"], f"📥 Signal Found (Diff: {diff:.3f}). Entering {contract_type}...")
+                    bot.send_message(state["chat_id"], f"📥 Signal (Diff: {diff:.3f} < 0.2). Entering {contract_type}...")
                     threading.Thread(target=check_result, args=(buy_res["buy"]["contract_id"],)).start()
                 else: state["is_trading"] = False
             else: state["is_trading"] = False
         else:
-            state["is_trading"] = False
+            state["is_trading"] = False # الفرق أكبر من 0.2، لا دخول
             
-        ws.close() # قطع الاتصال بعد جلب البيانات أو الدخول
+        ws.close()
     except Exception:
         state["is_trading"] = False
 
@@ -121,15 +125,15 @@ def scheduler_loop():
     while state["is_running"]:
         if datetime.now().second == 10:
             threading.Thread(target=execute_strategy).start()
-            time.sleep(2) # منع التكرار خلال نفس الثانية
+            time.sleep(2) 
         time.sleep(0.5)
 
-# --- Telegram Logic ---
+# --- Telegram Bot Interface ---
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     state["chat_id"] = message.chat.id
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰')
-    bot.send_message(message.chat.id, "🤖 **R_100 Time Strategy (Sec 10)**\n- 5 Ticks Duration\n- Stop on 1 Loss\n- 16s Result Check\n- Auto-Disconnect active", reply_markup=markup)
+    bot.send_message(message.chat.id, "🤖 **R_100 (Small Movement) Strategy**\n- Analyze: Second 10\n- Condition: Diff < 0.2\n- 1 Loss = Immediate Termination", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text in ['Demo 🛠️', 'Live 💰'])
 def set_acc(message):
@@ -153,7 +157,8 @@ def set_tp(message):
     try:
         state["tp"] = float(message.text)
         state["is_running"] = True
-        bot.send_message(message.chat.id, "🚀 Running. Analysis at second 10. Will stop and wipe data on first loss.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
+        state["is_trading"] = False
+        bot.send_message(message.chat.id, "🚀 Running. Analysis at Sec 10.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
         threading.Thread(target=scheduler_loop).start()
     except: bot.send_message(message.chat.id, "Invalid number.")
 
