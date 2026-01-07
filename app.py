@@ -6,7 +6,7 @@ from datetime import datetime
 
 app = Flask(__name__)
 # التوكن الجديد
-bot = telebot.TeleBot("8578153892:AAGZXvuRdj3rltO_is9PRx9inLSyJD6l3uk")
+bot = telebot.TeleBot("8517505223:AAH3SzafXDBydMpPE-ykDtkkKUILNcX17Ao")
 
 DB_FILE = "bot_state.json"
 
@@ -115,9 +115,9 @@ def execute_strategy():
             contract_type, barrier = None, None
             
             # شرط القوة 0.8 والحاجز 1.0
-            if diff >= 0.8:
+            if diff >= 0.5:
                 contract_type, barrier = "CALL", "-1.0"
-            elif diff <= -0.8:
+            elif diff <= -0.5:
                 contract_type, barrier = "PUT", "+1.0"
 
             if contract_type:
