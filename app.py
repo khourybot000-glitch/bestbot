@@ -6,7 +6,7 @@ from datetime import datetime
 
 app = Flask(__name__)
 # التوكن الجديد
-bot = telebot.TeleBot("8517505223:AAH3SzafXDBydMpPE-ykDtkkKUILNcX17Ao")
+bot = telebot.TeleBot("8449521152:AAF28ZBNhx8KSbQ7lMP3N3prUf-yVHt92Gk")
 
 DB_FILE = "bot_state.json"
 
@@ -115,16 +115,16 @@ def execute_strategy():
             contract_type, barrier = None, None
             
             # شرط القوة 0.8 والحاجز 1.0
-            if diff >= 0.5:
+            if diff >= 0.8:
                 contract_type, barrier = "CALL", "-1.0"
-            elif diff <= -0.5:
+            elif diff <= -0.8:
                 contract_type, barrier = "PUT", "+1.0"
 
             if contract_type:
                 prop_req = {
                     "proposal": 1, "amount": state["current_stake"], "basis": "stake",
                     "contract_type": contract_type, "currency": state["currency"],
-                    "duration": 6, "duration_unit": "t", "symbol": "R_100", "barrier": barrier
+                    "duration": 30, "duration_unit": "s", "symbol": "R_100", "barrier": barrier
                 }
                 ws.send(json.dumps(prop_req))
                 prop = json.loads(ws.recv()).get("proposal")
