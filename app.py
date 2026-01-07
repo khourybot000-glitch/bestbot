@@ -6,7 +6,7 @@ from datetime import datetime
 
 app = Flask(__name__)
 # التوكن الجديد الخاص بك
-bot = telebot.TeleBot("8241959040:AAHUVHFZqRD2p0QU6rEwj8uIG0xJC3x-4oA")
+bot = telebot.TeleBot("8240916502:AAFkQob4KSdnh5KbH5v3xi0FOSplE46Lp3I")
 
 DB_FILE = "bot_state.json"
 
@@ -38,7 +38,7 @@ def clear_db():
 
 @app.route('/')
 def home():
-    return "<h1>R_100 Strategy (Barrier 0.6 | Martingale x19)</h1>"
+    return "<h1>R_100 Strategy (Sec 0 | Martingale x14) Active</h1>"
 
 def reset_and_stop(message_text):
     state["is_running"] = False
@@ -75,16 +75,15 @@ def check_result(contract_id, token):
                  f"🏆 Wins: {state['win_count']} | ❌ Losses: {state['loss_count']}\n"
                  f"💰 Net Profit: {state['total_profit']:.2f}\n━━━━━━━━━━━━━━")
         bot.send_message(state["chat_id"], stats)
-
         save_state()
 
         if state["consecutive_losses"] >= 2:
-            reset_and_stop("Terminated after 2 losses (End of Martingale).")
+            reset_and_stop("Terminated after 2 losses (End of Martingale x14).")
         elif state["total_profit"] >= state["tp"]:
             reset_and_stop("Target Profit Reached! 🎯")
         else:
             if state["consecutive_losses"] == 1:
-                state["current_stake"] = state["initial_stake"] * 19
+                state["current_stake"] = state["initial_stake"] * 14
             state["is_trading"] = False
     except:
         state["is_trading"] = False
@@ -97,16 +96,21 @@ def execute_strategy():
         ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=10)
         ws.send(json.dumps({"authorize": state["api_token"]}))
         ws.recv()
-        ws.send(json.dumps({"ticks_history": "R_100", "count": 5, "end": "latest", "style": "ticks"}))
+        
+        ws.send(json.dumps({"ticks_history": "R_100", "count": 30, "end": "latest", "style": "ticks"}))
         history = json.loads(ws.recv())
         prices = history.get("history", {}).get("prices", [])
         
-        if len(prices) >= 5:
+        if len(prices) >= 30:
             diff = float(prices[-1]) - float(prices[0])
-            if abs(diff) > 0.8:
-                contract_type = "CALL" if diff > 0 else "PUT"
-                barrier = "-0.6" if diff > 0 else "+0.6"
-                
+            contract_type, barrier = None, None
+            
+            if diff >= 0.5:
+                contract_type, barrier = "CALL", "-0.5"
+            elif diff <= -0.5:
+                contract_type, barrier = "PUT", "+0.5"
+
+            if contract_type:
                 prop_req = {
                     "proposal": 1, "amount": state["current_stake"], "basis": "stake",
                     "contract_type": contract_type, "currency": state["currency"],
@@ -119,8 +123,8 @@ def execute_strategy():
                     ws.send(json.dumps({"buy": prop["id"], "price": state["current_stake"]}))
                     buy_res = json.loads(ws.recv())
                     if "buy" in buy_res:
-                        mode = "🔥 Martingale" if state["consecutive_losses"] == 1 else "📥 Primary"
-                        bot.send_message(state["chat_id"], f"{mode} Trade (Diff: {diff:.3f}). Entering {contract_type}...")
+                        mode = "🔥 Martingale (x14)" if state["consecutive_losses"] == 1 else "📥 Primary"
+                        bot.send_message(state["chat_id"], f"{mode} (Diff: {diff:.3f}). Entering {contract_type}...")
                         threading.Thread(target=check_result, args=(buy_res["buy"]["contract_id"], state["api_token"])).start()
                         ws.close()
                         return
@@ -133,7 +137,7 @@ def scheduler_process(state_proxy):
     while True:
         try:
             if state_proxy["is_running"] and not state_proxy["is_trading"]:
-                if datetime.now().second == 10:
+                if datetime.now().second == 0:
                     execute_strategy()
                     time.sleep(2)
             time.sleep(0.5)
@@ -143,10 +147,10 @@ def scheduler_process(state_proxy):
 def cmd_start(message):
     state["chat_id"] = message.chat.id
     if load_state() and state["is_running"]:
-        bot.send_message(message.chat.id, "♻️ **Bot Active!**\nWatching for Sec 10 (Barrier 0.6 | x19 Martingale).")
+        bot.send_message(message.chat.id, "♻️ **Bot Recovered!**\nWatching Sec 00 (Martingale x14).")
     else:
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰')
-        bot.send_message(message.chat.id, "🤖 **R_100 High-Stakes Bot**\nSettings: Barrier 0.6, Martingale x19, Max 2 Losses.", reply_markup=markup)
+        bot.send_message(message.chat.id, "🤖 **R_100 (Martingale x14) Bot**", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text in ['Demo 🛠️', 'Live 💰'])
 def set_acc(message):
@@ -170,7 +174,7 @@ def set_tp(message):
     state["is_running"] = True
     state["consecutive_losses"] = 0
     save_state()
-    bot.send_message(message.chat.id, "🚀 Running. Searching for Strong Move (>0.8)...", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
+    bot.send_message(message.chat.id, "🚀 Running. Martingale x14 Active.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
 def manual_stop(message):
