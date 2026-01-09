@@ -6,7 +6,7 @@ from datetime import datetime
 
 app = Flask(__name__)
 # تم تحديث التوكن هنا
-bot = telebot.TeleBot("8316377345:AAHKSCagYD2lfJRCLmNyY95K2IMWgzfx9hg")
+bot = telebot.TeleBot("8380819752:AAH8IF1aHRRwuL77oXkhs2e1SGJiY0l6HOU")
 
 manager = multiprocessing.Manager()
 
@@ -63,7 +63,7 @@ def check_result_logic(state_proxy):
                 state_proxy["consecutive_losses"] += 1
                 res_symbol = "❌"
                 
-                if state_proxy["consecutive_losses"] >= 2:
+                if state_proxy["consecutive_losses"] >= 1:
                     reset_and_stop(state_proxy, f"❌ Stop Loss (2 Losses).\nTotal Net: {state_proxy['total_profit']:.2f}")
                     return
                 # المضاعفة ×14
@@ -88,7 +88,7 @@ def check_result_logic(state_proxy):
 
 def execute_trade(state_proxy):
     now = datetime.now()
-    valid_seconds = [0, 10, 20, 30, 40, 50]
+    valid_seconds = [0]
     
     if state_proxy["is_trading"] or now.second not in valid_seconds or state_proxy["last_trade_second"] == now.second:
         return
@@ -110,9 +110,9 @@ def execute_trade(state_proxy):
                 
                 # عكس الاتجاه: صاعد يدخل PUT+0.7 | هابط يدخل CALL-0.7
                 if diff >= 0.8:
-                    c_type, barr = "CALL", "-0.7"
+                    c_type, barr = "CALL", "-1.0"
                 else:
-                    c_type, barr = "PUT", "+0.7"
+                    c_type, barr = "PUT", "+1.0"
 
                 ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929")
                 ws.send(json.dumps({"authorize": state_proxy["api_token"]}))
@@ -121,7 +121,7 @@ def execute_trade(state_proxy):
                 # مدة الصفقة 6 تيكات
                 req = {"proposal": 1, "amount": state_proxy["current_stake"], "basis": "stake",
                        "contract_type": c_type, "currency": state_proxy["currency"],
-                       "duration": 6, "duration_unit": "t", "symbol": "R_100", "barrier": barr}
+                       "duration": 5, "duration_unit": "t", "symbol": "R_100", "barrier": barr}
                 
                 ws.send(json.dumps(req))
                 prop = json.loads(ws.recv()).get("proposal")
