@@ -1,15 +1,14 @@
-import websocket, json, time, threading, multiprocessing, os
+import websocket, json, time, multiprocessing, os
 from flask import Flask
 import telebot
 from telebot import types
 from datetime import datetime
 
+# إعدادات البوت والسررفر
 app = Flask(__name__)
-# التوكن الجديد
-bot = telebot.TeleBot("8449521152:AAF28ZBNhx8KSbQ7lMP3N3prUf-yVHt92Gk")
+bot = telebot.TeleBot("8539423725:AAG_PbXMzqjWDwFBtQbZqPGLyGQHzsLQHfI")
 
-DB_FILE = "bot_state.json"
-
+# استخدام Manager لمشاركة البيانات بين العمليات المختلفة (Processes)
 manager = multiprocessing.Manager()
 
 def get_initial_state():
@@ -17,42 +16,27 @@ def get_initial_state():
         "api_token": "", "initial_stake": 0.0, "current_stake": 0.0, "tp": 0.0, 
         "currency": "USD", "is_running": False, "chat_id": None,
         "total_profit": 0.0, "win_count": 0, "loss_count": 0, "is_trading": False,
-        "consecutive_losses": 0
+        "consecutive_losses": 0, "last_trade_minute": -1
     }
 
 state = manager.dict(get_initial_state())
 
-def save_state():
-    with open(DB_FILE, "w") as f:
-        json.dump(dict(state), f)
+@app.route('/')
+def home():
+    return "BOT ALIVE - FULL MULTIPROCESSING MODE"
 
-def load_state():
-    if os.path.exists(DB_FILE):
-        try:
-            with open(DB_FILE, "r") as f:
-                saved_data = json.load(f)
-                state.update(saved_data)
-            return True
-        except: return False
-    return False
-
-def reset_and_stop(message_text):
-    if state["chat_id"]:
-        bot.send_message(state["chat_id"], f"🛑 **Bot Stopped & Reset:** {message_text}", reply_markup=types.ReplyKeyboardRemove())
-    
-    if os.path.exists(DB_FILE):
-        os.remove(DB_FILE)
-    
+def reset_and_stop(state_proxy, message_text):
+    if state_proxy["chat_id"]:
+        try: bot.send_message(state_proxy["chat_id"], f"🛑 {message_text}")
+        except: pass
     initial = get_initial_state()
-    for key in initial:
-        state[key] = initial[key]
+    for key in initial: state_proxy[key] = initial[key]
 
-def check_result(contract_id, token):
+# عملية مستقلة لفحص النتيجة (Process)
+def check_result_process(contract_id, token, state_proxy):
     try:
-        # مدة الانتظار المطلوبة 40 ثانية
-        time.sleep(40) 
-        
-        ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929")
+        time.sleep(40) # الانتظار المطلوب
+        ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=15)
         ws.send(json.dumps({"authorize": token}))
         ws.recv()
         ws.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id}))
@@ -63,137 +47,133 @@ def check_result(contract_id, token):
         profit = float(contract.get("profit", 0))
 
         if profit > 0:
-            state["total_profit"] += profit 
-            state["win_count"] += 1
-            state["consecutive_losses"] = 0
-            state["current_stake"] = state["initial_stake"]
-            status = "✅ WIN!"
+            state_proxy["total_profit"] += profit 
+            state_proxy["win_count"] += 1
+            state_proxy["consecutive_losses"] = 0
+            state_proxy["current_stake"] = state_proxy["initial_stake"]
+            bot.send_message(state_proxy["chat_id"], f"✅ WIN! Profit: {profit:.2f}\nTotal: {state_proxy['total_profit']:.2f}")
             
-            stats = (f"{status} **{profit:.2f}**\n━━━━━━━━━━━━━━\n"
-                     f"💰 Net Profit: {state['total_profit']:.2f}\n"
-                     f"🏆 Wins: {state['win_count']} | ❌ Loss: {state['loss_count']}\n━━━━━━━━━━━━━━")
-            bot.send_message(state["chat_id"], stats)
-
-            if state["total_profit"] >= state["tp"]:
-                reset_and_stop(f"Target Profit Reached ({state['total_profit']:.2f})!")
+            if state_proxy["total_profit"] >= state_proxy["tp"]:
+                reset_and_stop(state_proxy, "Target Reached!")
             else:
-                save_state()
-                state["is_trading"] = False
+                state_proxy["is_trading"] = False
         else:
-            state["total_profit"] += profit
-            state["loss_count"] += 1
-            state["consecutive_losses"] += 1
+            state_proxy["total_profit"] += profit
+            state_proxy["loss_count"] += 1
+            state_proxy["consecutive_losses"] += 1
+            bot.send_message(state_proxy["chat_id"], f"❌ LOSS! Net: {state_proxy['total_profit']:.2f}")
             
-            bot.send_message(state["chat_id"], f"❌ LOSS! ({profit:.2f})")
-
-            if state["consecutive_losses"] >= 2:
-                reset_and_stop("2 Consecutive Losses. Emergency Wipe Triggered.")
+            if state_proxy["consecutive_losses"] >= 2:
+                reset_and_stop(state_proxy, "2 Consecutive Losses. Stopped.")
             else:
-                # مضاعفة x19
-                state["current_stake"] = state["initial_stake"] * 19
-                save_state()
-                state["is_trading"] = False
-    except:
-        state["is_trading"] = False
+                state_proxy["current_stake"] = state_proxy["initial_stake"] * 19
+                state_proxy["is_trading"] = False
+    except Exception as e:
+        bot.send_message(state_proxy["chat_id"], "⚠️ Error in result process. Resetting lock...")
+        state_proxy["is_trading"] = False
 
-def execute_strategy():
-    if state["is_trading"] or not state["is_running"]: return
-    state["is_trading"] = True
+# تنفيذ الاستراتيجية
+def execute_strategy(state_proxy):
+    current_min = datetime.now().minute
+    if state_proxy["is_trading"] or not state_proxy["is_running"] or state_proxy["last_trade_minute"] == current_min:
+        return
+
+    state_proxy["is_trading"] = True
+    state_proxy["last_trade_minute"] = current_min
     
     try:
-        ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=10)
-        ws.send(json.dumps({"authorize": state["api_token"]}))
+        ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=15)
+        ws.send(json.dumps({"authorize": state_proxy["api_token"]}))
         ws.recv()
-        
-        # تحليل آخر 15 تكة
         ws.send(json.dumps({"ticks_history": "R_100", "count": 15, "end": "latest", "style": "ticks"}))
-        history = json.loads(ws.recv())
-        prices = history.get("history", {}).get("prices", [])
-        
+        prices = json.loads(ws.recv()).get("history", {}).get("prices", [])
+        ws.close()
+
         if len(prices) >= 15:
             diff = float(prices[-1]) - float(prices[0])
-            contract_type, barrier = None, None
-            
-            # شرط القوة 0.8 والحاجز 1.0
-            if diff >= 0.8:
-                contract_type, barrier = "CALL", "-1.0"
-            elif diff <= -0.8:
-                contract_type, barrier = "PUT", "+1.0"
-
-            if contract_type:
+            if abs(diff) >= 0.8:
+                c_type, barr = ("CALL", "-1.0") if diff >= 0.8 else ("PUT", "+1.0")
+                ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929")
+                ws.send(json.dumps({"authorize": state_proxy["api_token"]}))
+                ws.recv()
+                
                 prop_req = {
-                    "proposal": 1, "amount": state["current_stake"], "basis": "stake",
-                    "contract_type": contract_type, "currency": state["currency"],
-                    "duration": 30, "duration_unit": "s", "symbol": "R_100", "barrier": barrier
+                    "proposal": 1, "amount": state_proxy["current_stake"], "basis": "stake",
+                    "contract_type": c_type, "currency": state_proxy["currency"],
+                    "duration": 30, "duration_unit": "s", "symbol": "R_100", "barrier": barr
                 }
+                
                 ws.send(json.dumps(prop_req))
                 prop = json.loads(ws.recv()).get("proposal")
-                
                 if prop:
-                    ws.send(json.dumps({"buy": prop["id"], "price": state["current_stake"]}))
+                    ws.send(json.dumps({"buy": prop["id"], "price": state_proxy["current_stake"]}))
                     buy_res = json.loads(ws.recv())
                     if "buy" in buy_res:
-                        mode = "🔥 Martingale" if state["consecutive_losses"] == 1 else "📥 Primary"
-                        bot.send_message(state["chat_id"], f"{mode} Trade (Diff: {diff:.3f}) @ Sec 30")
-                        threading.Thread(target=check_result, args=(buy_res["buy"]["contract_id"], state["api_token"])).start()
-                        ws.close()
+                        bot.send_message(state_proxy["chat_id"], f"🚀 Trade Started (30s): {c_type}\nDiff: {diff:.3f}")
+                        # تشغيل عملية مستقلة لفحص النتيجة بدلاً من threading
+                        p = multiprocessing.Process(target=check_result_process, args=(buy_res["buy"]["contract_id"], state_proxy["api_token"], state_proxy))
+                        p.start()
                         return
-        ws.close()
-        state["is_trading"] = False
+        state_proxy["is_trading"] = False
     except:
-        state["is_trading"] = False
+        state_proxy["is_trading"] = False
 
+# محرك الجدولة (Process مستقل)
 def scheduler_process(state_proxy):
     while True:
-        try:
-            if state_proxy["is_running"] and not state_proxy["is_trading"]:
-                # التوقيت عند الثانية 30
-                if datetime.now().second == 30:
-                    execute_strategy()
-                    time.sleep(2)
-            time.sleep(0.5)
-        except: time.sleep(1)
+        if state_proxy["is_running"] and not state_proxy["is_trading"]:
+            now = datetime.now()
+            if now.second == 30 and state_proxy["last_trade_minute"] != now.minute:
+                execute_strategy(state_proxy)
+        time.sleep(0.5)
 
+# --- معالجات التلجرام ---
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     state["chat_id"] = message.chat.id
-    if load_state() and state["is_running"]:
-        bot.send_message(message.chat.id, "♻️ **Session Recovered.** Sec 30 Mode active.")
-    else:
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰')
-        bot.send_message(message.chat.id, "🤖 **R_100 Strategy Bot**\n- Sec: 30\n- Analysis: 15 Ticks\n- Diff: 0.8\n- Martingale: x19", reply_markup=markup)
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰')
+    bot.send_message(message.chat.id, "🤖 **Multiprocess Engine Active**\nStable & Independent Logic.", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text in ['Demo 🛠️', 'Live 💰'])
 def set_acc(message):
     state["currency"] = "USD" if "Demo" in message.text else "tUSDT"
     bot.send_message(message.chat.id, "Enter API Token:")
-    bot.register_next_step_handler(message, set_token)
+    bot.register_next_step_handler(message, lambda m: set_token(m))
 
 def set_token(message):
     state["api_token"] = message.text.strip()
     bot.send_message(message.chat.id, "Enter Stake:")
-    bot.register_next_step_handler(message, set_stake)
+    bot.register_next_step_handler(message, lambda m: set_stake(m))
 
 def set_stake(message):
-    state["initial_stake"] = float(message.text)
-    state["current_stake"] = state["initial_stake"]
-    bot.send_message(message.chat.id, "Enter Target Profit:")
-    bot.register_next_step_handler(message, set_tp)
+    try:
+        state["initial_stake"] = float(message.text)
+        state["current_stake"] = state["initial_stake"]
+        bot.send_message(message.chat.id, "Enter Target Profit:")
+        bot.register_next_step_handler(message, lambda m: set_tp(m))
+    except: bot.send_message(message.chat.id, "Invalid Stake.")
 
 def set_tp(message):
-    state["tp"] = float(message.text)
-    state["is_running"] = True
-    save_state()
-    bot.send_message(message.chat.id, "🚀 Bot Active. Waiting for Sec 30.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
+    try:
+        state["tp"] = float(message.text)
+        state["is_running"] = True
+        bot.send_message(message.chat.id, "🚀 Running...")
+    except: bot.send_message(message.chat.id, "Invalid TP.")
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
 def manual_stop(message):
-    reset_and_stop("Manual stop.")
+    reset_and_stop(state, "Stopped Manually.")
 
 if __name__ == '__main__':
-    load_state()
-    p = multiprocessing.Process(target=scheduler_process, args=(state,))
-    p.daemon = True
-    p.start()
-    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000)).start()
-    bot.infinity_polling()
+    # تشغيل محرك الجدولة في عملية مستقلة
+    sched_p = multiprocessing.Process(target=scheduler_process, args=(state,))
+    sched_p.daemon = True
+    sched_p.start()
+    
+    # تشغيل سيرفر ويب في عملية مستقلة لضمان استقرار Flask
+    flask_p = multiprocessing.Process(target=lambda: app.run(host='0.0.0.0', port=10000))
+    flask_p.daemon = True
+    flask_p.start()
+    
+    # تشغيل البوت في العملية الرئيسية
+    bot.infinity_polling(timeout=60, long_polling_timeout=30)
