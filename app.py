@@ -6,7 +6,7 @@ from datetime import datetime
 
 app = Flask(__name__)
 # تم تحديث التوكن هنا
-bot = telebot.TeleBot("8469655661:AAE2hQMkI0UAbd8d3-Dl6TGIdLugH8jSlAo")
+bot = telebot.TeleBot("8316377345:AAHKSCagYD2lfJRCLmNyY95K2IMWgzfx9hg")
 
 manager = multiprocessing.Manager()
 
@@ -110,9 +110,9 @@ def execute_trade(state_proxy):
                 
                 # عكس الاتجاه: صاعد يدخل PUT+0.7 | هابط يدخل CALL-0.7
                 if diff >= 0.8:
-                    c_type, barr = "PUT", "+0.7"
-                else:
                     c_type, barr = "CALL", "-0.7"
+                else:
+                    c_type, barr = "PUT", "+0.7"
 
                 ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929")
                 ws.send(json.dumps({"authorize": state_proxy["api_token"]}))
