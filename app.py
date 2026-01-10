@@ -6,7 +6,7 @@ from datetime import datetime
 
 app = Flask(__name__)
 # التوكن الجديد
-TOKEN = "8264292822:AAH1GbYJsJILVq3zZV1o9mZafFdW4QlRKoE"
+TOKEN = "8264292822:AAGO8gR8wz1Uy6BuqCaK0jO4slRJiu2tBMU"
 bot = telebot.TeleBot(TOKEN)
 manager = multiprocessing.Manager()
 
