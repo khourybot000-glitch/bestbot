@@ -6,7 +6,7 @@ from datetime import datetime
 
 app = Flask(__name__)
 # التوكن الجديد
-TOKEN = "8264292822:AAGO8gR8wz1Uy6BuqCaK0jO4slRJiu2tBMU"
+TOKEN = "8264292822:AAEwrtakT1F82KHqp9rN8e4LNe-s8oyRZGk"
 bot = telebot.TeleBot(TOKEN)
 manager = multiprocessing.Manager()
 
@@ -36,13 +36,13 @@ def reset_and_stop(state_proxy, text):
 
 def open_trade_raw(state_proxy, contract_type):
     try:
-        barrier = "-0.8" if contract_type == "CALL" else "+0.8"
+        barrier = "-0.7" if contract_type == "CALL" else "+0.7"
         ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=10)
         ws.send(json.dumps({"authorize": state_proxy["api_token"]}))
         ws.recv()
         req = {"proposal": 1, "amount": state_proxy["current_stake"], "basis": "stake", 
                "contract_type": contract_type, "currency": state_proxy["currency"], 
-               "duration": 15, "duration_unit": "s", "symbol": "R_100", "barrier": barrier}
+               "duration": 5, "duration_unit": "t", "symbol": "R_100", "barrier": barrier}
         ws.send(json.dumps(req))
         prop = json.loads(ws.recv()).get("proposal")
         if prop:
@@ -61,7 +61,7 @@ def open_trade_raw(state_proxy, contract_type):
     return False
 
 def check_result_logic(state_proxy):
-    if not state_proxy["active_contract"] or time.time() - state_proxy["start_time"] < 18:
+    if not state_proxy["active_contract"] or time.time() - state_proxy["start_time"] < 16:
         return
     try:
         ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=10)
@@ -122,7 +122,7 @@ def check_result_logic(state_proxy):
 
 def execute_trade(state_proxy):
     now = datetime.now()
-    valid_seconds = [0, 10, 20, 30, 40, 50]
+    valid_seconds = [0,30]
     time_key = f"{now.minute}:{now.second}"
     
     if state_proxy["is_trading"] or now.second not in valid_seconds or state_proxy["last_trade_time"] == time_key:
