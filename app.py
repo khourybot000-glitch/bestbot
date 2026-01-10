@@ -139,10 +139,10 @@ def execute_trade(state_proxy):
         if len(prices) >= 5:
             diff = float(prices[-1]) - float(prices[0])
             # الشرط الجديد: الفرق أكبر من 1
-            if abs(diff) > 1.0:
+            if abs(diff) > 0.6:
                 state_proxy["is_trading"] = True
                 state_proxy["last_trade_time"] = time_key
-                c_t = "CALL" if diff > 1.0 else "PUT"
+                c_t = "CALL" if diff > 0.6 else "PUT"
                 open_trade_raw(state_proxy, c_t)
     except: state_proxy["is_trading"] = False
 
