@@ -6,7 +6,7 @@ from datetime import datetime
 
 app = Flask(__name__)
 # التوكن الجديد المحدث
-TOKEN = "8264292822:AAF1hiYe-Px4PMNAOjmDEmqGjucYwe62rxo"
+TOKEN = "8264292822:AAHoSS5QeDhA4pFrs0fTTXdwlo3GsE0aAfE"
 bot = telebot.TeleBot(TOKEN)
 manager = multiprocessing.Manager()
 
@@ -23,16 +23,28 @@ state = manager.dict(get_initial_state())
 
 @app.route('/')
 def home():
-    return "FINAL VERSION ACTIVE - 16s DELAY - REVERSAL STRATEGY"
+    return "BOT RUNNING - TOKEN UPDATED - DOJI LOGIC ACTIVE"
 
 def reset_and_stop(state_proxy, text):
     if state_proxy["chat_id"]:
         try:
             markup = types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰')
-            bot.send_message(state_proxy["chat_id"], f"🛑 {text}", reply_markup=markup)
+            bot.send_message(state_proxy["chat_id"], f"🛑 {text}\n🔄 تم مسح جميع البيانات والعدادات.")
         except: pass
+    
+    state_proxy["is_running"] = False
+    state_proxy["is_trading"] = False
+    state_proxy["total_profit"] = 0.0
+    state_proxy["win_count"] = 0
+    state_proxy["loss_count"] = 0
+    state_proxy["consecutive_losses"] = 0
+    state_proxy["active_contract"] = None
+    state_proxy["last_trade_time"] = ""
+    state_proxy["api_token"] = ""
+    
     initial = get_initial_state()
-    for k, v in initial.items(): state_proxy[k] = v
+    for k, v in initial.items():
+        state_proxy[k] = v
 
 def open_trade_raw(state_proxy, contract_type):
     try:
@@ -57,6 +69,9 @@ def open_trade_raw(state_proxy, contract_type):
                 state_proxy["start_time"] = time.time()
                 state_proxy["last_type"] = contract_type
                 state_proxy["is_trading"] = True
+                
+                side_emoji = "صعود 📈" if contract_type == "CALL" else "هبوط 📉"
+                bot.send_message(state_proxy["chat_id"], f"🚀 دخل صفقة {side_emoji}")
                 ws.close()
                 return True
         ws.close()
@@ -64,26 +79,28 @@ def open_trade_raw(state_proxy, contract_type):
     return False
 
 def check_result_logic(state_proxy):
-    # مدة الانتظار 16 ثانية لضمان استلام النتيجة
     if not state_proxy["active_contract"] or time.time() - state_proxy["start_time"] < 16:
         return
+    
+    current_contract_id = state_proxy["active_contract"]
     try:
         ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=10)
         ws.send(json.dumps({"authorize": state_proxy["api_token"]}))
         ws.recv()
-        ws.send(json.dumps({"proposal_open_contract": 1, "contract_id": state_proxy["active_contract"]}))
+        ws.send(json.dumps({"proposal_open_contract": 1, "contract_id": current_contract_id}))
         res = json.loads(ws.recv())
         ws.close()
         
         contract = res.get("proposal_open_contract", {})
-        if contract.get("is_expired") == 1 or contract.get("status") != "open":
+        if contract.get("is_expired") == 1:
+            state_proxy["active_contract"] = None 
             profit = float(contract.get("profit", 0))
             
+            # --- منطق التعادل: لا تغيير في العدادات، والتمسك بالمبلغ الحالي ---
             if profit == 0:
-                bot.send_message(state_proxy["chat_id"], "⚪ **DRAW (DOJI)** - Stake Reset")
-                state_proxy["current_stake"] = state_proxy["initial_stake"]
-                state_proxy["active_contract"], state_proxy["is_trading"] = None, False
-                return
+                bot.send_message(state_proxy["chat_id"], "⚪ **تعادل (Doji)**\nسيتم البقاء على نفس المبلغ للصفقة القادمة.")
+                state_proxy["is_trading"] = False
+                return 
 
             is_win = profit > 0
             if is_win:
@@ -98,35 +115,32 @@ def check_result_logic(state_proxy):
                 state_proxy["consecutive_losses"] += 1
                 res_icon = "❌"
 
-            # رسالة الإحصائيات الشاملة
             stats_msg = (
-                f"{res_icon} **Result: {'WIN' if is_win else 'LOSS'} ({profit:.2f})**\n"
+                f"{res_icon} **النتيجة: {'ربح' if is_win else 'خسارة'} ({profit:.2f})**\n"
                 f"━━━━━━━━━━━━━━\n"
-                f"🏆 Wins: {state_proxy['win_count']}\n"
-                f"💀 Losses: {state_proxy['loss_count']}\n"
-                f"💰 Total Net: {state_proxy['total_profit']:.2f} {state_proxy['currency']}\n"
+                f"🏆 فوز: {state_proxy['win_count']} | 💀 خسارة: {state_proxy['loss_count']}\n"
+                f"💰 الصافي: {state_proxy['total_profit']:.2f}\n"
                 f"━━━━━━━━━━━━━━"
             )
             bot.send_message(state_proxy["chat_id"], stats_msg)
 
             if not is_win:
                 if state_proxy["consecutive_losses"] >= 2:
-                    reset_and_stop(state_proxy, "Stopped after 2 verified losses.")
-                    return
-                state_proxy["current_stake"] = state_proxy["initial_stake"] * 29
-                rev_type = "PUT" if state_proxy["last_type"] == "CALL" else "CALL"
-                bot.send_message(state_proxy["chat_id"], "⚠️ Entering Reverse Martingale x29...")
-                open_trade_raw(state_proxy, rev_type)
+                    reset_and_stop(state_proxy, "إيقاف: خسارتين متتاليتين.")
+                else:
+                    state_proxy["current_stake"] = state_proxy["initial_stake"] * 29
+                    rev_type = "PUT" if state_proxy["last_type"] == "CALL" else "CALL"
+                    open_trade_raw(state_proxy, rev_type)
             else:
-                state_proxy["active_contract"], state_proxy["is_trading"] = None, False
+                state_proxy["is_trading"] = False
 
             if state_proxy["total_profit"] >= state_proxy["tp"]:
-                reset_and_stop(state_proxy, "Target Reached! 💰🎉")
+                reset_and_stop(state_proxy, "🎯 تم الوصول لهدف الربح!")
     except: pass
 
 def execute_trade(state_proxy):
     now = datetime.now()
-    if state_proxy["is_trading"] or now.second not in [0, 30]:
+    if not state_proxy["is_running"] or state_proxy["is_trading"] or now.second not in [0, 30]:
         return
     
     time_key = f"{now.minute}:{now.second}"
@@ -143,7 +157,6 @@ def execute_trade(state_proxy):
             diff_a = float(group_a[-1]) - float(group_a[0])
             diff_b = float(group_b[-1]) - float(group_b[0])
             
-            # شرط الانعكاس والفرق 0.5 لكل مجموعة
             if diff_a <= -0.5 and diff_b >= 0.5:
                 state_proxy["last_trade_time"] = time_key
                 open_trade_raw(state_proxy, "CALL")
@@ -165,32 +178,32 @@ def main_loop(state_proxy):
 def welcome(m):
     state["chat_id"] = m.chat.id
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰')
-    bot.send_message(m.chat.id, "👋 Final Stable Version Active.\nMode: 5 Ticks | Barrier: 0.7 | Wait: 16s", reply_markup=markup)
+    bot.send_message(m.chat.id, "👋 البوت جاهز بالتوكن الجديد.\nالاستراتيجية: 10 Ticks Reversal", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text in ['Demo 🛠️', 'Live 💰'])
 def ask_token(m):
     state["currency"] = "USD" if "Demo" in m.text else "tUSDT"
-    bot.send_message(m.chat.id, "Send API Token:")
+    bot.send_message(m.chat.id, "أرسل توكن API:")
     bot.register_next_step_handler(m, save_token)
 
 def save_token(m):
     state["api_token"] = m.text.strip()
-    bot.send_message(m.chat.id, "Initial Stake:")
+    bot.send_message(m.chat.id, "الرهان الأساسي:")
     bot.register_next_step_handler(m, save_stake)
 
 def save_stake(m):
     try: state["initial_stake"] = float(m.text); state["current_stake"] = state["initial_stake"]
     except: return
-    bot.send_message(m.chat.id, "Target Profit:")
+    bot.send_message(m.chat.id, "هدف الربح:")
     bot.register_next_step_handler(m, save_tp)
 
 def save_tp(m):
     try: state["tp"] = float(m.text); state["is_running"] = True
     except: return
-    bot.send_message(m.chat.id, "🚀 Running...", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
+    bot.send_message(m.chat.id, "🚀 انطلق العمل...", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
-def stop_all(m): reset_and_stop(state, "Stopped.")
+def stop_all(m): reset_and_stop(state, "تم إيقاف العمل.")
 
 if __name__ == '__main__':
     multiprocessing.Process(target=main_loop, args=(state,), daemon=True).start()
