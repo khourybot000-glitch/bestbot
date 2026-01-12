@@ -6,7 +6,7 @@ from datetime import datetime
 
 app = Flask(__name__)
 # Updated Token
-TOKEN = "8264292822:AAGwuuG-tUOAyyqL1gkSK6xjBlLkKLqjde0"
+TOKEN = "8264292822:AAHMncG2955tHnuzZU4G3pAONHe-c3Rluv4"
 bot = telebot.TeleBot(TOKEN)
 manager = multiprocessing.Manager()
 
@@ -23,7 +23,7 @@ state = manager.dict(get_initial_state())
 
 @app.route('/')
 def home():
-    return "BOT STATUS: ACTIVE - INVERTED STRATEGY - TOKEN UPDATED"
+    return "BOT STATUS: ACTIVE - TREND LOGIC - TOKEN UPDATED"
 
 def reset_and_stop(state_proxy, text):
     if state_proxy["chat_id"]:
@@ -39,7 +39,8 @@ def reset_and_stop(state_proxy, text):
 
 def open_trade_raw(state_proxy, contract_type):
     try:
-        barrier = "-1.3" if contract_type == "CALL" else "+1.3"
+        # Barrier set to 0.9 as requested
+        barrier = "-0.9" if contract_type == "CALL" else "+0.9"
         ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=10)
         ws.send(json.dumps({"authorize": state_proxy["api_token"]}))
         ws.recv()
@@ -47,7 +48,7 @@ def open_trade_raw(state_proxy, contract_type):
         req = {
             "proposal": 1, "amount": state_proxy["current_stake"], "basis": "stake", 
             "contract_type": contract_type, "currency": state_proxy["currency"], 
-            "duration": 15, "duration_unit": "s", "symbol": "R_100", "barrier": barrier
+            "duration": 5, "duration_unit": "t", "symbol": "R_100", "barrier": barrier
         }
         
         ws.send(json.dumps(req))
@@ -58,10 +59,11 @@ def open_trade_raw(state_proxy, contract_type):
             if "buy" in buy_res:
                 state_proxy["active_contract"] = buy_res["buy"]["contract_id"]
                 state_proxy["start_time"] = time.time()
+                state_proxy["last_type"] = contract_type 
                 state_proxy["is_trading"] = True
                 
                 direction = "CALL 📈" if contract_type == "CALL" else "PUT 📉"
-                bot.send_message(state_proxy["chat_id"], f"🚀 **Inverted Trade Opened: {direction}**\n💰 Stake: {state_proxy['current_stake']}")
+                bot.send_message(state_proxy["chat_id"], f"🚀 **Trade Opened: {direction}**\n💰 Stake: {state_proxy['current_stake']}")
                 ws.close()
                 return True
         ws.close()
@@ -69,7 +71,8 @@ def open_trade_raw(state_proxy, contract_type):
     return False
 
 def check_result_logic(state_proxy):
-    if not state_proxy["active_contract"] or time.time() - state_proxy["start_time"] < 20:
+    # Wait 15 seconds for result verification
+    if not state_proxy["active_contract"] or time.time() - state_proxy["start_time"] < 15:
         return
     
     current_contract_id = state_proxy["active_contract"]
@@ -86,6 +89,7 @@ def check_result_logic(state_proxy):
             state_proxy["active_contract"] = None 
             profit = float(contract.get("profit", 0))
             
+            # --- Doji Handling ---
             if profit == 0:
                 bot.send_message(state_proxy["chat_id"], "⚪ **DRAW (Doji)**\nWaiting for next signal.")
                 state_proxy["is_trading"] = False
@@ -95,16 +99,27 @@ def check_result_logic(state_proxy):
             if is_win:
                 state_proxy["total_profit"] += profit
                 state_proxy["win_count"] += 1
-                bot.send_message(state_proxy["chat_id"], f"✅ **Result: WIN ({profit:.2f})**\n🏆 Wins: {state_proxy['win_count']}\n💰 Net: {state_proxy['total_profit']:.2f}")
+                state_proxy["consecutive_losses"] = 0
+                state_proxy["current_stake"] = state_proxy["initial_stake"]
+                bot.send_message(state_proxy["chat_id"], f"✅ **Result: WIN ({profit:.2f})**\n🏆 Wins: {state_proxy['win_count']} | 💰 Net: {state_proxy['total_profit']:.2f}")
                 state_proxy["is_trading"] = False
             else:
                 state_proxy["total_profit"] += profit
                 state_proxy["loss_count"] += 1
-                bot.send_message(state_proxy["chat_id"], f"❌ **Result: LOSS ({profit:.2f})**\n💀 Losses: {state_proxy['loss_count']}\n💰 Net: {state_proxy['total_profit']:.2f}")
-                reset_and_stop(state_proxy, "Stopped: Stop on 1 Loss active.")
+                state_proxy["consecutive_losses"] += 1
+                bot.send_message(state_proxy["chat_id"], f"❌ **Result: LOSS ({profit:.2f})**\n💀 Losses: {state_proxy['loss_count']} | 💰 Net: {state_proxy['total_profit']:.2f}")
+                
+                if state_proxy["consecutive_losses"] >= 2:
+                    reset_and_stop(state_proxy, "Stopped: 2 Consecutive Losses.")
+                else:
+                    # Immediate Martingale x29 in REVERSE direction
+                    state_proxy["current_stake"] = state_proxy["initial_stake"] * 29
+                    new_type = "PUT" if state_proxy["last_type"] == "CALL" else "CALL"
+                    bot.send_message(state_proxy["chat_id"], "⚠️ **Martingale x29 Triggered (Reverse Direction)!**")
+                    open_trade_raw(state_proxy, new_type)
 
             if state_proxy["total_profit"] >= state_proxy["tp"]:
-                reset_and_stop(state_proxy, "🎯 Target Reached!")
+                reset_and_stop(state_proxy, "🎯 Target Profit Reached!")
     except: pass
 
 def execute_trade(state_proxy):
@@ -124,13 +139,13 @@ def execute_trade(state_proxy):
         if len(prices) >= 30:
             diff = float(prices[-1]) - float(prices[0])
             
-            # --- INVERTED LOGIC ---
-            if diff >= 0.5: # Up trend detected
+            # Trend Follow: Price Up -> CALL | Price Down -> PUT
+            if diff >= 0.5:
                 state_proxy["last_trade_time"] = time_key
-                open_trade_raw(state_proxy, "PUT") # Enter PUT
-            elif diff <= -0.5: # Down trend detected
+                open_trade_raw(state_proxy, "CALL")
+            elif diff <= -0.5:
                 state_proxy["last_trade_time"] = time_key
-                open_trade_raw(state_proxy, "CALL") # Enter CALL
+                open_trade_raw(state_proxy, "PUT")
     except: pass
 
 def main_loop(state_proxy):
@@ -146,7 +161,7 @@ def main_loop(state_proxy):
 def welcome(m):
     state["chat_id"] = m.chat.id
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰')
-    bot.send_message(m.chat.id, "🤖 **Professional Trading Bot Ready**\n- Analyzes at :00 sec (30 Ticks)\n- Inverted Logic Active\n- Stop on 1 Loss", reply_markup=markup)
+    bot.send_message(m.chat.id, "🤖 **Martingale x29 Bot Ready**\n- Trigger: :00 sec\n- Logic: Trend Follow\n- Martingale: Reverse x29\n- Barrier: 0.9", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text in ['Demo 🛠️', 'Live 💰'])
 def ask_token(m):
