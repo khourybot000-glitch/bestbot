@@ -6,7 +6,7 @@ from datetime import datetime
 
 app = Flask(__name__)
 # New Token Updated
-TOKEN = "8264292822:AAGa8LUWRQcUoC8FJIG9NCxDmLBeJzdjDrU"
+TOKEN = "8264292822:AAGeux9-x6WHhW-6Lu_6KscP_iYUfk5QT_8"
 bot = telebot.TeleBot(TOKEN)
 manager = multiprocessing.Manager()
 
@@ -46,7 +46,7 @@ def reset_and_stop(state_proxy, text):
 
 def open_trade_raw(state_proxy, contract_type):
     try:
-        barrier = "-0.8" if contract_type == "CALL" else "+0.8"
+        barrier = "-0.9" if contract_type == "CALL" else "+0.9"
         ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=10)
         ws.send(json.dumps({"authorize": state_proxy["api_token"]}))
         ws.recv()
@@ -54,7 +54,7 @@ def open_trade_raw(state_proxy, contract_type):
         req = {
             "proposal": 1, "amount": state_proxy["current_stake"], "basis": "stake", 
             "contract_type": contract_type, "currency": state_proxy["currency"], 
-            "duration": 5, "duration_unit": "t", "symbol": "R_100", "barrier": barrier
+            "duration": 30, "duration_unit": "s", "symbol": "R_100", "barrier": barrier
         }
         
         ws.send(json.dumps(req))
@@ -77,7 +77,7 @@ def open_trade_raw(state_proxy, contract_type):
     return False
 
 def check_result_logic(state_proxy):
-    if not state_proxy["active_contract"] or time.time() - state_proxy["start_time"] < 15:
+    if not state_proxy["active_contract"] or time.time() - state_proxy["start_time"] < 38:
         return
     
     current_contract_id = state_proxy["active_contract"]
@@ -125,8 +125,8 @@ def check_result_logic(state_proxy):
                 if state_proxy["consecutive_losses"] >= 2:
                     reset_and_stop(state_proxy, "Stopped: 2 Consecutive Losses.")
                 else:
-                    state_proxy["current_stake"] = state_proxy["initial_stake"] * 19
-                    new_type = "PUT" if state_proxy["last_type"] == "PUT" else "CALL"
+                    state_proxy["current_stake"] = state_proxy["initial_stake"] * 29
+                    new_type = "PUT" if state_proxy["last_type"] == "CALL" else "CALL"
                     bot.send_message(state_proxy["chat_id"], "⚠️ **Martingale x29 (Reverse Direction)**")
                     open_trade_raw(state_proxy, new_type)
             else:
@@ -138,7 +138,7 @@ def check_result_logic(state_proxy):
 
 def execute_trade(state_proxy):
     now = datetime.now()
-    if not state_proxy["is_running"] or state_proxy["is_trading"] or now.second % 10 != 0:
+    if not state_proxy["is_running"] or state_proxy["is_trading"] or now.second % 30 != 0:
         return
     
     time_key = f"{now.minute}:{now.second}"
