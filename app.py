@@ -6,7 +6,7 @@ from datetime import datetime
 
 app = Flask(__name__)
 # New Token Updated
-TOKEN = "8264292822:AAGeux9-x6WHhW-6Lu_6KscP_iYUfk5QT_8"
+TOKEN = "8264292822:AAHmeNdQ92-Gt-k4u6-yAyWEc5TDMarr8eQ"
 bot = telebot.TeleBot(TOKEN)
 manager = multiprocessing.Manager()
 
@@ -125,7 +125,7 @@ def check_result_logic(state_proxy):
                 if state_proxy["consecutive_losses"] >= 2:
                     reset_and_stop(state_proxy, "Stopped: 2 Consecutive Losses.")
                 else:
-                    state_proxy["current_stake"] = state_proxy["initial_stake"] * 29
+                    state_proxy["current_stake"] = state_proxy["initial_stake"] * 9
                     new_type = "PUT" if state_proxy["last_type"] == "CALL" else "CALL"
                     bot.send_message(state_proxy["chat_id"], "⚠️ **Martingale x29 (Reverse Direction)**")
                     open_trade_raw(state_proxy, new_type)
