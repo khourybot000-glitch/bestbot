@@ -6,7 +6,7 @@ from datetime import datetime
 
 app = Flask(__name__)
 # New Token Updated
-TOKEN = "8264292822:AAHQ8J_pOc3d_l7dINuGW3aJiT0i773m0bk"
+TOKEN = "8264292822:AAGq50zM1ATRNSiJky8ikrfKhsb1xAI6Opo"
 bot = telebot.TeleBot(TOKEN)
 manager = multiprocessing.Manager()
 
@@ -46,7 +46,7 @@ def reset_and_stop(state_proxy, text):
 
 def open_trade_raw(state_proxy, contract_type):
     try:
-        barrier = "-0.9" if contract_type == "CALL" else "+0.9"
+        barrier = "-0.8" if contract_type == "CALL" else "+0.8"
         ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=10)
         ws.send(json.dumps({"authorize": state_proxy["api_token"]}))
         ws.recv()
@@ -125,8 +125,8 @@ def check_result_logic(state_proxy):
                 if state_proxy["consecutive_losses"] >= 2:
                     reset_and_stop(state_proxy, "Stopped: 2 Consecutive Losses.")
                 else:
-                    state_proxy["current_stake"] = state_proxy["initial_stake"] * 29
-                    new_type = "PUT" if state_proxy["last_type"] == "CALL" else "CALL"
+                    state_proxy["current_stake"] = state_proxy["initial_stake"] * 19
+                    new_type = "PUT" if state_proxy["last_type"] == "PUT" else "CALL"
                     bot.send_message(state_proxy["chat_id"], "⚠️ **Martingale x29 (Reverse Direction)**")
                     open_trade_raw(state_proxy, new_type)
             else:
