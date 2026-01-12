@@ -6,7 +6,7 @@ from datetime import datetime
 
 app = Flask(__name__)
 # New Token Updated
-TOKEN = "8264292822:AAEBxi1QSdoyRBR88DlqeYnCh8JE6ZPi4dA"
+TOKEN = "8264292822:AAGa8LUWRQcUoC8FJIG9NCxDmLBeJzdjDrU"
 bot = telebot.TeleBot(TOKEN)
 manager = multiprocessing.Manager()
 
@@ -68,7 +68,7 @@ def open_trade_raw(state_proxy, contract_type):
                 state_proxy["last_type"] = contract_type 
                 state_proxy["is_trading"] = True
                 
-                direction = "CALL 📈" if contract_type == "PUT" else "PUT 📉"
+                direction = "CALL 📈" if contract_type == "CALL" else "PUT 📉"
                 bot.send_message(state_proxy["chat_id"], f"🚀 **Trade Opened: {direction}**\n💰 Stake: {state_proxy['current_stake']}")
                 ws.close()
                 return True
@@ -126,7 +126,7 @@ def check_result_logic(state_proxy):
                     reset_and_stop(state_proxy, "Stopped: 2 Consecutive Losses.")
                 else:
                     state_proxy["current_stake"] = state_proxy["initial_stake"] * 19
-                    new_type = "PUT" if state_proxy["last_type"] == "CALL" else "CALL"
+                    new_type = "PUT" if state_proxy["last_type"] == "PUT" else "CALL"
                     bot.send_message(state_proxy["chat_id"], "⚠️ **Martingale x29 (Reverse Direction)**")
                     open_trade_raw(state_proxy, new_type)
             else:
@@ -138,7 +138,7 @@ def check_result_logic(state_proxy):
 
 def execute_trade(state_proxy):
     now = datetime.now()
-    if not state_proxy["is_running"] or state_proxy["is_trading"] or now.second != 0:
+    if not state_proxy["is_running"] or state_proxy["is_trading"] or now.second % 10 != 0:
         return
     
     time_key = f"{now.minute}:{now.second}"
@@ -146,16 +146,16 @@ def execute_trade(state_proxy):
 
     try:
         ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=8)
-        ws.send(json.dumps({"ticks_history": "R_100", "count": 30, "end": "latest", "style": "ticks"}))
+        ws.send(json.dumps({"ticks_history": "R_100", "count": 5, "end": "latest", "style": "ticks"}))
         prices = json.loads(ws.recv()).get("history", {}).get("prices", [])
         ws.close()
 
-        if len(prices) >= 30:
+        if len(prices) >= 5:
             diff = float(prices[-1]) - float(prices[0])
-            if diff >= 0.5:
+            if diff >= 0.8:
                 state_proxy["last_trade_time"] = time_key
                 open_trade_raw(state_proxy, "CALL")
-            elif diff <= -0.5:
+            elif diff <= -0.8:
                 state_proxy["last_trade_time"] = time_key
                 open_trade_raw(state_proxy, "PUT")
     except: pass
