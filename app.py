@@ -6,8 +6,8 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-# --- التوكن الخاص بك ---
-TOKEN = "8264292822:AAEOCsFs8WmRn9Qs94ckbxcQTKtG092o7C8"
+# --- التوكن الجديد المحدث ---
+TOKEN = "8264292822:AAFug51wkLe8OW2BWrRYUeZAkp5mP_I6YtM"
 bot = telebot.TeleBot(TOKEN)
 manager = multiprocessing.Manager()
 
@@ -25,8 +25,8 @@ state = manager.dict(get_initial_state())
 
 @app.route('/')
 def home():
-    status = "RUNNING 🚀" if state["is_running"] else "STOPPED 🛑"
-    return f"<h2>STATUS: {status}</h2><p>Wins: {state['win_count']} | Losses: {state['loss_count']}</p>"
+    status = "ACTIVE 🚀" if state["is_running"] else "STOPPED 🛑"
+    return f"<h2>STATUS: {status}</h2><p>Wins: {state['win_count']} | Losses: {state['loss_count']} | Profit: {state['total_profit']:.2f}</p>"
 
 def reset_and_stop(state_proxy, text):
     if state_proxy["chat_id"]:
@@ -43,7 +43,8 @@ def reset_and_stop(state_proxy, text):
 
 def open_trade_raw(state_proxy, contract_type):
     try:
-        barrier = "-0.9" if contract_type == "CALL" else "+0.9"
+        # حاجز المسافة 2.0 كما طلبت
+        barrier = "-2.0" if contract_type == "CALL" else "+2.0"
         ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=10)
         ws.send(json.dumps({"authorize": state_proxy["api_token"]}))
         ws.recv()
@@ -51,7 +52,7 @@ def open_trade_raw(state_proxy, contract_type):
         req = {
             "proposal": 1, "amount": state_proxy["current_stake"], "basis": "stake", 
             "contract_type": contract_type, "currency": state_proxy["currency"], 
-            "duration": 30, "duration_unit": "s", "symbol": "R_100", "barrier": barrier
+            "duration": 1, "duration_unit": "m", "symbol": "R_100", "barrier": barrier
         }
         
         ws.send(json.dumps(req))
@@ -66,7 +67,7 @@ def open_trade_raw(state_proxy, contract_type):
                 state_proxy["is_trading"] = True
                 
                 direction = "CALL 📈" if contract_type == "CALL" else "PUT 📉"
-                bot.send_message(state_proxy["chat_id"], f"🚀 **Trade Opened: {direction}**\n💰 Stake: {state_proxy['current_stake']}")
+                bot.send_message(state_proxy["chat_id"], f"🚀 **Trade Opened: {direction}**\n💰 Stake: {state_proxy['current_stake']}\n⏱ Duration: 1 min")
                 ws.close()
                 return True
         ws.close()
@@ -74,7 +75,8 @@ def open_trade_raw(state_proxy, contract_type):
     return False
 
 def check_result_logic(state_proxy):
-    if not state_proxy["active_contract"] or time.time() - state_proxy["start_time"] < 38:
+    # مدة الانتظار للنتيجة 68 ثانية
+    if not state_proxy["active_contract"] or time.time() - state_proxy["start_time"] < 68:
         return
     
     try:
@@ -108,9 +110,10 @@ def check_result_logic(state_proxy):
                     reset_and_stop(state_proxy, "Stopped: 2 Consecutive Losses.")
                     return
                 else:
-                    state_proxy["current_stake"] = state_proxy["initial_stake"] * 9
+                    # مضاعفة x19
+                    state_proxy["current_stake"] = state_proxy["initial_stake"] * 19
                     state_proxy["pending_martingale"] = True 
-                    bot.send_message(state_proxy["chat_id"], "⚠️ **Loss! Waiting for a new signal to enter Martingale x9...**")
+                    bot.send_message(state_proxy["chat_id"], "⚠️ **Loss! Analyzing for a new signal for Martingale x19...**")
 
             bot.send_message(state_proxy["chat_id"], f"{icon} **Result: {profit:.2f}**\n✅ Wins: {state_proxy['win_count']} | ❌ Losses: {state_proxy['loss_count']}\n💰 Net: {state_proxy['total_profit']:.2f}")
             state_proxy["is_trading"] = False
@@ -121,7 +124,8 @@ def check_result_logic(state_proxy):
 
 def execute_trade(state_proxy):
     now = datetime.now()
-    if not state_proxy["is_running"] or state_proxy["is_trading"] or now.second not in [0, 30]:
+    # التحليل عند الثانية 00 فقط
+    if not state_proxy["is_running"] or state_proxy["is_trading"] or now.second != 0:
         return
     
     time_key = f"{now.minute}:{now.second}"
@@ -129,25 +133,26 @@ def execute_trade(state_proxy):
 
     try:
         ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=8)
-        ws.send(json.dumps({"ticks_history": "R_100", "count": 5, "end": "latest", "style": "ticks"}))
+        # تحليل 30 تيك
+        ws.send(json.dumps({"ticks_history": "R_100", "count": 30, "end": "latest", "style": "ticks"}))
         prices = json.loads(ws.recv()).get("history", {}).get("prices", [])
         ws.close()
 
-        if len(prices) >= 5:
+        if len(prices) >= 30:
             diff = float(prices[-1]) - float(prices[0])
             target_type = ""
             
-            if diff >= 0.8: 
-                target_type = "CALL"
-            elif diff <= -0.8: 
+            # استراتيجية عكس الاتجاه (الفرق أكبر من 1.5)
+            if diff >= 1.5: 
                 target_type = "PUT"
+            elif diff <= -1.5: 
+                target_type = "CALL"
             
             if target_type:
                 state_proxy["last_trade_time"] = time_key
                 open_trade_raw(state_proxy, target_type)
     except: pass
 
-# --- إضافة دالة main_loop المفقودة ---
 def main_loop(state_proxy):
     while True:
         try:
@@ -160,7 +165,7 @@ def main_loop(state_proxy):
 @bot.message_handler(commands=['start'])
 def welcome(m):
     state["chat_id"] = m.chat.id
-    bot.send_message(m.chat.id, "🤖 **Engine Fixed**\n- Martingale requires NEW signal.\n- Intervals: :00, :30", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰'))
+    bot.send_message(m.chat.id, "🤖 **Contrarian Bot v4.1**\n- Token Updated.\n- Interval: :00 (30 Ticks)\n- Signal: Reverse on Diff > 1.5\n- Barrier: 2.0 | Martingale: x19", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰'))
 
 @bot.message_handler(func=lambda m: m.text in ['Demo 🛠️', 'Live 💰'])
 def ask_token(m):
@@ -178,7 +183,7 @@ def save_token(m):
 def save_stake(m):
     try: state["initial_stake"] = float(m.text); state["current_stake"] = state["initial_stake"]
     except: return
-    bot.send_message(m.chat.id, "Target:")
+    bot.send_message(m.chat.id, "Target Profit:")
     bot.register_next_step_handler(m, save_tp)
 
 def save_tp(m):
@@ -190,7 +195,6 @@ def save_tp(m):
 def stop_all(m): reset_and_stop(state, "Manual Stop.")
 
 if __name__ == '__main__':
-    # التأكد من استدعاء الدوال المعرفة
     multiprocessing.Process(target=main_loop, args=(state,), daemon=True).start()
     multiprocessing.Process(target=lambda: app.run(host='0.0.0.0', port=10000), daemon=True).start()
     bot.infinity_polling()
