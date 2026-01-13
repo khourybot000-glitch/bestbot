@@ -108,10 +108,9 @@ def check_result_logic(state_proxy):
                     reset_and_stop(state_proxy, "Stopped: 2 Consecutive Losses.")
                     return
                 else:
-                    # تفعيل وضع المضاعفة للبحث عن إشارة جديدة
                     state_proxy["current_stake"] = state_proxy["initial_stake"] * 9
                     state_proxy["pending_martingale"] = True 
-                    bot.send_message(state_proxy["chat_id"], "⚠️ **Loss! Analyzing for a new signal to enter Martingale x9...**")
+                    bot.send_message(state_proxy["chat_id"], "⚠️ **Loss! Waiting for a new signal to enter Martingale x9...**")
 
             bot.send_message(state_proxy["chat_id"], f"{icon} **Result: {profit:.2f}**\n✅ Wins: {state_proxy['win_count']} | ❌ Losses: {state_proxy['loss_count']}\n💰 Net: {state_proxy['total_profit']:.2f}")
             state_proxy["is_trading"] = False
@@ -138,7 +137,6 @@ def execute_trade(state_proxy):
             diff = float(prices[-1]) - float(prices[0])
             target_type = ""
             
-            # في كلتا الحالتين (عادية أو مضاعفة) يجب أن تتحقق الإشارة أولاً
             if diff >= 0.8: 
                 target_type = "CALL"
             elif diff <= -0.8: 
@@ -149,11 +147,20 @@ def execute_trade(state_proxy):
                 open_trade_raw(state_proxy, target_type)
     except: pass
 
-# --- بقية الدوال (start, save_token, إلخ) تبقى كما هي ---
+# --- إضافة دالة main_loop المفقودة ---
+def main_loop(state_proxy):
+    while True:
+        try:
+            if state_proxy["is_running"]:
+                execute_trade(state_proxy)
+                check_result_logic(state_proxy)
+            time.sleep(0.1)
+        except: time.sleep(1)
+
 @bot.message_handler(commands=['start'])
 def welcome(m):
     state["chat_id"] = m.chat.id
-    bot.send_message(m.chat.id, "🤖 **Smart Martingale Engine**\n- Martingale will only enter if a NEW signal (0.8 diff) is found.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰'))
+    bot.send_message(m.chat.id, "🤖 **Engine Fixed**\n- Martingale requires NEW signal.\n- Intervals: :00, :30", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰'))
 
 @bot.message_handler(func=lambda m: m.text in ['Demo 🛠️', 'Live 💰'])
 def ask_token(m):
@@ -183,6 +190,7 @@ def save_tp(m):
 def stop_all(m): reset_and_stop(state, "Manual Stop.")
 
 if __name__ == '__main__':
+    # التأكد من استدعاء الدوال المعرفة
     multiprocessing.Process(target=main_loop, args=(state,), daemon=True).start()
     multiprocessing.Process(target=lambda: app.run(host='0.0.0.0', port=10000), daemon=True).start()
     bot.infinity_polling()
