@@ -7,12 +7,11 @@ from datetime import datetime
 app = Flask(__name__)
 
 # --- التوكن الجديد المحدث ---
-TOKEN = "8264292822:AAH7ZkcZiueWIsvEYn8EN8T43kvuGKxNzt0"
+TOKEN = "8264292822:AAGy6cWTkQze4NSic2dQ4D7RAQG4h6rexrU"
 bot = telebot.TeleBot(TOKEN)
 manager = multiprocessing.Manager()
 
 def get_initial_state():
-    """دالة لتعريف الحالة الصفرية (المسح الكامل)"""
     return {
         "api_token": "", "initial_stake": 0.0, "current_stake": 0.0, "tp": 0.0, 
         "currency": "USD", "is_running": False, "chat_id": None,
@@ -24,11 +23,10 @@ state = manager.dict(get_initial_state())
 
 @app.route('/')
 def home():
-    status = "RUNNING 🚀" if state["is_running"] else "IDLE/STOPPED 🛑"
+    status = "SEQUENCE BOT ACTIVE 🚀" if state["is_running"] else "STOPPED 🛑"
     return f"<h2>STATUS: {status}</h2><p>Wins: {state['win_count']} | Losses: {state['loss_count']}</p>"
 
 def reset_and_stop(state_proxy, text):
-    """دالة المسح الكامل للبيانات وإعادة التصفير"""
     if state_proxy["chat_id"]:
         try:
             report = (f"🛑 **SESSION TERMINATED**\n"
@@ -41,25 +39,24 @@ def reset_and_stop(state_proxy, text):
                       f"🔄 All data wiped. Restart required.")
             bot.send_message(state_proxy["chat_id"], report, reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰'))
         except: pass
-    
-    # مسح شامل لجميع البيانات في الذاكرة
     initial = get_initial_state()
-    for k, v in initial.items():
-        state_proxy[k] = v
+    for k, v in initial.items(): state_proxy[k] = v
 
-def open_digit_trade(state_proxy):
-    if state_proxy["consecutive_losses"] >= 3:
-        reset_and_stop(state_proxy, "3 Consecutive Losses.")
+def open_trade(state_proxy, contract_type):
+    if state_proxy["consecutive_losses"] >= 2:
+        reset_and_stop(state_proxy, "Reached 2 Consecutive Losses.")
         return False
     try:
+        # الحاجز: -0.8 للصعود و +0.8 للهبوط
+        barrier = "-0.8" if contract_type == "CALL" else "+0.8"
         ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=10)
         ws.send(json.dumps({"authorize": state_proxy["api_token"]}))
         ws.recv()
         
         req = {
             "proposal": 1, "amount": state_proxy["current_stake"], "basis": "stake", 
-            "contract_type": "DIGITOVER", "barrier": "1", "currency": state_proxy["currency"], 
-            "duration": 1, "duration_unit": "t", "symbol": "R_100"
+            "contract_type": contract_type, "barrier": barrier, "currency": state_proxy["currency"], 
+            "duration": 5, "duration_unit": "t", "symbol": "R_100"
         }
         
         ws.send(json.dumps(req))
@@ -73,15 +70,16 @@ def open_digit_trade(state_proxy):
                 state_proxy["active_contract"] = buy_res["buy"]["contract_id"]
                 state_proxy["start_time"] = time.time()
                 state_proxy["is_trading"] = True
-                bot.send_message(state_proxy["chat_id"], f"🚀 **Trade Opened (Over 1)**\n💰 Stake: {state_proxy['current_stake']:.2f}")
+                bot.send_message(state_proxy["chat_id"], f"🚀 **Entry: {contract_type}**\n💰 Stake: {state_proxy['current_stake']:.2f}")
                 ws.close()
                 return True
         ws.close()
     except: pass
     return False
 
-def check_digit_result(state_proxy):
-    if not state_proxy["active_contract"] or time.time() - state_proxy["start_time"] < 6:
+def check_result(state_proxy):
+    # وقت انتظار الصفقة 18 ثانية
+    if not state_proxy["active_contract"] or time.time() - state_proxy["start_time"] < 18:
         return
     try:
         ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=10)
@@ -107,55 +105,60 @@ def check_digit_result(state_proxy):
                 state_proxy["total_profit"] += profit
                 state_proxy["loss_count"] += 1
                 state_proxy["consecutive_losses"] += 1
-                state_proxy["current_stake"] = float(state_proxy["current_stake"]) * 5
+                state_proxy["current_stake"] = float(state_proxy["current_stake"]) * 19
                 icon = "❌ LOSS"
 
             result_msg = (f"{icon} ({profit:.2f})\n"
                           f"━━━━━━━━━━━━━━\n"
                           f"✅ Wins: {state_proxy['win_count']}\n"
                           f"❌ Losses: {state_proxy['loss_count']}\n"
-                          f"🔥 Consecutive Losses: {state_proxy['consecutive_losses']}/3\n"
-                          f"💰 Total Profit: {state_proxy['total_profit']:.2f}\n"
+                          f"⚠️ Consecutive: {state_proxy['consecutive_losses']}/2\n"
+                          f"💰 Net Profit: {state_proxy['total_profit']:.2f}\n"
                           f"━━━━━━━━━━━━━━")
             bot.send_message(state_proxy["chat_id"], result_msg)
             
             state_proxy["is_trading"] = False
 
-            # فحص شروط الإيقاف والمسح
-            if state_proxy["consecutive_losses"] >= 3:
-                reset_and_stop(state_proxy, "Target Loss Reached (3 Losses).")
+            if state_proxy["consecutive_losses"] >= 2:
+                reset_and_stop(state_proxy, "Stopped: 2 Consecutive Losses.")
             elif state_proxy["total_profit"] >= state_proxy["tp"]:
                 reset_and_stop(state_proxy, "Target Profit Reached.")
     except: pass
 
-def execute_digit_logic(state_proxy):
-    if not state_proxy["is_running"] or state_proxy["is_trading"] or state_proxy["consecutive_losses"] >= 3:
+def execute_logic(state_proxy):
+    if not state_proxy["is_running"] or state_proxy["is_trading"] or state_proxy["consecutive_losses"] >= 2:
         return
     try:
         ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=8)
-        ws.send(json.dumps({"ticks_history": "R_100", "count": 2, "end": "latest", "style": "ticks"}))
+        ws.send(json.dumps({"ticks_history": "R_100", "count": 4, "end": "latest", "style": "ticks"}))
         prices = json.loads(ws.recv()).get("history", {}).get("prices", [])
         ws.close()
-        if len(prices) >= 2:
-            t1, t2 = float(prices[0]), float(prices[1])
-            t2_str = f"{t2:.2f}"
-            if "." in t2_str and t2_str.split(".")[1][1] == "7" and t2 < t1:
-                open_digit_trade(state_proxy)
+
+        if len(prices) >= 4:
+            # هابطين (P0 > P1 > P2 > P3)
+            is_falling = prices[0] > prices[1] > prices[2] > prices[3]
+            # صاعدين (P0 < P1 < P2 < P3)
+            is_rising = prices[0] < prices[1] < prices[2] < prices[3]
+            
+            if is_falling:
+                open_trade(state_proxy, "CALL")
+            elif is_rising:
+                open_trade(state_proxy, "PUT")
     except: pass
 
 def main_loop(state_proxy):
     while True:
         try:
             if state_proxy["is_running"]:
-                if state_proxy["is_trading"]: check_digit_result(state_proxy)
-                else: execute_digit_logic(state_proxy)
-            time.sleep(0.4)
+                if state_proxy["is_trading"]: check_result(state_proxy)
+                else: execute_logic(state_proxy)
+            time.sleep(0.5)
         except: time.sleep(1)
 
 @bot.message_handler(commands=['start'])
 def welcome(m):
     state["chat_id"] = m.chat.id
-    bot.send_message(m.chat.id, "🤖 **Digit Over 1 v7.0**\n- Auto-Wipe on Stop/TP/SL\n- Martingale: x5 (Recursive)\n- Limit: 3 Losses", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰'))
+    bot.send_message(m.chat.id, "🤖 **Sequence Bot v8.1**\n- Analyze 4 Ticks Direction\n- Duration: 5 Ticks | Wait: 18s\n- Martingale: x19 | SL: 2 Losses", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰'))
 
 @bot.message_handler(func=lambda m: m.text in ['Demo 🛠️', 'Live 💰'])
 def ask_token(m):
@@ -180,11 +183,11 @@ def save_stake(m):
 def save_tp(m):
     try: state["tp"] = float(m.text); state["is_running"] = True
     except: return
-    bot.send_message(m.chat.id, "🚀 Bot Started...", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
+    bot.send_message(m.chat.id, "🚀 Running Sequence Strategy...", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
 def stop_all(m):
-    reset_and_stop(state, "Manual Stop Button Pressed.")
+    reset_and_stop(state, "Manual Stop.")
 
 if __name__ == '__main__':
     multiprocessing.Process(target=main_loop, args=(state,), daemon=True).start()
