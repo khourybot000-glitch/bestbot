@@ -7,7 +7,7 @@ from datetime import datetime
 app = Flask(__name__)
 
 # --- التوكن الجديد المحدث ---
-TOKEN = "8264292822:AAFs_jj2IbG5_ou5BsEcl5AJb4HFoZct42Q"
+TOKEN = "8264292822:AAGpyTsZ6Q181jmcrK_lLuZSuUGw_Kzo-ZA"
 bot = telebot.TeleBot(TOKEN)
 manager = multiprocessing.Manager()
 
@@ -50,7 +50,7 @@ def open_digit_trade(state_proxy):
         # عقد Digit Under بمستوى 8 ومدة 1 تيك
         req = {
             "proposal": 1, "amount": state_proxy["current_stake"], "basis": "stake", 
-            "contract_type": "DIGITUNDER", "barrier": "8", "currency": state_proxy["currency"], 
+            "contract_type": "DIGITOVER", "barrier": "1", "currency": state_proxy["currency"], 
             "duration": 1, "duration_unit": "t", "symbol": "R_100"
         }
         
