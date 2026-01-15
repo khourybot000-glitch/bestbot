@@ -5,8 +5,8 @@ from telebot import types
 
 app = Flask(__name__)
 
-# --- التوكن الحالي ---
-TOKEN = "8264292822:AAH7c57hWafIyPgZMvm5B6XVLP6ViHWros8"
+# --- التوكن الجديد المحدث ---
+TOKEN = "8264292822:AAECPUnzSaFDKinQPuWoZ3A86yxnfu2Mruo"
 bot = telebot.TeleBot(TOKEN)
 manager = multiprocessing.Manager()
 
@@ -22,32 +22,39 @@ state = manager.dict(get_initial_state())
 
 @app.route('/')
 def home():
-    return "Persistent Analysis Bot v9.3 is Running"
+    return "Digit Diff 5 Bot v10.1 is Running"
 
 def reset_and_stop(state_proxy, text):
     if state_proxy["chat_id"]:
         try:
             report = (f"🛑 **BOT STOPPED**\n"
                       f"━━━━━━━━━━━━━━\n"
-                      f"📈 Wins: {state_proxy['win_count']} | 📉 Losses: {state_proxy['loss_count']}\n"
+                      f"✅ Wins: {state_proxy['win_count']} | ❌ Losses: {state_proxy['loss_count']}\n"
                       f"💰 Final Profit: {state_proxy['total_profit']:.2f}\n"
                       f"📝 Reason: {text}")
-            bot.send_message(state_proxy["chat_id"], report, reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰'))
+            # العودة للقائمة الرئيسية بعد التوقف
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰')
+            bot.send_message(state_proxy["chat_id"], report, reply_markup=markup)
         except: pass
     initial = get_initial_state()
     for k, v in initial.items(): state_proxy[k] = v
 
-def open_trade(state_proxy, contract_type, ws_persistent):
+def get_second_decimal(price):
+    try:
+        s_price = f"{price:.2f}"
+        return int(s_price.split('.')[1][1])
+    except:
+        return None
+
+def open_trade(state_proxy, ws_persistent):
     if state_proxy["consecutive_losses"] >= 2:
         reset_and_stop(state_proxy, "SL: 2 Consecutive Losses.")
         return False
     try:
-        barrier = "-0.8" if contract_type == "CALL" else "+0.8"
-        
         req = {
             "proposal": 1, "amount": state_proxy["current_stake"], "basis": "stake", 
-            "contract_type": contract_type, "barrier": barrier, "currency": state_proxy["currency"], 
-            "duration": 5, "duration_unit": "t", "symbol": "R_100"
+            "contract_type": "DIGITDIFF", "barrier": "5", "currency": state_proxy["currency"], 
+            "duration": 1, "duration_unit": "t", "symbol": "R_100"
         }
         
         ws_persistent.send(json.dumps(req))
@@ -61,17 +68,15 @@ def open_trade(state_proxy, contract_type, ws_persistent):
                 state_proxy["active_contract"] = buy_res["buy"]["contract_id"]
                 state_proxy["start_time"] = time.time()
                 state_proxy["is_trading"] = True
-                bot.send_message(state_proxy["chat_id"], f"🚀 **Trade Sent: {contract_type}**\n🔌 Disconnecting for 18s wait...")
+                bot.send_message(state_proxy["chat_id"], f"🚀 **Entry: DIGITDIFF 5**\n💰 Stake: {state_proxy['current_stake']:.2f}")
                 return True
     except: pass
     return False
 
 def check_result(state_proxy):
-    if not state_proxy["active_contract"] or time.time() - state_proxy["start_time"] < 18:
+    if not state_proxy["active_contract"] or time.time() - state_proxy["start_time"] < 8:
         return
-    
     try:
-        # فتح اتصال جديد فقط لجلب النتيجة
         ws_temp = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=10)
         ws_temp.send(json.dumps({"authorize": state_proxy["api_token"]}))
         ws_temp.recv()
@@ -95,22 +100,20 @@ def check_result(state_proxy):
                 state_proxy["total_profit"] += profit
                 state_proxy["loss_count"] += 1
                 state_proxy["consecutive_losses"] += 1
-                state_proxy["current_stake"] = float(state_proxy["current_stake"]) * 19
+                state_proxy["current_stake"] = float(state_proxy["current_stake"]) * 14
                 icon = "❌ LOSS"
 
             stats_msg = (f"{icon} ({profit:.2f})\n"
                          f"━━━━━━━━━━━━━━\n"
                          f"✅ Wins: {state_proxy['win_count']} | ❌ Losses: {state_proxy['loss_count']}\n"
-                         f"💰 Net Profit: {state_proxy['total_profit']:.2f}\n"
-                         f"━━━━━━━━━━━━━━")
+                         f"💰 Net: {state_proxy['total_profit']:.2f}")
             bot.send_message(state_proxy["chat_id"], stats_msg)
-            
             state_proxy["is_trading"] = False
 
             if state_proxy["consecutive_losses"] >= 2:
                 reset_and_stop(state_proxy, "Reached 2 Losses.")
             elif state_proxy["total_profit"] >= state_proxy["tp"]:
-                reset_and_stop(state_proxy, "Target Profit Reached.")
+                reset_and_stop(state_proxy, "Target Reached.")
     except: pass
 
 def main_loop(state_proxy):
@@ -119,36 +122,25 @@ def main_loop(state_proxy):
         try:
             if state_proxy["is_running"]:
                 if state_proxy["is_trading"]:
-                    # إذا كان في وضع التداول، نغلق الاتصال المستمر إذا كان مفتوحاً
-                    if ws_persistent:
-                        ws_persistent.close()
-                        ws_persistent = None
+                    if ws_persistent: ws_persistent.close(); ws_persistent = None
                     check_result(state_proxy)
                 else:
-                    # إذا لم يكن هناك اتصال مستمر، نفتحه للتحليل
                     if ws_persistent is None:
                         ws_persistent = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=10)
                         ws_persistent.send(json.dumps({"authorize": state_proxy["api_token"]}))
                         ws_persistent.recv()
                     
-                    # تحليل 5 تيكات عبر الاتصال المستمر
-                    ws_persistent.send(json.dumps({"ticks_history": "R_100", "count": 5, "end": "latest", "style": "ticks"}))
+                    ws_persistent.send(json.dumps({"ticks_history": "R_100", "count": 3, "end": "latest", "style": "ticks"}))
                     prices = json.loads(ws_persistent.recv()).get("history", {}).get("prices", [])
                     
-                    if len(prices) >= 5:
-                        t1, t5 = float(prices[0]), float(prices[4])
-                        diff = t5 - t1
-                        
-                        if diff > 1.0:
-                            if open_trade(state_proxy, "PUT", ws_persistent):
-                                ws_persistent.close()
-                                ws_persistent = None
-                        elif diff < -1.0:
-                            if open_trade(state_proxy, "CALL", ws_persistent):
-                                ws_persistent.close()
-                                ws_persistent = None
+                    if len(prices) >= 3:
+                        d1 = get_second_decimal(prices[0])
+                        d3 = get_second_decimal(prices[2])
+                        if d1 == 5 and d3 == 5:
+                            if open_trade(state_proxy, ws_persistent):
+                                ws_persistent.close(); ws_persistent = None
             time.sleep(0.5) 
-        except Exception:
+        except:
             if ws_persistent: ws_persistent.close()
             ws_persistent = None
             time.sleep(1)
@@ -156,7 +148,8 @@ def main_loop(state_proxy):
 @bot.message_handler(commands=['start'])
 def welcome(m):
     state["chat_id"] = m.chat.id
-    bot.send_message(m.chat.id, "🤖 **Persistent Analysis v9.3**\n- Disconnects ONLY during trade wait\n- Gap: 1.0 | Martingale: x19", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰'))
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰')
+    bot.send_message(m.chat.id, "🤖 **Digit Diff v10.1**\n- Logic: T1[5] & T3[5]\n- Martingale: x14\n- Wait: 8s", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text in ['Demo 🛠️', 'Live 💰'])
 def ask_token(m):
@@ -164,7 +157,7 @@ def ask_token(m):
     for k, v in initial.items(): state[k] = v
     state["chat_id"] = m.chat.id
     state["currency"] = "USD" if "Demo" in m.text else "tUSDT"
-    bot.send_message(m.chat.id, "Enter API Token:")
+    bot.send_message(m.chat.id, "API Token:")
     bot.register_next_step_handler(m, save_token)
 
 def save_token(m):
@@ -179,12 +172,17 @@ def save_stake(m):
     bot.register_next_step_handler(m, save_tp)
 
 def save_tp(m):
-    try: state["tp"] = float(m.text); state["is_running"] = True
+    try: 
+        state["tp"] = float(m.text)
+        state["is_running"] = True
+        # إظهار زر الإيقاف فوراً عند بدء العمل
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑')
+        bot.send_message(m.chat.id, "🚀 Running Digit Strategy...", reply_markup=markup)
     except: return
-    bot.send_message(m.chat.id, "🚀 Running and Connected...")
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
-def stop_all(m): reset_and_stop(state, "Manual Stop.")
+def stop_all(m):
+    reset_and_stop(state, "Manual Stop Requested.")
 
 if __name__ == '__main__':
     multiprocessing.Process(target=main_loop, args=(state,), daemon=True).start()
