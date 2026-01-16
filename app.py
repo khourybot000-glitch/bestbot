@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION WITH NEW TOKEN ---
-TOKEN = "8433565422:AAHBXp6ja9ZrmNaJP048NTV6TmEqMrderF0"
+TOKEN = "8433565422:AAHZxJ01RrF3gSm86eyT94_0A4v5vr762_U"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN)
@@ -19,21 +19,15 @@ sessions_col = db['active_sessions']
 manager = multiprocessing.Manager()
 users_states = manager.dict()
 
-# --- CLEAR SESSION DATA ---
+# --- UTILITY FUNCTIONS ---
 def clear_user_session(chat_id, email):
     email = email.lower()
     user_data = sessions_col.find_one({"email": email})
     expiry = user_data.get("expiry_date") if user_data else None
-    
-    if chat_id in users_states:
-        del users_states[chat_id]
-    
+    if chat_id in users_states: del users_states[chat_id]
     sessions_col.delete_one({"chat_id": chat_id})
-    
-    if expiry:
-        sessions_col.update_one({"email": email}, {"$set": {"expiry_date": expiry}}, upsert=True)
+    if expiry: sessions_col.update_one({"email": email}, {"$set": {"expiry_date": expiry}}, upsert=True)
 
-# --- AUTHORIZATION CHECK ---
 def is_authorized(email):
     email = email.strip().lower()
     if not os.path.exists("user_ids.txt"): return False
@@ -53,27 +47,28 @@ def sync_to_cloud(chat_id):
         data = dict(users_states[chat_id])
         sessions_col.update_one({"chat_id": chat_id}, {"$set": data}, upsert=True)
 
-# --- ADMIN PANEL HTML (Arabic/English Mixed for Admin) ---
+# --- ADMIN PANEL HTML (DIRECT ACCESS) ---
 ADMIN_HTML = """
 <!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Subscription Management</title>
+<title>Admin Dashboard</title>
 <style>
-    body { font-family: sans-serif; background: #f0f2f5; padding: 20px; text-align: center; }
-    .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); max-width: 800px; margin: auto; }
-    table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-    th, td { padding: 12px; border-bottom: 1px solid #eee; }
-    th { background: #1a73e8; color: white; }
-    .btn-upd { background: #28a745; color: white; border: none; padding: 8px 12px; border-radius: 5px; cursor: pointer; }
-    .btn-stop { background: #dc3545; color: white; border: none; padding: 8px 12px; border-radius: 5px; cursor: pointer; }
+    body { font-family: 'Segoe UI', sans-serif; background: #f4f7f9; padding: 20px; text-align: center; }
+    .container { background: white; padding: 30px; border-radius: 15px; box-shadow: 0 5px 20px rgba(0,0,0,0.05); max-width: 900px; margin: auto; }
+    table { width: 100%; border-collapse: collapse; margin-top: 25px; }
+    th, td { padding: 15px; border-bottom: 1px solid #edf2f7; text-align: center; }
+    th { background: #4a5568; color: white; text-transform: uppercase; font-size: 13px; }
+    .btn-upd { background: #38a169; color: white; border: none; padding: 10px 15px; border-radius: 6px; cursor: pointer; font-weight: bold; }
+    .btn-stop { background: #e53e3e; color: white; border: none; padding: 10px 15px; border-radius: 6px; cursor: pointer; font-weight: bold; }
+    select { padding: 8px; border-radius: 6px; border: 1px solid #cbd5e0; }
 </style>
 </head>
 <body>
-    <div class="card">
-        <h2>👥 User Subscription Management</h2>
+    <div class="container">
+        <h2>🚀 Bot Management Panel</h2>
         <table>
-            <tr><th>User Email</th><th>Duration</th><th>Action</th></tr>
+            <tr><th>Email Address</th><th>Choose Plan</th><th>Action</th></tr>
             {% for email in emails %}
             <tr>
                 <form method="POST" action="/update_expiry">
@@ -89,8 +84,8 @@ ADMIN_HTML = """
                         </select>
                     </td>
                     <td>
-                        <button type="submit" name="action" value="update" class="btn-upd">Activate</button>
-                        <button type="submit" name="action" value="cancel" class="btn-stop">Stop</button>
+                        <button type="submit" name="action" value="update" class="btn-upd">UPDATE</button>
+                        <button type="submit" name="action" value="cancel" class="btn-stop">STOP</button>
                     </td>
                 </form>
             </tr>
@@ -114,7 +109,7 @@ def update_expiry():
     action = request.form.get('action')
     choice = request.form.get('duration_choice')
     if action == "cancel":
-        expiry_str = "2000-01-01 00:00"; msg = f"Subscription Stopped for {email}."
+        expiry_str = "2000-01-01 00:00"; msg = f"User {email} has been DEACTIVATED."
     else:
         now = datetime.now()
         if choice == "1_hours": exp = now + timedelta(hours=1)
@@ -124,22 +119,26 @@ def update_expiry():
         elif choice == "30_days": exp = now + timedelta(days=30)
         elif choice == "lifetime": exp = now + timedelta(days=36500)
         expiry_str = exp.strftime("%Y-%m-%d %H:%M")
-        msg = f"Activated for {email} until {expiry_str}"
+        msg = f"User {email} ACTIVATED until {expiry_str}"
     sessions_col.update_one({"email": email}, {"$set": {"expiry_date": expiry_str}}, upsert=True)
-    return f"<h3>{msg}</h3><br><a href='/'>Back to Panel</a>"
+    return f"<div style='text-align:center; padding:50px;'><h2>{msg}</h2><br><a href='/'>Go Back</a></div>"
 
-# --- CORE ANALYSIS ENGINE ---
+# --- CORE ANALYSIS ENGINE (2-TICKS STRATEGY) ---
 def global_analysis():
     ws = None
     while True:
         try:
             if ws is None: ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929")
-            ws.send(json.dumps({"ticks_history": "R_100", "count": 3, "end": "latest", "style": "ticks"}))
+            ws.send(json.dumps({"ticks_history": "R_100", "count": 2, "end": "latest", "style": "ticks"}))
             res = json.loads(ws.recv()).get("history", {}).get("prices", [])
-            if len(res) >= 3:
-                def d(p): return int("{:.2f}".format(p).split('.')[1][1])
-                t1, t2, t3 = d(res[0]), d(res[1]), d(res[2])
-                if (t1 == 9 and t2 == 8 and t3 == 9) or (t1 == 8 and t2 == 9 and t3 == 8):
+            
+            if len(res) >= 2:
+                def get_digit(price): return int("{:.2f}".format(price).split('.')[1][1])
+                t1 = get_digit(res[0]) # Previous Tick
+                t2 = get_digit(res[1]) # Current Tick
+                
+                # Logic: 8->9 or 9->8
+                if (t1 == 8 and t2 == 9) or (t1 == 9 and t2 == 8):
                     for cid in list(users_states.keys()):
                         u = users_states[cid]
                         if u.get("is_running"):
@@ -147,9 +146,9 @@ def global_analysis():
                                 if not u.get("is_trading"):
                                     multiprocessing.Process(target=execute_trade, args=(cid,)).start()
                             else:
-                                bot.send_message(cid, "🚫 Subscription expired! Bot stopped and statistics cleared.")
+                                bot.send_message(cid, "🚫 Subscription Expired! Bot Stopped.")
                                 clear_user_session(cid, u.get("email"))
-            time.sleep(0.5)
+            time.sleep(0.3)
         except:
             if ws: ws.close()
             ws = None; time.sleep(2)
@@ -171,7 +170,7 @@ def execute_trade(chat_id):
             if "buy" in buy_res:
                 new_state = users_states[chat_id].copy(); new_state["is_trading"] = True
                 new_state["active_contract"] = buy_res["buy"]["contract_id"]; users_states[chat_id] = new_state
-                bot.send_message(chat_id, "🚀 Pattern Detected! Entering trade...")
+                bot.send_message(chat_id, "🎯 Pattern Found! Entry: Over 1")
                 time.sleep(8); check_result(chat_id)
         ws.close()
     except: pass
@@ -194,31 +193,27 @@ def check_result(chat_id):
                 new_state["loss_count"] += 1; new_state["current_stake"] *= 9; icon = "❌ LOSS"
             
             new_state["total_profit"] += profit; users_states[chat_id] = new_state
-            
-            stats_msg = (f"{icon} ({profit:.2f})\n"
-                         f"📊 Current Statistics:\n"
-                         f"💰 Total Profit: {new_state['total_profit']:.2f}\n"
-                         f"✅ Wins: {new_state['win_count']}\n"
-                         f"❌ Losses: {new_state['loss_count']}\n"
-                         f"🔄 Next Stake: {new_state['current_stake']:.2f}")
+            stats = (f"{icon} ({profit:.2f})\n"
+                     f"💰 Total Profit: {new_state['total_profit']:.2f}\n"
+                     f"✅ Wins: {new_state['win_count']} | ❌ Losses: {new_state['loss_count']}")
             
             if new_state["total_profit"] >= new_state["tp"]:
-                bot.send_message(chat_id, f"🎯 Target Reached! ({new_state['total_profit']:.2f}). Session cleared.")
+                bot.send_message(chat_id, f"🏆 Target Profit Reached! ({new_state['total_profit']:.2f})\nSession Cleared.")
                 clear_user_session(chat_id, new_state["email"]); return
             
             sync_to_cloud(chat_id)
-            bot.send_message(chat_id, stats_msg)
+            bot.send_message(chat_id, stats)
     except: pass
 
-# --- TELEGRAM BOT HANDLERS (ENGLISH) ---
+# --- TELEGRAM COMMANDS ---
 @bot.message_handler(commands=['start'])
 def start(m):
     user_data = sessions_col.find_one({"chat_id": m.chat.id})
     if user_data and is_authorized(user_data['email']):
         users_states[m.chat.id] = user_data
-        bot.send_message(m.chat.id, "Welcome back! Choose account type:", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰'))
+        bot.send_message(m.chat.id, "Welcome back! Choose account:", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰'))
     else:
-        bot.send_message(m.chat.id, "👋 Welcome! Please enter your authorized email:")
+        bot.send_message(m.chat.id, "👋 Hello! Please enter your authorized email:")
         bot.register_next_step_handler(m, login_process)
 
 def login_process(m):
@@ -226,39 +221,39 @@ def login_process(m):
     if is_authorized(email):
         config = {"chat_id": m.chat.id, "email": email, "api_token": "", "initial_stake": 0.0, "current_stake": 0.0, "tp": 0.0, "currency": "USD", "is_running": False, "is_trading": False, "total_profit": 0.0, "win_count": 0, "loss_count": 0}
         users_states[m.chat.id] = config; sync_to_cloud(m.chat.id)
-        bot.send_message(m.chat.id, "✅ Login Successful!", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰'))
-    else: bot.send_message(m.chat.id, "🚫 Email not authorized or subscription expired.")
+        bot.send_message(m.chat.id, "✅ Success! Choose mode:", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰'))
+    else: bot.send_message(m.chat.id, "🚫 Email not authorized or expired.")
 
 @bot.message_handler(func=lambda m: m.text in ['Demo 🛠️', 'Live 💰'])
 def mode(m):
     if m.chat.id not in users_states: return start(m)
     new_state = users_states[m.chat.id].copy(); new_state["currency"] = "USD" if "Demo" in m.text else "tUSDT"
     users_states[m.chat.id] = new_state
-    bot.send_message(m.chat.id, "Enter your API Token:"); bot.register_next_step_handler(m, save_token)
+    bot.send_message(m.chat.id, "Enter API Token:"); bot.register_next_step_handler(m, save_token)
 
 def save_token(m):
     new_state = users_states[m.chat.id].copy(); new_state["api_token"] = m.text.strip(); users_states[m.chat.id] = new_state
-    bot.send_message(m.chat.id, "Enter Initial Stake:"); bot.register_next_step_handler(m, save_stake)
+    bot.send_message(m.chat.id, "Initial Stake:"); bot.register_next_step_handler(m, save_stake)
 
 def save_stake(m):
     try:
         new_state = users_states[m.chat.id].copy(); val = float(m.text)
         new_state["initial_stake"] = val; new_state["current_stake"] = val; users_states[m.chat.id] = new_state
-        bot.send_message(m.chat.id, "Enter Target Profit (TP):"); bot.register_next_step_handler(m, save_tp)
+        bot.send_message(m.chat.id, "Target Profit (TP):"); bot.register_next_step_handler(m, save_tp)
     except: pass
 
 def save_tp(m):
     try:
         new_state = users_states[m.chat.id].copy(); new_state["tp"] = float(m.text); new_state["is_running"] = True
         users_states[m.chat.id] = new_state; sync_to_cloud(m.chat.id)
-        bot.send_message(m.chat.id, "🚀 Bot Started! Monitoring market...", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
+        bot.send_message(m.chat.id, "🚀 Bot Running! Scanning patterns...", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
     except: pass
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
 def stop_call(m):
     email = users_states[m.chat.id].get("email") if m.chat.id in users_states else ""
     clear_user_session(m.chat.id, email)
-    bot.send_message(m.chat.id, "🛑 Bot Stopped. Trading data and statistics cleared.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰'))
+    bot.send_message(m.chat.id, "🛑 Bot Stopped. Statistics cleared.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰'))
 
 if __name__ == '__main__':
     for doc in sessions_col.find(): 
