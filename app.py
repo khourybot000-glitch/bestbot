@@ -7,8 +7,8 @@ from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
-# --- الإعدادات النهائية بالتوكن الجديد ---
-TOKEN = "8433565422:AAH7Dknm99wv6CjhXQmwo8o_4Oyrh-WiA7Y"
+# --- CONFIGURATION WITH NEW TOKEN ---
+TOKEN = "8433565422:AAHBXp6ja9ZrmNaJP048NTV6TmEqMrderF0"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN)
@@ -19,7 +19,7 @@ sessions_col = db['active_sessions']
 manager = multiprocessing.Manager()
 users_states = manager.dict()
 
-# --- دالة تصفير الجلسة مع الحفاظ على الصلاحية ---
+# --- CLEAR SESSION DATA ---
 def clear_user_session(chat_id, email):
     email = email.lower()
     user_data = sessions_col.find_one({"email": email})
@@ -27,19 +27,19 @@ def clear_user_session(chat_id, email):
     
     if chat_id in users_states:
         del users_states[chat_id]
+    
     sessions_col.delete_one({"chat_id": chat_id})
     
     if expiry:
         sessions_col.update_one({"email": email}, {"$set": {"expiry_date": expiry}}, upsert=True)
 
-# --- فحص الصلاحية ---
+# --- AUTHORIZATION CHECK ---
 def is_authorized(email):
     email = email.strip().lower()
     if not os.path.exists("user_ids.txt"): return False
     with open("user_ids.txt", "r") as f:
         auth_emails = [line.strip().lower() for line in f.readlines()]
     if email not in auth_emails: return False
-
     user_data = sessions_col.find_one({"email": email})
     if user_data and "expiry_date" in user_data:
         try:
@@ -53,115 +53,44 @@ def sync_to_cloud(chat_id):
         data = dict(users_states[chat_id])
         sessions_col.update_one({"chat_id": chat_id}, {"$set": data}, upsert=True)
 
-# --- محرك التحليل المركزي ---
-def global_analysis():
-    ws = None
-    while True:
-        try:
-            if ws is None: ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929")
-            ws.send(json.dumps({"ticks_history": "R_100", "count": 3, "end": "latest", "style": "ticks"}))
-            res = json.loads(ws.recv()).get("history", {}).get("prices", [])
-            if len(res) >= 3:
-                def d(p): return int("{:.2f}".format(p).split('.')[1][1])
-                t1, t2, t3 = d(res[0]), d(res[1]), d(res[2])
-                if (t1 == 9 and t2 == 8 and t3 == 9) or (t1 == 8 and t2 == 9 and t3 == 8):
-                    for cid in list(users_states.keys()):
-                        u = users_states[cid]
-                        if u.get("is_running") and not u.get("is_trading") and is_authorized(u.get("email")):
-                            multiprocessing.Process(target=execute_trade, args=(cid,)).start()
-            time.sleep(0.5)
-        except:
-            if ws: ws.close()
-            ws = None; time.sleep(2)
-
-def execute_trade(chat_id):
-    if chat_id not in users_states: return
-    state = users_states[chat_id]
-    try:
-        ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929")
-        ws.send(json.dumps({"authorize": state["api_token"]}))
-        ws.recv()
-        req = {"proposal": 1, "amount": state["current_stake"], "basis": "stake", 
-               "contract_type": "DIGITOVER", "barrier": "1", "currency": state["currency"], 
-               "duration": 1, "duration_unit": "t", "symbol": "R_100"}
-        ws.send(json.dumps(req))
-        prop = json.loads(ws.recv()).get("proposal")
-        if prop:
-            ws.send(json.dumps({"buy": prop["id"], "price": state["current_stake"]}))
-            buy_res = json.loads(ws.recv())
-            if "buy" in buy_res:
-                new_state = users_states[chat_id].copy()
-                new_state["is_trading"] = True
-                new_state["active_contract"] = buy_res["buy"]["contract_id"]
-                users_states[chat_id] = new_state
-                bot.send_message(chat_id, "🚀 **نمط مكتشف!** جاري دخول صفقة OVER 1...")
-                time.sleep(8)
-                check_result(chat_id)
-        ws.close()
-    except: pass
-
-def check_result(chat_id):
-    if chat_id not in users_states: return
-    state = users_states[chat_id]
-    try:
-        ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929")
-        ws.send(json.dumps({"authorize": state["api_token"]})); ws.recv()
-        ws.send(json.dumps({"proposal_open_contract": 1, "contract_id": state["active_contract"]}))
-        res = json.loads(ws.recv()).get("proposal_open_contract", {})
-        ws.close()
-        if res.get("is_expired") == 1:
-            profit = float(res.get("profit", 0))
-            new_state = users_states[chat_id].copy()
-            new_state["is_trading"] = False
-            if profit > 0:
-                new_state["win_count"] += 1; new_state["current_stake"] = new_state["initial_stake"]; icon = "✅ ربح"
-            else:
-                new_state["loss_count"] += 1; new_state["current_stake"] *= 9; icon = "❌ خسارة"
-            new_state["total_profit"] += profit
-            users_states[chat_id] = new_state
-            
-            if new_state["total_profit"] >= new_state["tp"]:
-                bot.send_message(chat_id, f"🎯 تم الوصول للهدف! ({new_state['total_profit']:.2f}). تم تصفير الجلسة.")
-                clear_user_session(chat_id, new_state["email"])
-                return
-
-            sync_to_cloud(chat_id)
-            bot.send_message(chat_id, f"{icon} ({profit:.2f})\nصافي الأرباح: {new_state['total_profit']:.2f}")
-    except: pass
-
-# --- لوحة التحكم (ستظهر في الرابط الأساسي) ---
+# --- ADMIN PANEL HTML (Arabic/English Mixed for Admin) ---
 ADMIN_HTML = """
 <!DOCTYPE html>
-<html lang="ar" dir="rtl">
+<html lang="en">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>لوحة إدارة المشتركين</title>
+<title>Subscription Management</title>
 <style>
-    body { font-family: 'Segoe UI', sans-serif; background: #f0f2f5; padding: 20px; text-align: center; }
+    body { font-family: sans-serif; background: #f0f2f5; padding: 20px; text-align: center; }
     .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); max-width: 800px; margin: auto; }
     table { width: 100%; border-collapse: collapse; margin-top: 20px; }
     th, td { padding: 12px; border-bottom: 1px solid #eee; }
     th { background: #1a73e8; color: white; }
     .btn-upd { background: #28a745; color: white; border: none; padding: 8px 12px; border-radius: 5px; cursor: pointer; }
     .btn-stop { background: #dc3545; color: white; border: none; padding: 8px 12px; border-radius: 5px; cursor: pointer; }
-    input[type="number"] { width: 50px; padding: 5px; }
 </style>
 </head>
 <body>
     <div class="card">
-        <h2>🛠️ لوحة التحكم بالصلاحيات</h2>
+        <h2>👥 User Subscription Management</h2>
         <table>
-            <tr><th>المستخدم</th><th>تعديل المدة</th><th>الإجراء</th></tr>
+            <tr><th>User Email</th><th>Duration</th><th>Action</th></tr>
             {% for email in emails %}
             <tr>
                 <form method="POST" action="/update_expiry">
                     <td><strong>{{ email }}</strong><input type="hidden" name="email" value="{{ email }}"></td>
                     <td>
-                        <input type="number" name="amount" value="1" min="1">
-                        <select name="unit"><option value="hours">ساعة</option><option value="days">يوم</option></select>
+                        <select name="duration_choice">
+                            <option value="1_hours">1 Hour</option>
+                            <option value="1_days">1 Day</option>
+                            <option value="2_days">2 Days</option>
+                            <option value="5_days">5 Days</option>
+                            <option value="30_days">30 Days</option>
+                            <option value="lifetime">Lifetime (100 Years) ∞</option>
+                        </select>
                     </td>
                     <td>
-                        <button type="submit" name="action" value="update" class="btn-upd">تحديث</button>
-                        <button type="submit" name="action" value="cancel" class="btn-stop">إيقاف</button>
+                        <button type="submit" name="action" value="update" class="btn-upd">Activate</button>
+                        <button type="submit" name="action" value="cancel" class="btn-stop">Stop</button>
                     </td>
                 </form>
             </tr>
@@ -183,25 +112,113 @@ def admin_panel():
 def update_expiry():
     email = request.form.get('email').lower()
     action = request.form.get('action')
+    choice = request.form.get('duration_choice')
     if action == "cancel":
-        expiry_str = "2000-01-01 00:00"; msg = f"🚫 تم إيقاف صلاحية {email}."
+        expiry_str = "2000-01-01 00:00"; msg = f"Subscription Stopped for {email}."
     else:
-        amount = int(request.form.get('amount')); unit = request.form.get('unit')
-        exp = datetime.now() + (timedelta(hours=amount) if unit == "hours" else timedelta(days=amount))
-        expiry_str = exp.strftime("%Y-%m-%d %H:%M"); msg = f"✅ تم تفعيل {email} حتى {expiry_str}"
-    
+        now = datetime.now()
+        if choice == "1_hours": exp = now + timedelta(hours=1)
+        elif choice == "1_days": exp = now + timedelta(days=1)
+        elif choice == "2_days": exp = now + timedelta(days=2)
+        elif choice == "5_days": exp = now + timedelta(days=5)
+        elif choice == "30_days": exp = now + timedelta(days=30)
+        elif choice == "lifetime": exp = now + timedelta(days=36500)
+        expiry_str = exp.strftime("%Y-%m-%d %H:%M")
+        msg = f"Activated for {email} until {expiry_str}"
     sessions_col.update_one({"email": email}, {"$set": {"expiry_date": expiry_str}}, upsert=True)
-    return f"<div dir='rtl'><h3>{msg}</h3><br><a href='/'>العودة للوحة التحكم</a></div>"
+    return f"<h3>{msg}</h3><br><a href='/'>Back to Panel</a>"
 
-# --- أوامر التلجرام ---
+# --- CORE ANALYSIS ENGINE ---
+def global_analysis():
+    ws = None
+    while True:
+        try:
+            if ws is None: ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929")
+            ws.send(json.dumps({"ticks_history": "R_100", "count": 3, "end": "latest", "style": "ticks"}))
+            res = json.loads(ws.recv()).get("history", {}).get("prices", [])
+            if len(res) >= 3:
+                def d(p): return int("{:.2f}".format(p).split('.')[1][1])
+                t1, t2, t3 = d(res[0]), d(res[1]), d(res[2])
+                if (t1 == 9 and t2 == 8 and t3 == 9) or (t1 == 8 and t2 == 9 and t3 == 8):
+                    for cid in list(users_states.keys()):
+                        u = users_states[cid]
+                        if u.get("is_running"):
+                            if is_authorized(u.get("email")):
+                                if not u.get("is_trading"):
+                                    multiprocessing.Process(target=execute_trade, args=(cid,)).start()
+                            else:
+                                bot.send_message(cid, "🚫 Subscription expired! Bot stopped and statistics cleared.")
+                                clear_user_session(cid, u.get("email"))
+            time.sleep(0.5)
+        except:
+            if ws: ws.close()
+            ws = None; time.sleep(2)
+
+def execute_trade(chat_id):
+    if chat_id not in users_states: return
+    state = users_states[chat_id]
+    try:
+        ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929")
+        ws.send(json.dumps({"authorize": state["api_token"]})); ws.recv()
+        req = {"proposal": 1, "amount": state["current_stake"], "basis": "stake", 
+               "contract_type": "DIGITOVER", "barrier": "1", "currency": state["currency"], 
+               "duration": 1, "duration_unit": "t", "symbol": "R_100"}
+        ws.send(json.dumps(req))
+        prop = json.loads(ws.recv()).get("proposal")
+        if prop:
+            ws.send(json.dumps({"buy": prop["id"], "price": state["current_stake"]}))
+            buy_res = json.loads(ws.recv())
+            if "buy" in buy_res:
+                new_state = users_states[chat_id].copy(); new_state["is_trading"] = True
+                new_state["active_contract"] = buy_res["buy"]["contract_id"]; users_states[chat_id] = new_state
+                bot.send_message(chat_id, "🚀 Pattern Detected! Entering trade...")
+                time.sleep(8); check_result(chat_id)
+        ws.close()
+    except: pass
+
+def check_result(chat_id):
+    if chat_id not in users_states: return
+    state = users_states[chat_id]
+    try:
+        ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929")
+        ws.send(json.dumps({"authorize": state["api_token"]})); ws.recv()
+        ws.send(json.dumps({"proposal_open_contract": 1, "contract_id": state["active_contract"]}))
+        res = json.loads(ws.recv()).get("proposal_open_contract", {})
+        ws.close()
+        if res.get("is_expired") == 1:
+            profit = float(res.get("profit", 0))
+            new_state = users_states[chat_id].copy(); new_state["is_trading"] = False
+            if profit > 0:
+                new_state["win_count"] += 1; new_state["current_stake"] = new_state["initial_stake"]; icon = "✅ WIN"
+            else:
+                new_state["loss_count"] += 1; new_state["current_stake"] *= 9; icon = "❌ LOSS"
+            
+            new_state["total_profit"] += profit; users_states[chat_id] = new_state
+            
+            stats_msg = (f"{icon} ({profit:.2f})\n"
+                         f"📊 Current Statistics:\n"
+                         f"💰 Total Profit: {new_state['total_profit']:.2f}\n"
+                         f"✅ Wins: {new_state['win_count']}\n"
+                         f"❌ Losses: {new_state['loss_count']}\n"
+                         f"🔄 Next Stake: {new_state['current_stake']:.2f}")
+            
+            if new_state["total_profit"] >= new_state["tp"]:
+                bot.send_message(chat_id, f"🎯 Target Reached! ({new_state['total_profit']:.2f}). Session cleared.")
+                clear_user_session(chat_id, new_state["email"]); return
+            
+            sync_to_cloud(chat_id)
+            bot.send_message(chat_id, stats_msg)
+    except: pass
+
+# --- TELEGRAM BOT HANDLERS (ENGLISH) ---
 @bot.message_handler(commands=['start'])
 def start(m):
     user_data = sessions_col.find_one({"chat_id": m.chat.id})
     if user_data and is_authorized(user_data['email']):
         users_states[m.chat.id] = user_data
-        bot.send_message(m.chat.id, "أهلاً بك مجدداً! اختر الحساب:", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰'))
+        bot.send_message(m.chat.id, "Welcome back! Choose account type:", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰'))
     else:
-        bot.send_message(m.chat.id, "👋 يرجى إدخال البريد الإلكتروني المعتمد:")
+        bot.send_message(m.chat.id, "👋 Welcome! Please enter your authorized email:")
         bot.register_next_step_handler(m, login_process)
 
 def login_process(m):
@@ -209,47 +226,44 @@ def login_process(m):
     if is_authorized(email):
         config = {"chat_id": m.chat.id, "email": email, "api_token": "", "initial_stake": 0.0, "current_stake": 0.0, "tp": 0.0, "currency": "USD", "is_running": False, "is_trading": False, "total_profit": 0.0, "win_count": 0, "loss_count": 0}
         users_states[m.chat.id] = config; sync_to_cloud(m.chat.id)
-        bot.send_message(m.chat.id, "✅ تسجيل دخول ناجح!", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰'))
-    else:
-        bot.send_message(m.chat.id, "🚫 بريد غير مسموح أو انتهت صلاحيته.")
+        bot.send_message(m.chat.id, "✅ Login Successful!", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰'))
+    else: bot.send_message(m.chat.id, "🚫 Email not authorized or subscription expired.")
 
 @bot.message_handler(func=lambda m: m.text in ['Demo 🛠️', 'Live 💰'])
 def mode(m):
     if m.chat.id not in users_states: return start(m)
     new_state = users_states[m.chat.id].copy(); new_state["currency"] = "USD" if "Demo" in m.text else "tUSDT"
     users_states[m.chat.id] = new_state
-    bot.send_message(m.chat.id, "أدخل الـ API Token:"); bot.register_next_step_handler(m, save_token)
+    bot.send_message(m.chat.id, "Enter your API Token:"); bot.register_next_step_handler(m, save_token)
 
 def save_token(m):
     new_state = users_states[m.chat.id].copy(); new_state["api_token"] = m.text.strip(); users_states[m.chat.id] = new_state
-    bot.send_message(m.chat.id, "أدخل الـ Stake:"); bot.register_next_step_handler(m, save_stake)
+    bot.send_message(m.chat.id, "Enter Initial Stake:"); bot.register_next_step_handler(m, save_stake)
 
 def save_stake(m):
     try:
         new_state = users_states[m.chat.id].copy(); val = float(m.text)
         new_state["initial_stake"] = val; new_state["current_stake"] = val; users_states[m.chat.id] = new_state
-        bot.send_message(m.chat.id, "أدخل الـ Target Profit:"); bot.register_next_step_handler(m, save_tp)
+        bot.send_message(m.chat.id, "Enter Target Profit (TP):"); bot.register_next_step_handler(m, save_tp)
     except: pass
 
 def save_tp(m):
     try:
         new_state = users_states[m.chat.id].copy(); new_state["tp"] = float(m.text); new_state["is_running"] = True
         users_states[m.chat.id] = new_state; sync_to_cloud(m.chat.id)
-        bot.send_message(m.chat.id, "🚀 بدأ البوت العمل!", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
+        bot.send_message(m.chat.id, "🚀 Bot Started! Monitoring market...", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
     except: pass
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
 def stop_call(m):
     email = users_states[m.chat.id].get("email") if m.chat.id in users_states else ""
     clear_user_session(m.chat.id, email)
-    bot.send_message(m.chat.id, "🛑 تم إيقاف البوت ومسح بيانات الجلسة.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰'))
+    bot.send_message(m.chat.id, "🛑 Bot Stopped. Trading data and statistics cleared.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰'))
 
 if __name__ == '__main__':
     for doc in sessions_col.find(): 
         if "chat_id" in doc: users_states[doc['chat_id']] = doc
-    
-    render_port = int(os.environ.get("PORT", 10000))
-    
+    port = int(os.environ.get("PORT", 10000))
     multiprocessing.Process(target=global_analysis, daemon=True).start()
-    multiprocessing.Process(target=lambda: app.run(host='0.0.0.0', port=render_port), daemon=True).start()
+    multiprocessing.Process(target=lambda: app.run(host='0.0.0.0', port=port), daemon=True).start()
     bot.infinity_polling()
