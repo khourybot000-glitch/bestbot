@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION WITH NEW TOKEN ---
-TOKEN = "8433565422:AAHZxJ01RrF3gSm86eyT94_0A4v5vr762_U"
+TOKEN = "8433565422:AAE4gElgK7ERAr2hIJRCRNVozLi0-5z_2NM"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN)
@@ -19,7 +19,7 @@ sessions_col = db['active_sessions']
 manager = multiprocessing.Manager()
 users_states = manager.dict()
 
-# --- UTILITY FUNCTIONS ---
+# --- UTILITIES ---
 def clear_user_session(chat_id, email):
     email = email.lower()
     user_data = sessions_col.find_one({"email": email})
@@ -47,32 +47,30 @@ def sync_to_cloud(chat_id):
         data = dict(users_states[chat_id])
         sessions_col.update_one({"chat_id": chat_id}, {"$set": data}, upsert=True)
 
-# --- ADMIN PANEL HTML (DIRECT ACCESS) ---
+# --- ADMIN PANEL ---
 ADMIN_HTML = """
 <!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Admin Dashboard</title>
 <style>
-    body { font-family: 'Segoe UI', sans-serif; background: #f4f7f9; padding: 20px; text-align: center; }
-    .container { background: white; padding: 30px; border-radius: 15px; box-shadow: 0 5px 20px rgba(0,0,0,0.05); max-width: 900px; margin: auto; }
-    table { width: 100%; border-collapse: collapse; margin-top: 25px; }
-    th, td { padding: 15px; border-bottom: 1px solid #edf2f7; text-align: center; }
-    th { background: #4a5568; color: white; text-transform: uppercase; font-size: 13px; }
-    .btn-upd { background: #38a169; color: white; border: none; padding: 10px 15px; border-radius: 6px; cursor: pointer; font-weight: bold; }
-    .btn-stop { background: #e53e3e; color: white; border: none; padding: 10px 15px; border-radius: 6px; cursor: pointer; font-weight: bold; }
-    select { padding: 8px; border-radius: 6px; border: 1px solid #cbd5e0; }
+    body { font-family: sans-serif; background: #f4f7f9; padding: 20px; text-align: center; }
+    .container { background: white; padding: 30px; border-radius: 15px; box-shadow: 0 5px 20px rgba(0,0,0,0.05); max-width: 800px; margin: auto; }
+    table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+    th, td { padding: 12px; border-bottom: 1px solid #eee; }
+    th { background: #4a5568; color: white; }
+    .btn-upd { background: #38a169; color: white; border: none; padding: 8px 15px; border-radius: 5px; cursor: pointer; }
+    .btn-stop { background: #e53e3e; color: white; border: none; padding: 8px 15px; border-radius: 5px; cursor: pointer; }
 </style>
 </head>
 <body>
     <div class="container">
-        <h2>🚀 Bot Management Panel</h2>
+        <h2>🛠 Admin Management Panel</h2>
         <table>
-            <tr><th>Email Address</th><th>Choose Plan</th><th>Action</th></tr>
+            <tr><th>Email</th><th>Plan</th><th>Action</th></tr>
             {% for email in emails %}
             <tr>
                 <form method="POST" action="/update_expiry">
-                    <td><strong>{{ email }}</strong><input type="hidden" name="email" value="{{ email }}"></td>
+                    <td>{{ email }}<input type="hidden" name="email" value="{{ email }}"></td>
                     <td>
                         <select name="duration_choice">
                             <option value="1_hours">1 Hour</option>
@@ -80,12 +78,12 @@ ADMIN_HTML = """
                             <option value="2_days">2 Days</option>
                             <option value="5_days">5 Days</option>
                             <option value="30_days">30 Days</option>
-                            <option value="lifetime">Lifetime (100 Years) ∞</option>
+                            <option value="lifetime">Lifetime ∞</option>
                         </select>
                     </td>
                     <td>
-                        <button type="submit" name="action" value="update" class="btn-upd">UPDATE</button>
-                        <button type="submit" name="action" value="cancel" class="btn-stop">STOP</button>
+                        <button type="submit" name="action" value="update" class="btn-upd">SET</button>
+                        <button type="submit" name="action" value="cancel" class="btn-stop">OFF</button>
                     </td>
                 </form>
             </tr>
@@ -109,21 +107,17 @@ def update_expiry():
     action = request.form.get('action')
     choice = request.form.get('duration_choice')
     if action == "cancel":
-        expiry_str = "2000-01-01 00:00"; msg = f"User {email} has been DEACTIVATED."
+        expiry_str = "2000-01-01 00:00"; msg = "Subscription Stopped."
     else:
         now = datetime.now()
-        if choice == "1_hours": exp = now + timedelta(hours=1)
-        elif choice == "1_days": exp = now + timedelta(days=1)
-        elif choice == "2_days": exp = now + timedelta(days=2)
-        elif choice == "5_days": exp = now + timedelta(days=5)
-        elif choice == "30_days": exp = now + timedelta(days=30)
-        elif choice == "lifetime": exp = now + timedelta(days=36500)
+        durations = {"1_hours": 1/24, "1_days": 1, "2_days": 2, "5_days": 5, "30_days": 30, "lifetime": 36500}
+        exp = now + timedelta(days=durations.get(choice, 1))
         expiry_str = exp.strftime("%Y-%m-%d %H:%M")
-        msg = f"User {email} ACTIVATED until {expiry_str}"
+        msg = f"Active until {expiry_str}"
     sessions_col.update_one({"email": email}, {"$set": {"expiry_date": expiry_str}}, upsert=True)
-    return f"<div style='text-align:center; padding:50px;'><h2>{msg}</h2><br><a href='/'>Go Back</a></div>"
+    return f"<h3>{msg}</h3><br><a href='/'>Back</a>"
 
-# --- CORE ANALYSIS ENGINE (2-TICKS STRATEGY) ---
+# --- CORE ANALYSIS ENGINE (D2 LOGIC) ---
 def global_analysis():
     ws = None
     while True:
@@ -133,21 +127,19 @@ def global_analysis():
             res = json.loads(ws.recv()).get("history", {}).get("prices", [])
             
             if len(res) >= 2:
-                def get_digit(price): return int("{:.2f}".format(price).split('.')[1][1])
-                t1 = get_digit(res[0]) # Previous Tick
-                t2 = get_digit(res[1]) # Current Tick
+                # D2 Logic: Extract the 2nd digit after decimal
+                def get_d2(price):
+                    return int("{:.2f}".format(price)[-1])
                 
-                # Logic: 8->9 or 9->8
-                if (t1 == 8 and t2 == 9) or (t1 == 9 and t2 == 8):
+                t1d2 = get_d2(res[0]) 
+                t2d2 = get_d2(res[1]) 
+                
+                # Condition: (8-9) or (9-8)
+                if (t1d2 == 8 and t2d2 == 9) or (t1d2 == 9 and t2d2 == 8):
                     for cid in list(users_states.keys()):
                         u = users_states[cid]
-                        if u.get("is_running"):
-                            if is_authorized(u.get("email")):
-                                if not u.get("is_trading"):
-                                    multiprocessing.Process(target=execute_trade, args=(cid,)).start()
-                            else:
-                                bot.send_message(cid, "🚫 Subscription Expired! Bot Stopped.")
-                                clear_user_session(cid, u.get("email"))
+                        if u.get("is_running") and not u.get("is_trading") and is_authorized(u.get("email")):
+                            multiprocessing.Process(target=execute_trade, args=(cid,)).start()
             time.sleep(0.3)
         except:
             if ws: ws.close()
@@ -158,7 +150,12 @@ def execute_trade(chat_id):
     state = users_states[chat_id]
     try:
         ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929")
-        ws.send(json.dumps({"authorize": state["api_token"]})); ws.recv()
+        ws.send(json.dumps({"authorize": state["api_token"]}))
+        auth_res = json.loads(ws.recv())
+        if "error" in auth_res:
+             bot.send_message(chat_id, "❌ API Token Error! Please check your token settings.")
+             ws.close(); return
+
         req = {"proposal": 1, "amount": state["current_stake"], "basis": "stake", 
                "contract_type": "DIGITOVER", "barrier": "1", "currency": state["currency"], 
                "duration": 1, "duration_unit": "t", "symbol": "R_100"}
@@ -170,7 +167,7 @@ def execute_trade(chat_id):
             if "buy" in buy_res:
                 new_state = users_states[chat_id].copy(); new_state["is_trading"] = True
                 new_state["active_contract"] = buy_res["buy"]["contract_id"]; users_states[chat_id] = new_state
-                bot.send_message(chat_id, "🎯 Pattern Found! Entry: Over 1")
+                bot.send_message(chat_id, "🎯 Pattern Found (D2)! Trade Executed.")
                 time.sleep(8); check_result(chat_id)
         ws.close()
     except: pass
@@ -193,19 +190,17 @@ def check_result(chat_id):
                 new_state["loss_count"] += 1; new_state["current_stake"] *= 9; icon = "❌ LOSS"
             
             new_state["total_profit"] += profit; users_states[chat_id] = new_state
-            stats = (f"{icon} ({profit:.2f})\n"
-                     f"💰 Total Profit: {new_state['total_profit']:.2f}\n"
-                     f"✅ Wins: {new_state['win_count']} | ❌ Losses: {new_state['loss_count']}")
+            stats = (f"{icon} ({profit:.2f})\n💰 Total: {new_state['total_profit']:.2f}\n"
+                     f"W: {new_state['win_count']} | L: {new_state['loss_count']}")
             
             if new_state["total_profit"] >= new_state["tp"]:
-                bot.send_message(chat_id, f"🏆 Target Profit Reached! ({new_state['total_profit']:.2f})\nSession Cleared.")
+                bot.send_message(chat_id, f"🏆 Target Reached! Status Cleared.")
                 clear_user_session(chat_id, new_state["email"]); return
             
-            sync_to_cloud(chat_id)
-            bot.send_message(chat_id, stats)
+            sync_to_cloud(chat_id); bot.send_message(chat_id, stats)
     except: pass
 
-# --- TELEGRAM COMMANDS ---
+# --- TELEGRAM HANDLERS ---
 @bot.message_handler(commands=['start'])
 def start(m):
     user_data = sessions_col.find_one({"chat_id": m.chat.id})
@@ -213,7 +208,7 @@ def start(m):
         users_states[m.chat.id] = user_data
         bot.send_message(m.chat.id, "Welcome back! Choose account:", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰'))
     else:
-        bot.send_message(m.chat.id, "👋 Hello! Please enter your authorized email:")
+        bot.send_message(m.chat.id, "👋 Hello! Enter your authorized email:")
         bot.register_next_step_handler(m, login_process)
 
 def login_process(m):
@@ -221,15 +216,15 @@ def login_process(m):
     if is_authorized(email):
         config = {"chat_id": m.chat.id, "email": email, "api_token": "", "initial_stake": 0.0, "current_stake": 0.0, "tp": 0.0, "currency": "USD", "is_running": False, "is_trading": False, "total_profit": 0.0, "win_count": 0, "loss_count": 0}
         users_states[m.chat.id] = config; sync_to_cloud(m.chat.id)
-        bot.send_message(m.chat.id, "✅ Success! Choose mode:", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰'))
-    else: bot.send_message(m.chat.id, "🚫 Email not authorized or expired.")
+        bot.send_message(m.chat.id, "✅ Login Success! Choose mode:", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰'))
+    else: bot.send_message(m.chat.id, "🚫 Email not authorized.")
 
 @bot.message_handler(func=lambda m: m.text in ['Demo 🛠️', 'Live 💰'])
 def mode(m):
     if m.chat.id not in users_states: return start(m)
     new_state = users_states[m.chat.id].copy(); new_state["currency"] = "USD" if "Demo" in m.text else "tUSDT"
     users_states[m.chat.id] = new_state
-    bot.send_message(m.chat.id, "Enter API Token:"); bot.register_next_step_handler(m, save_token)
+    bot.send_message(m.chat.id, "API Token:"); bot.register_next_step_handler(m, save_token)
 
 def save_token(m):
     new_state = users_states[m.chat.id].copy(); new_state["api_token"] = m.text.strip(); users_states[m.chat.id] = new_state
@@ -239,14 +234,14 @@ def save_stake(m):
     try:
         new_state = users_states[m.chat.id].copy(); val = float(m.text)
         new_state["initial_stake"] = val; new_state["current_stake"] = val; users_states[m.chat.id] = new_state
-        bot.send_message(m.chat.id, "Target Profit (TP):"); bot.register_next_step_handler(m, save_tp)
+        bot.send_message(m.chat.id, "Target Profit:"); bot.register_next_step_handler(m, save_tp)
     except: pass
 
 def save_tp(m):
     try:
         new_state = users_states[m.chat.id].copy(); new_state["tp"] = float(m.text); new_state["is_running"] = True
         users_states[m.chat.id] = new_state; sync_to_cloud(m.chat.id)
-        bot.send_message(m.chat.id, "🚀 Bot Running! Scanning patterns...", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
+        bot.send_message(m.chat.id, "🚀 Running! Monitoring D2 patterns...", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
     except: pass
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
