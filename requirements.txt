@@ -1,3 +1,5 @@
-websocket-client
 pyTelegramBotAPI
+websocket-client
 flask
+pymongo
+dnspython
