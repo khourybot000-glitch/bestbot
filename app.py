@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION WITH NEW TOKEN ---
-TOKEN = "8433565422:AAG-FNtP2oUcp1SaYPzmgl3WHEFkN3TUkxk"
+TOKEN = "8433565422:AAG-iZQzkvuAZlILKWLyVqOzSnkyrU7M7LI"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN)
@@ -136,7 +136,7 @@ def main_loop(state_proxy):
                             continue
                         
                         req = {"proposal": 1, "amount": state_proxy["current_stake"], "basis": "stake", 
-                               "contract_type": "DIGITOVER", "barrier": "1", "currency": state_proxy["currency"], 
+                               "contract_type": "DIGITUNDER", "barrier": "8", "currency": state_proxy["currency"], 
                                "duration": 1, "duration_unit": "t", "symbol": "R_100"}
                         ws_persistent.send(json.dumps(req))
                         res_p = json.loads(ws_persistent.recv()).get("proposal")
