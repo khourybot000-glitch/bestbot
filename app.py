@@ -7,8 +7,8 @@ from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
-# --- CONFIGURATION ---
-TOKEN = "8264292822:AAEoA3f_G_NsRdhJhoskXx0lFfBUOj4LrQs"
+# --- CONFIGURATION (UPDATED TOKEN) ---
+TOKEN = "8264292822:AAG5BEftDH01kNCamls-ZIeo4mU9noDWNoA"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN)
@@ -24,25 +24,21 @@ def get_initial_state():
         "currency": "USD", "is_running": False, "chat_id": None,
         "total_profit": 0.0, "win_count": 0, "loss_count": 0, "is_trading": False,
         "consecutive_losses": 0, "active_contract": None, "start_time": 0,
-        "last_execution_time": ""
+        "last_minute": -1, "last_second": -1 
     }
 
 state = manager.dict(get_initial_state())
 
-# --- DATABASE AUTHORIZATION SYSTEM (No more .txt) ---
+# --- MONGODB AUTH SYSTEM ---
 def is_authorized(email):
     email = email.strip().lower()
     user_data = users_col.find_one({"email": email})
-    
-    if not user_data:
-        return False
-    
+    if not user_data: return False
     if "expiry_date" in user_data:
         try:
             expiry_time = datetime.strptime(user_data["expiry_date"], "%Y-%m-%d %H:%M")
             return datetime.now() <= expiry_time
-        except:
-            return False
+        except: return False
     return False
 
 def reset_and_stop(state_proxy, text):
@@ -58,7 +54,7 @@ def reset_and_stop(state_proxy, text):
     initial = get_initial_state()
     for k, v in initial.items(): state_proxy[k] = v
 
-# --- RESULT CHECK ---
+# --- RESULT CHECK (18s Transaction Wait) ---
 def check_result(state_proxy):
     if not state_proxy["active_contract"] or time.time() - state_proxy["start_time"] < 18:
         return
@@ -91,8 +87,8 @@ def check_result(state_proxy):
             stats_msg = (f"{icon} (**{profit:.2f}**)\n"
                          f"━━━━━━━━━━━━━━\n"
                          f"✅ Wins: `{state_proxy['win_count']}` | ❌ Losses: `{state_proxy['loss_count']}`\n"
-                         f"🔄 Consecutive: `{state_proxy['consecutive_losses']}/2`\n"
-                         f"💰 Net: **{state_proxy['total_profit']:.2f}**")
+                         f"🔄 Consecutive Losses: `{state_proxy['consecutive_losses']}/2`\n"
+                         f"💰 Net Profit: **{state_proxy['total_profit']:.2f}**")
             bot.send_message(state_proxy["chat_id"], stats_msg, parse_mode="Markdown")
 
             if state_proxy["consecutive_losses"] >= 2:
@@ -108,60 +104,71 @@ def main_loop(state_proxy):
         try:
             now = datetime.now()
             if state_proxy["is_running"] and not state_proxy["is_trading"] and (now.second == 0 or now.second == 30):
-                current_timestamp = f"{now.minute}:{now.second}"
-                if state_proxy["last_execution_time"] != current_timestamp:
+                if state_proxy["last_second"] != now.second or state_proxy["last_minute"] != now.minute:
+                    state_proxy["last_second"] = now.second
+                    state_proxy["last_minute"] = now.minute
+
                     if ws_persistent is None:
                         ws_persistent = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=10)
                         ws_persistent.send(json.dumps({"authorize": state_proxy["api_token"]}))
                         ws_persistent.recv()
 
                     ws_persistent.send(json.dumps({"ticks_history": "R_100", "count": 45, "end": "latest", "style": "ticks"}))
-                    ticks = json.loads(ws_persistent.recv()).get("history", {}).get("prices", [])
+                    ticks_data = json.loads(ws_persistent.recv())
+                    ticks = ticks_data.get("history", {}).get("prices", [])
                     
                     if len(ticks) == 45:
-                        c1, c2, c3 = ticks[14]-ticks[0], ticks[29]-ticks[15], ticks[44]-ticks[30]
+                        c1 = ticks[14] - ticks[0]
+                        c2 = ticks[29] - ticks[15]
+                        c3 = ticks[44] - ticks[30]
+                        
                         sig = None
-                        if c1 >= 0.6 and c2 <= -0.6 and c3 >= 0.6: sig = "CALL"
-                        elif c1 <= -0.6 and c2 >= 0.6 and c3 <= -0.6: sig = "PUT"
+                        if c1 >= 0.4 and c2 <= -0.4 and c3 >= 0.4:
+                            sig = "CALL"
+                        elif c1 <= -0.4 and c2 >= 0.4 and c3 <= -0.4:
+                            sig = "PUT"
 
                         if sig:
                             barrier = "-0.8" if sig == "CALL" else "+0.8"
                             req = {"proposal": 1, "amount": state_proxy["current_stake"], "basis": "stake", 
                                    "contract_type": sig, "barrier": barrier, "currency": state_proxy["currency"], 
                                    "duration": 5, "duration_unit": "t", "symbol": "R_100"}
+                            
                             ws_persistent.send(json.dumps(req))
-                            res_p = json.loads(ws_persistent.recv()).get("proposal")
-                            if res_p:
-                                ws_persistent.send(json.dumps({"buy": res_p["id"], "price": state_proxy["current_stake"]}))
+                            prop_res = json.loads(ws_persistent.recv()).get("proposal")
+                            
+                            if prop_res:
+                                ws_persistent.send(json.dumps({"buy": prop_res["id"], "price": state_proxy["current_stake"]}))
                                 buy_data = json.loads(ws_persistent.recv())
                                 if "buy" in buy_data:
-                                    bot.send_message(state_proxy["chat_id"], f"🚀 **Trade at :{now.second:02d}**\nSignal: {sig}")
+                                    bot.send_message(state_proxy["chat_id"], f"🚀 **Trade Sent!**\nTime: {now.strftime('%H:%M:%S')}\nSignal: {sig}")
                                     state_proxy["active_contract"] = buy_data["buy"]["contract_id"]
                                     state_proxy["start_time"] = time.time()
                                     state_proxy["is_trading"] = True
-                    state_proxy["last_execution_time"] = current_timestamp
+                    
             elif state_proxy["is_trading"]:
                 check_result(state_proxy)
-            time.sleep(0.5)
+            
+            time.sleep(0.1)
         except:
             if ws_persistent: ws_persistent.close()
             ws_persistent = None; time.sleep(1)
 
-# --- WEB ADMIN PANEL (MONGODB ONLY) ---
+# --- WEB ADMIN PANEL ---
 @app.route('/')
 def home():
-    users = list(users_col.find()) # جلب المستخدمين من Mongo مباشرة
+    users = list(users_col.find())
     html = """
-    <!DOCTYPE html><html><head><title>Cloud Admin Panel</title>
+    <!DOCTYPE html><html><head><title>Admin Panel</title>
     <style>body{font-family:sans-serif;text-align:center;background:#f4f7f6;padding:20px;}
     .card{background:white;width:95%;max-width:900px;margin:auto;padding:25px;border-radius:12px;box-shadow:0 4px 10px rgba(0,0,0,0.1);}
     table{width:100%;border-collapse:collapse;margin-top:20px;}th,td{padding:12px;border:1px solid #ddd;}
     th{background:#333;color:white;}.btn{padding:8px 15px;border:none;border-radius:5px;color:white;cursor:pointer;}
     .btn-add{background:#28a745;}.btn-del{background:#dc3545;}</style></head>
     <body><div class="card"><h2>Database User Management</h2>
-    <form method="POST" action="/add_user"><input type="email" name="email" placeholder="New User Email" required>
+    <form method="POST" action="/add_user"><input type="email" name="email" placeholder="Email" required>
     <select name="duration"><option value="1">1 Day</option><option value="30">30 Days</option><option value="36500">Lifetime</option></select>
-    <button type="submit" class="btn btn-add">Add/Update User</button></form>
+    <button type="submit" class="btn btn-add">Add User</button></form>
     <table><tr><th>Email</th><th>Expiry Date</th><th>Action</th></tr>
     {% for u in users %}<tr><td>{{u.email}}</td><td>{{u.expiry_date}}</td>
     <td><form method="POST" action="/delete_user" style="display:inline;"><input type="hidden" name="email" value="{{u.email}}">
@@ -195,7 +202,7 @@ def login(m):
         state["email"] = e; state["chat_id"] = m.chat.id
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰')
         bot.send_message(m.chat.id, "✅ Authorized!", reply_markup=markup)
-    else: bot.send_message(m.chat.id, "🚫 Access Denied. Email not found or expired in Database.")
+    else: bot.send_message(m.chat.id, "🚫 Access Denied.")
 
 @bot.message_handler(func=lambda m: m.text in ['Demo 🛠️', 'Live 💰'])
 def ask_token(m):
@@ -228,7 +235,7 @@ def save_tp(m):
     try:
         state["tp"] = float(m.text); state["is_running"] = True
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑')
-        bot.send_message(m.chat.id, "🚀 Strategy Running... (Analyzing at :00 and :30)", reply_markup=markup)
+        bot.send_message(m.chat.id, "🚀 Bot Active. Analyzing at :00 and :30.", reply_markup=markup)
     except: bot.send_message(m.chat.id, "Invalid number.")
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
