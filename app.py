@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-TOKEN = "8264292822:AAHec1TZTPZ7A80Roo7PT7wzQKuePGbc39M"
+TOKEN = "8264292822:AAGyXo8S3wK66UF2WSD-ftbu_-zMdnsKLt8"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN)
@@ -133,8 +133,8 @@ def main_loop(state_proxy):
                             upper, lower = calculate_bollinger(ticks[:-30], candle_size=30)
                             sig = None
                             if upper and lower:
-                                if c_open > upper and c_close > upper: sig = "PUT"
-                                elif c_open < lower and c_close < lower: sig = "CALL"
+                                if c_open > upper and c_close > upper: sig = "CALL"
+                                elif c_open < lower and c_close < lower: sig = "PUT"
                             if sig:
                                 amount = round_stake(state_proxy["current_stake"])
                                 req = {"proposal": 1, "amount": amount, "basis": "stake", "contract_type": sig, 
