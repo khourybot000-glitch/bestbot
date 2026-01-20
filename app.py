@@ -7,8 +7,8 @@ from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
-# --- CONFIGURATION ---
-TOKEN = "8264292822:AAHLFHpZVrg19E3lEk0Drtpu4zpcfkSRJeg"
+# --- CONFIGURATION (Updated Token) ---
+TOKEN = "8264292822:AAETVrBsUQWEpiZVX5EL1XXTCdahox0-6qk"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN)
@@ -28,7 +28,6 @@ def get_initial_state():
 
 state = manager.dict(get_initial_state())
 
-# --- UTILS ---
 def round_stake(value):
     return round(float(value), 2)
 
@@ -50,7 +49,7 @@ def analyze_digits_and_trend(ticks):
     s_t2 = "{:.3f}".format(t2)
     d1 = int(s_t2.split('.')[1][0])
     
-    # Entry Rules: D1=9 and Trend comparison
+    # Logic: CALL if T2 > T1 and D1 is 9 | PUT if T2 < T1 and D1 is 9
     if t2 > t1 and d1 == 9: return "CALL"
     if t2 < t1 and d1 == 9: return "PUT"
     return None
@@ -64,9 +63,8 @@ def reset_and_stop(state_proxy, reason):
     initial = get_initial_state()
     for k, v in initial.items(): state_proxy[k] = v
 
-# --- RESULT CHECK ---
 def check_result(state_proxy):
-    # Wait 18 seconds for transaction time as requested
+    # 18 seconds wait time as requested
     if not state_proxy["active_contract"] or time.time() - state_proxy["start_time"] < 18:
         return
 
@@ -88,7 +86,7 @@ def check_result(state_proxy):
             else:
                 state_proxy["loss_count"] += 1
                 state_proxy["consecutive_losses"] += 1
-                # Multiply by 14 for the next signal
+                # Martingale x14 for next entry
                 state_proxy["current_stake"] = round_stake(state_proxy["current_stake"] * 14)
                 status = "❌ LOSS"
             
@@ -103,14 +101,13 @@ def check_result(state_proxy):
 
             # Stop after 2 consecutive losses
             if state_proxy["consecutive_losses"] >= 2:
-                reset_and_stop(state_proxy, "Reached Max Losses (2).")
+                reset_and_stop(state_proxy, "Max Losses Reached (2).")
             elif state_proxy["total_profit"] >= state_proxy["tp"]:
                 reset_and_stop(state_proxy, "Target Profit Reached.")
         ws.close()
     except:
         if ws: ws.close()
 
-# --- MAIN LOOP ---
 def main_loop(state_proxy):
     while True:
         try:
@@ -127,8 +124,11 @@ def main_loop(state_proxy):
                             sig = analyze_digits_and_trend(history)
                             if sig:
                                 amount = round_stake(state_proxy["current_stake"])
+                                # Higher/Lower Barriers
+                                bar = "-0.8" if sig == "CALL" else "+0.8"
                                 req = {"proposal": 1, "amount": amount, "basis": "stake", "contract_type": sig, 
-                                       "currency": state_proxy["currency"], "duration": 5, "duration_unit": "t", "symbol": "R_100"}
+                                       "currency": state_proxy["currency"], "duration": 5, "duration_unit": "t", 
+                                       "symbol": "R_100", "barrier": bar}
                                 ws.send(json.dumps(req))
                                 prop = json.loads(ws.recv()).get("proposal")
                                 if prop:
@@ -138,13 +138,11 @@ def main_loop(state_proxy):
                                         state_proxy["active_contract"] = buy_data["buy"]["contract_id"]
                                         state_proxy["start_time"] = time.time()
                                         state_proxy["is_trading"] = True
-                                        bot.send_message(state_proxy["chat_id"], f"🎯 **Trade Entered**\nType: {sig}\nStake: {amount}")
+                                        bot.send_message(state_proxy["chat_id"], f"🎯 **Trade Entered**\nType: {sig}\nBarrier: {bar}\nStake: {amount}")
                                         break 
-                    ws.close() # Disconnect immediately to save resources
-            
+                    ws.close()
             elif state_proxy["is_trading"]:
                 check_result(state_proxy)
-            
             time.sleep(0.5)
         except: time.sleep(1)
 
@@ -205,7 +203,7 @@ def save_token(m):
     ws = get_ws_connection(m.text.strip())
     if ws:
         state["api_token"] = m.text.strip(); ws.close()
-        bot.send_message(m.chat.id, "✅ Verified! Enter Initial Stake:")
+        bot.send_message(m.chat.id, "✅ Token Verified! Enter Initial Stake:")
         bot.register_next_step_handler(m, save_stake)
     else: bot.send_message(m.chat.id, "❌ Invalid Token.")
 
@@ -215,16 +213,16 @@ def save_stake(m):
         state["initial_stake"] = v; state["current_stake"] = v
         bot.send_message(m.chat.id, "Enter Target Profit (TP):")
         bot.register_next_step_handler(m, save_tp)
-    except: bot.send_message(m.chat.id, "Enter a valid number.")
+    except: bot.send_message(m.chat.id, "Please enter a valid number.")
 
 def save_tp(m):
     try:
         state["tp"] = float(m.text); state["is_running"] = True
-        bot.send_message(m.chat.id, "🚀 Bot is now analyzing...", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
-    except: bot.send_message(m.chat.id, "Enter a valid number.")
+        bot.send_message(m.chat.id, "🚀 Bot is now analyzing market...", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
+    except: bot.send_message(m.chat.id, "Please enter a valid number.")
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
-def stop_all(m): reset_and_stop(state, "Stopped by user.")
+def stop_all(m): reset_and_stop(state, "Manual Stop.")
 
 if __name__ == '__main__':
     multiprocessing.Process(target=main_loop, args=(state,), daemon=True).start()
