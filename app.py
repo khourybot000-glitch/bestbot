@@ -7,8 +7,8 @@ from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
-# --- CONFIGURATION (Updated Token) ---
-TOKEN = "8264292822:AAFSn3BDobAoyznTr2IlVhVo7qsI-4tlT-0"
+# --- CONFIGURATION ---
+TOKEN = "8264292822:AAGmc8cFyHBUbbp3BOFZggwQ2B3oIY63K9w"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN)
@@ -44,13 +44,14 @@ def get_ws_connection(api_token, retries=5):
         except: time.sleep(1)
     return None
 
-def analyze_trend(ticks):
+def analyze_trend_reversed(ticks):
     if len(ticks) < 450: return None
-    # تحليل توافق الاتجاه في 3 فترات مختلفة
+    # عكس الإشارة: إذا كان الاتجاه (450، 150، 30) صاعداً يدخل PUT
     if ticks[-1] > ticks[-450] and ticks[-1] > ticks[-150] and ticks[-1] > ticks[-30]:
-        return "CALL"
-    if ticks[-1] < ticks[-450] and ticks[-1] < ticks[-150] and ticks[-1] < ticks[-30]:
         return "PUT"
+    # عكس الإشارة: إذا كان الاتجاه هابطاً يدخل CALL
+    if ticks[-1] < ticks[-450] and ticks[-1] < ticks[-150] and ticks[-1] < ticks[-30]:
+        return "CALL"
     return None
 
 def is_authorized(email):
@@ -66,10 +67,9 @@ def reset_and_stop(state_proxy, text):
     initial = get_initial_state()
     for k, v in initial.items(): state_proxy[k] = v
 
-# --- RESULT CHECK ---
+# --- RESULT CHECK (64s) ---
 def check_result(state_proxy):
-    # مدة الصفقة 5 دقائق + 18 ثانية تأكيد
-    if not state_proxy["active_contract"] or time.time() - state_proxy["start_time"] < 318:
+    if not state_proxy["active_contract"] or time.time() - state_proxy["start_time"] < 64:
         return
     ws = get_ws_connection(state_proxy["api_token"])
     if not ws: return
@@ -89,7 +89,7 @@ def check_result(state_proxy):
                 else:
                     state_proxy["loss_count"] += 1
                     state_proxy["consecutive_losses"] += 1
-                    # يجهز مبلغ المضاعفة للفرصة القادمة (غير فورية)
+                    # مضاعفة لـ 2.2 للفرصة التالية
                     state_proxy["current_stake"] = round_stake(state_proxy["current_stake"] * 2.2)
                     icon = "❌ LOSS"
                 
@@ -99,12 +99,13 @@ def check_result(state_proxy):
 
                 stats_msg = (f"{icon} (**{profit:.2f}**)\n━━━━━━━━━━━━━━\n"
                              f"✅ Wins: `{state_proxy['win_count']}` | ❌ Losses: `{state_proxy['loss_count']}`\n"
-                             f"🔄 Martingale Step: `{state_proxy['consecutive_losses']}/5`\n"
+                             f"🔄 Martingale Step: `{state_proxy['consecutive_losses']}/4`\n"
                              f"💰 Net Profit: **{state_proxy['total_profit']:.2f}**")
                 bot.send_message(state_proxy["chat_id"], stats_msg, parse_mode="Markdown")
 
-                if state_proxy["consecutive_losses"] >= 5:
-                    reset_and_stop(state_proxy, "Stopped: 5 Consecutive Losses.")
+                # التوقف بعد 4 خسائر متتالية
+                if state_proxy["consecutive_losses"] >= 4:
+                    reset_and_stop(state_proxy, "Stopped: 4 Consecutive Losses.")
                 elif state_proxy["total_profit"] >= state_proxy["tp"]:
                     reset_and_stop(state_proxy, "Target Profit Reached!")
                 break
@@ -120,7 +121,6 @@ def main_loop(state_proxy):
         try:
             now = datetime.now()
             if state_proxy["is_running"] and not state_proxy["is_trading"]:
-                # تحليل فقط عند بداية شمعة الـ 15 دقيقة
                 if now.minute % 15 == 0 and now.second == 0 and now.minute != state_proxy["last_minute"]:
                     state_proxy["last_minute"] = now.minute
                     ws = get_ws_connection(state_proxy["api_token"])
@@ -130,11 +130,11 @@ def main_loop(state_proxy):
                         prices = [float(p) for p in ticks_res.get("history", {}).get("prices", [])]
                         
                         if len(prices) >= 450:
-                            sig = analyze_trend(prices)
+                            sig = analyze_trend_reversed(prices)
                             if sig:
                                 amount = round_stake(state_proxy["current_stake"])
                                 req = {"proposal": 1, "amount": amount, "basis": "stake", "contract_type": sig, 
-                                       "currency": state_proxy["currency"], "duration": 5, "duration_unit": "m", "symbol": "R_100"}
+                                       "currency": state_proxy["currency"], "duration": 1, "duration_unit": "m", "symbol": "R_100"}
                                 ws.send(json.dumps(req))
                                 prop = json.loads(ws.recv()).get("proposal")
                                 if prop:
@@ -142,7 +142,7 @@ def main_loop(state_proxy):
                                     buy_data = json.loads(ws.recv())
                                     if "buy" in buy_data:
                                         msg_txt = "🔄 Martingale Signal" if state_proxy["consecutive_losses"] > 0 else "🚀 New Signal"
-                                        bot.send_message(state_proxy["chat_id"], f"**{msg_txt}**\nAnalysis: {sig}\nStake: {amount}")
+                                        bot.send_message(state_proxy["chat_id"], f"**{msg_txt}**\nAnalysis: {sig} (1m)\nStake: {amount}")
                                         state_proxy["active_contract"] = buy_data["buy"]["contract_id"]
                                         state_proxy["start_time"] = time.time()
                                         state_proxy["is_trading"] = True
