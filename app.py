@@ -1,4 +1,4 @@
-import websocket, json, time, multiprocessing, os, math
+import websocket, json, time, multiprocessing, os
 from flask import Flask, render_template_string, request, redirect
 import telebot
 from telebot import types
@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-TOKEN = "8264292822:AAGmc8cFyHBUbbp3BOFZggwQ2B3oIY63K9w"
+TOKEN = "8264292822:AAHLFHpZVrg19E3lEk0Drtpu4zpcfkSRJeg"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN)
@@ -23,8 +23,7 @@ def get_initial_state():
         "email": "", "api_token": "", "initial_stake": 0.0, "current_stake": 0.0, "tp": 0.0, 
         "currency": "USD", "is_running": False, "chat_id": None,
         "total_profit": 0.0, "win_count": 0, "loss_count": 0, "is_trading": False,
-        "consecutive_losses": 0, "active_contract": None, "start_time": 0,
-        "last_minute": -1, "last_direction": "" 
+        "consecutive_losses": 0, "active_contract": None, "start_time": 0
     }
 
 state = manager.dict(get_initial_state())
@@ -33,84 +32,80 @@ state = manager.dict(get_initial_state())
 def round_stake(value):
     return round(float(value), 2)
 
-def get_ws_connection(api_token, retries=5):
-    for i in range(retries):
-        try:
-            ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=10)
-            ws.send(json.dumps({"authorize": api_token}))
-            res = json.loads(ws.recv())
-            if "authorize" in res: return ws
-            ws.close()
-        except: time.sleep(1)
+def get_ws_connection(api_token):
+    try:
+        ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=10)
+        ws.send(json.dumps({"authorize": api_token}))
+        res = json.loads(ws.recv())
+        if "authorize" in res: return ws
+        ws.close()
+    except: return None
     return None
 
-def analyze_trend_reversed(ticks):
-    if len(ticks) < 450: return None
-    # عكس الإشارة: إذا كان الاتجاه (450، 150، 30) صاعداً يدخل PUT
-    if ticks[-1] > ticks[-450] and ticks[-1] > ticks[-150] and ticks[-1] > ticks[-30]:
-        return "PUT"
-    # عكس الإشارة: إذا كان الاتجاه هابطاً يدخل CALL
-    if ticks[-1] < ticks[-450] and ticks[-1] < ticks[-150] and ticks[-1] < ticks[-30]:
-        return "CALL"
+def analyze_digits_and_trend(ticks):
+    if len(ticks) < 2: return None
+    t1, t2 = ticks[-2], ticks[-1]
+    
+    # Extract D1 (First digit after decimal)
+    s_t2 = "{:.3f}".format(t2)
+    d1 = int(s_t2.split('.')[1][0])
+    
+    # Entry Rules: D1=9 and Trend comparison
+    if t2 > t1 and d1 == 9: return "CALL"
+    if t2 < t1 and d1 == 9: return "PUT"
     return None
 
-def is_authorized(email):
-    user_data = users_col.find_one({"email": email.strip().lower()})
-    return user_data and (datetime.now() <= datetime.strptime(user_data["expiry_date"], "%Y-%m-%d %H:%M"))
-
-def reset_and_stop(state_proxy, text):
+def reset_and_stop(state_proxy, reason):
     if state_proxy["chat_id"]:
-        report = (f"🛑 **SESSION TERMINATED**\n━━━━━━━━━━━━━━\n"
+        report = (f"🛑 **BOT STOPPED**\n━━━━━━━━━━━━━━\n"
                   f"✅ Wins: `{state_proxy['win_count']}` | ❌ Losses: `{state_proxy['loss_count']}`\n"
-                  f"💰 Final Profit: **{state_proxy['total_profit']:.2f}**\n📝 Reason: {text}")
+                  f"💰 Total Profit: **{state_proxy['total_profit']:.2f}**\n📝 Reason: {reason}")
         bot.send_message(state_proxy["chat_id"], report, parse_mode="Markdown")
     initial = get_initial_state()
     for k, v in initial.items(): state_proxy[k] = v
 
-# --- RESULT CHECK (64s) ---
+# --- RESULT CHECK ---
 def check_result(state_proxy):
-    if not state_proxy["active_contract"] or time.time() - state_proxy["start_time"] < 64:
+    # Wait 18 seconds for transaction time as requested
+    if not state_proxy["active_contract"] or time.time() - state_proxy["start_time"] < 18:
         return
+
     ws = get_ws_connection(state_proxy["api_token"])
     if not ws: return
+    
     try:
-        while True:
-            ws.send(json.dumps({"proposal_open_contract": 1, "contract_id": state_proxy["active_contract"]}))
-            res = json.loads(ws.recv())
-            contract = res.get("proposal_open_contract", {})
-            if contract.get("is_expired") == 1:
-                profit = float(contract.get("profit", 0))
-                
-                if profit > 0:
-                    state_proxy["win_count"] += 1
-                    state_proxy["consecutive_losses"] = 0
-                    state_proxy["current_stake"] = round_stake(state_proxy["initial_stake"])
-                    icon = "✅ WIN"
-                else:
-                    state_proxy["loss_count"] += 1
-                    state_proxy["consecutive_losses"] += 1
-                    # مضاعفة لـ 2.2 للفرصة التالية
-                    state_proxy["current_stake"] = round_stake(state_proxy["current_stake"] * 2.2)
-                    icon = "❌ LOSS"
-                
-                state_proxy["total_profit"] += profit
-                state_proxy["active_contract"] = None 
-                state_proxy["is_trading"] = False
-
-                stats_msg = (f"{icon} (**{profit:.2f}**)\n━━━━━━━━━━━━━━\n"
-                             f"✅ Wins: `{state_proxy['win_count']}` | ❌ Losses: `{state_proxy['loss_count']}`\n"
-                             f"🔄 Martingale Step: `{state_proxy['consecutive_losses']}/4`\n"
-                             f"💰 Net Profit: **{state_proxy['total_profit']:.2f}**")
-                bot.send_message(state_proxy["chat_id"], stats_msg, parse_mode="Markdown")
-
-                # التوقف بعد 4 خسائر متتالية
-                if state_proxy["consecutive_losses"] >= 4:
-                    reset_and_stop(state_proxy, "Stopped: 4 Consecutive Losses.")
-                elif state_proxy["total_profit"] >= state_proxy["tp"]:
-                    reset_and_stop(state_proxy, "Target Profit Reached!")
-                break
+        ws.send(json.dumps({"proposal_open_contract": 1, "contract_id": state_proxy["active_contract"]}))
+        res = json.loads(ws.recv())
+        contract = res.get("proposal_open_contract", {})
+        
+        if contract.get("is_expired") == 1:
+            profit = float(contract.get("profit", 0))
+            if profit > 0:
+                state_proxy["win_count"] += 1
+                state_proxy["consecutive_losses"] = 0
+                state_proxy["current_stake"] = round_stake(state_proxy["initial_stake"])
+                status = "✅ WIN"
             else:
-                time.sleep(1)
+                state_proxy["loss_count"] += 1
+                state_proxy["consecutive_losses"] += 1
+                # Multiply by 14 for the next signal
+                state_proxy["current_stake"] = round_stake(state_proxy["current_stake"] * 14)
+                status = "❌ LOSS"
+            
+            state_proxy["total_profit"] += profit
+            state_proxy["active_contract"] = None 
+            state_proxy["is_trading"] = False
+
+            stats_msg = (f"{status} (**{profit:.2f}**)\n━━━━━━━━━━━━━━\n"
+                         f"📊 Net Profit: **{state_proxy['total_profit']:.2f}**\n"
+                         f"🔄 Attempt: `{state_proxy['consecutive_losses']}/2`")
+            bot.send_message(state_proxy["chat_id"], stats_msg, parse_mode="Markdown")
+
+            # Stop after 2 consecutive losses
+            if state_proxy["consecutive_losses"] >= 2:
+                reset_and_stop(state_proxy, "Reached Max Losses (2).")
+            elif state_proxy["total_profit"] >= state_proxy["tp"]:
+                reset_and_stop(state_proxy, "Target Profit Reached.")
         ws.close()
     except:
         if ws: ws.close()
@@ -119,40 +114,41 @@ def check_result(state_proxy):
 def main_loop(state_proxy):
     while True:
         try:
-            now = datetime.now()
             if state_proxy["is_running"] and not state_proxy["is_trading"]:
-                if now.minute % 15 == 0 and now.second == 0 and now.minute != state_proxy["last_minute"]:
-                    state_proxy["last_minute"] = now.minute
-                    ws = get_ws_connection(state_proxy["api_token"])
-                    if ws:
-                        ws.send(json.dumps({"ticks_history": "R_100", "count": 450, "end": "latest", "style": "ticks"}))
-                        ticks_res = json.loads(ws.recv())
-                        prices = [float(p) for p in ticks_res.get("history", {}).get("prices", [])]
-                        
-                        if len(prices) >= 450:
-                            sig = analyze_trend_reversed(prices)
+                ws = get_ws_connection(state_proxy["api_token"])
+                if ws:
+                    ws.send(json.dumps({"ticks": "R_100"}))
+                    while state_proxy["is_running"] and not state_proxy["is_trading"]:
+                        res = json.loads(ws.recv())
+                        if "tick" in res:
+                            ws.send(json.dumps({"ticks_history": "R_100", "count": 2, "end": "latest", "style": "ticks"}))
+                            history = json.loads(ws.recv()).get("history", {}).get("prices", [])
+                            
+                            sig = analyze_digits_and_trend(history)
                             if sig:
                                 amount = round_stake(state_proxy["current_stake"])
                                 req = {"proposal": 1, "amount": amount, "basis": "stake", "contract_type": sig, 
-                                       "currency": state_proxy["currency"], "duration": 1, "duration_unit": "m", "symbol": "R_100"}
+                                       "currency": state_proxy["currency"], "duration": 5, "duration_unit": "t", "symbol": "R_100"}
                                 ws.send(json.dumps(req))
                                 prop = json.loads(ws.recv()).get("proposal")
                                 if prop:
                                     ws.send(json.dumps({"buy": prop["id"], "price": amount}))
                                     buy_data = json.loads(ws.recv())
                                     if "buy" in buy_data:
-                                        msg_txt = "🔄 Martingale Signal" if state_proxy["consecutive_losses"] > 0 else "🚀 New Signal"
-                                        bot.send_message(state_proxy["chat_id"], f"**{msg_txt}**\nAnalysis: {sig} (1m)\nStake: {amount}")
                                         state_proxy["active_contract"] = buy_data["buy"]["contract_id"]
                                         state_proxy["start_time"] = time.time()
                                         state_proxy["is_trading"] = True
-                        ws.close()
+                                        bot.send_message(state_proxy["chat_id"], f"🎯 **Trade Entered**\nType: {sig}\nStake: {amount}")
+                                        break 
+                    ws.close() # Disconnect immediately to save resources
+            
             elif state_proxy["is_trading"]:
                 check_result(state_proxy)
+            
             time.sleep(0.5)
         except: time.sleep(1)
 
-# --- THE ORIGINAL HTML ADMIN PANEL ---
+# --- ADMIN PANEL ---
 @app.route('/')
 def home():
     users = list(users_col.find())
@@ -186,14 +182,16 @@ def delete_user():
     users_col.delete_one({"email": request.form.get('email').lower()})
     return redirect('/')
 
+# --- BOT HANDLERS ---
 @bot.message_handler(commands=['start'])
 def welcome(m):
-    bot.send_message(m.chat.id, "👋 Hello! Please enter your registered email:")
+    bot.send_message(m.chat.id, "👋 Welcome! Please enter your registered email:")
     bot.register_next_step_handler(m, login)
 
 def login(m):
     e = m.text.strip().lower()
-    if is_authorized(e):
+    user_data = users_col.find_one({"email": e})
+    if user_data and (datetime.now() <= datetime.strptime(user_data["expiry_date"], "%Y-%m-%d %H:%M")):
         state["email"] = e; state["chat_id"] = m.chat.id
         bot.send_message(m.chat.id, "✅ Authorized!", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰'))
     else: bot.send_message(m.chat.id, "🚫 Access Denied.")
@@ -207,7 +205,7 @@ def save_token(m):
     ws = get_ws_connection(m.text.strip())
     if ws:
         state["api_token"] = m.text.strip(); ws.close()
-        bot.send_message(m.chat.id, "✅ Verified! Stake:")
+        bot.send_message(m.chat.id, "✅ Verified! Enter Initial Stake:")
         bot.register_next_step_handler(m, save_stake)
     else: bot.send_message(m.chat.id, "❌ Invalid Token.")
 
@@ -215,15 +213,15 @@ def save_stake(m):
     try:
         v = round_stake(m.text)
         state["initial_stake"] = v; state["current_stake"] = v
-        bot.send_message(m.chat.id, "Target Profit:")
+        bot.send_message(m.chat.id, "Enter Target Profit (TP):")
         bot.register_next_step_handler(m, save_tp)
-    except: bot.send_message(m.chat.id, "Invalid number.")
+    except: bot.send_message(m.chat.id, "Enter a valid number.")
 
 def save_tp(m):
     try:
         state["tp"] = float(m.text); state["is_running"] = True
-        bot.send_message(m.chat.id, "🚀 Bot Active.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
-    except: bot.send_message(m.chat.id, "Invalid number.")
+        bot.send_message(m.chat.id, "🚀 Bot is now analyzing...", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
+    except: bot.send_message(m.chat.id, "Enter a valid number.")
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
 def stop_all(m): reset_and_stop(state, "Stopped by user.")
