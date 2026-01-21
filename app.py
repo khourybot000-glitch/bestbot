@@ -9,7 +9,7 @@ app = Flask(__name__)
 
 # --- CONFIGURATION ---
 # التوكن الجديد المستبدل بناءً على طلبك
-TOKEN = "8433565422:AAHTcT7FKY6qcyVF7DrAab4qr7bbPPN_UYY"
+TOKEN = "8433565422:AAEGAuNi2UEj7UA_GCw1AYb4IpaTAmNOi7M"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN)
@@ -76,7 +76,7 @@ def reset_and_stop(state_proxy, reason):
 
 def check_result(state_proxy):
     # انتظار 18 ثانية قبل فحص النتيجة
-    if not state_proxy["active_contract"] or time.time() - state_proxy["start_time"] < 18:
+    if not state_proxy["active_contract"] or time.time() - state_proxy["start_time"] < 20:
         return
 
     ws = get_ws_connection(state_proxy["api_token"])
@@ -98,7 +98,7 @@ def check_result(state_proxy):
                 state_proxy["loss_count"] += 1
                 state_proxy["consecutive_losses"] += 1
                 # الضرب في 19 عند الخسارة
-                state_proxy["current_stake"] = round_stake(state_proxy["current_stake"] * 19)
+                state_proxy["current_stake"] = round_stake(state_proxy["current_stake"] * 24)
                 status = "❌ LOSS"
             
             state_proxy["total_profit"] += profit
@@ -137,9 +137,9 @@ def main_loop(state_proxy):
                             sig = analyze_digits_and_trend(history)
                             if sig:
                                 amount = round_stake(state_proxy["current_stake"])
-                                bar = "-0.8" if sig == "CALL" else "+0.8"
+                                bar = "-1" if sig == "CALL" else "+1"
                                 req = {"proposal": 1, "amount": amount, "basis": "stake", "contract_type": sig, 
-                                       "currency": state_proxy["currency"], "duration": 5, "duration_unit": "t", 
+                                       "currency": state_proxy["currency"], "duration": 6, "duration_unit": "t", 
                                        "symbol": "R_100", "barrier": bar}
                                 ws.send(json.dumps(req))
                                 prop = json.loads(ws.recv()).get("proposal")
