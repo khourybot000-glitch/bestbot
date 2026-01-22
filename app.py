@@ -8,7 +8,8 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-TOKEN = "8433565422:AAHxSjZTwsRiKXg4TniyDfLZzpZ2mznDxRY"
+# التوكن الجديد الذي طلبت استبداله
+TOKEN = "8433565422:AAF64ILzY4YViO8tNxhi4oJPGchA81zJdQU"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN)
@@ -23,8 +24,7 @@ def get_initial_state():
         "email": "", "api_token": "", "initial_stake": 0.0, "current_stake": 0.0, "tp": 0.0, 
         "currency": "USD", "is_running": False, "chat_id": None,
         "total_profit": 0.0, "win_count": 0, "loss_count": 0, "is_trading": False,
-        "consecutive_losses": 0, "active_contract": None, "start_time": 0,
-        "last_direction": None 
+        "consecutive_losses": 0, "active_contract": None, "start_time": 0
     }
 
 state = manager.dict(get_initial_state())
@@ -43,14 +43,16 @@ def get_ws_connection(api_token):
     return None
 
 def analyze_price_difference(ticks):
-    if len(ticks) < 10: return None
+    if len(ticks) < 15: return None
     current_tick = ticks[-1]   
-    old_tick = ticks[-10]      
+    old_tick = ticks[-15] # تحليل 15 تيك بناءً على طلبك
     diff = current_tick - old_tick
     
-    # تم تعديل الفرق ليصبح 2 (مع بقاء عكس الإشارة)
-    if diff >= 2: return "PUT"
-    elif diff <= -2: return "CALL"
+    # إشارات مباشرة (بدون عكس): صعود = CALL، هبوط = PUT
+    if diff >= 2: 
+        return "CALL"
+    elif diff <= -2: 
+        return "PUT"
     return None
 
 def reset_and_stop(state_proxy, reason):
@@ -58,7 +60,7 @@ def reset_and_stop(state_proxy, reason):
         report = (f"🛑 **SESSION ENDED**\n━━━━━━━━━━━━━━\n"
                   f"✅ Wins: `{state_proxy['win_count']}`\n"
                   f"❌ Losses: `{state_proxy['loss_count']}`\n"
-                  f"💰 Profit: **{state_proxy['total_profit']:.2f}**\n"
+                  f"💰 Final Profit: **{state_proxy['total_profit']:.2f}**\n"
                   f"📝 Reason: {reason}")
         bot.send_message(state_proxy["chat_id"], report, parse_mode="Markdown")
     initial = get_initial_state()
@@ -66,13 +68,13 @@ def reset_and_stop(state_proxy, reason):
 
 def execute_trade(state_proxy, ws, direction):
     amount = round_stake(state_proxy["current_stake"])
-    # الحاجز تم ضبطه ليصبح 0.8
-    bar = "-0.8" if direction == "CALL" else "+0.8"
+    # الحاجز 1.4
+    bar = "-1.4" if direction == "CALL" else "+1.4"
     
     req = {
         "proposal": 1, "amount": amount, "basis": "stake", 
         "contract_type": direction, "currency": state_proxy["currency"], 
-        "duration": 5, "duration_unit": "t", # مدة الصفقة 5 تيكات
+        "duration": 30, "duration_unit": "s", # مدة الصفقة 30 ثانية
         "symbol": "R_100", "barrier": bar
     }
     ws.send(json.dumps(req))
@@ -84,14 +86,13 @@ def execute_trade(state_proxy, ws, direction):
             state_proxy["active_contract"] = buy_data["buy"]["contract_id"]
             state_proxy["start_time"] = time.time()
             state_proxy["is_trading"] = True
-            state_proxy["last_direction"] = direction
-            bot.send_message(state_proxy["chat_id"], f"🎯 **Entry: {direction}**\nStake: {amount}")
+            bot.send_message(state_proxy["chat_id"], f"🎯 **Direct Entry: {direction}**\nStake: {amount}")
             return True
     return False
 
 def check_result(state_proxy):
-    # انتظار 18 ثانية لفحص النتيجة
-    if not state_proxy["active_contract"] or time.time() - state_proxy["start_time"] < 18:
+    # انتظار 40 ثانية للفحص بناءً على طلبك
+    if not state_proxy["active_contract"] or time.time() - state_proxy["start_time"] < 40:
         return
 
     ws = get_ws_connection(state_proxy["api_token"])
@@ -104,30 +105,22 @@ def check_result(state_proxy):
         
         if contract.get("is_expired") == 1:
             profit = float(contract.get("profit", 0))
-            last_dir = state_proxy["last_direction"]
             
             if profit > 0:
                 state_proxy["win_count"] += 1
                 state_proxy["consecutive_losses"] = 0
                 state_proxy["current_stake"] = round_stake(state_proxy["initial_stake"])
-                state_proxy["total_profit"] += profit
-                state_proxy["active_contract"] = None 
-                state_proxy["is_trading"] = False
                 status = "✅ WIN"
             else:
                 state_proxy["loss_count"] += 1
                 state_proxy["consecutive_losses"] += 1
-                state_proxy["total_profit"] += profit
-                # المضاعفة ×24
-                state_proxy["current_stake"] = round_stake(state_proxy["current_stake"] * 24)
+                # المضاعفة x19 في الفرصة القادمة
+                state_proxy["current_stake"] = round_stake(state_proxy["current_stake"] * 19)
                 status = "❌ LOSS"
-                
-                # تنفيذ المضاعفة الفورية في نفس الاتجاه
-                if state_proxy["consecutive_losses"] < 2:
-                    execute_trade(state_proxy, ws, last_dir)
-                else:
-                    state_proxy["active_contract"] = None 
-                    state_proxy["is_trading"] = False
+            
+            state_proxy["total_profit"] += profit
+            state_proxy["active_contract"] = None 
+            state_proxy["is_trading"] = False
 
             stats_msg = (f"{status} (**{profit:.2f}**)\n━━━━━━━━━━━━━━\n"
                          f"✅ Wins: `{state_proxy['win_count']}`\n"
@@ -150,11 +143,12 @@ def main_loop(state_proxy):
         try:
             if state_proxy["is_running"] and not state_proxy["is_trading"]:
                 current_second = datetime.now().second
-                if current_second in [0, 20, 40] and current_second != last_trigger_second:
+                # التحليل عند الثانية 30 فقط بناءً على طلبك
+                if current_second == 30 and current_second != last_trigger_second:
                     last_trigger_second = current_second
                     ws = get_ws_connection(state_proxy["api_token"])
                     if ws:
-                        ws.send(json.dumps({"ticks_history": "R_100", "count": 10, "end": "latest", "style": "ticks"}))
+                        ws.send(json.dumps({"ticks_history": "R_100", "count": 15, "end": "latest", "style": "ticks"}))
                         history = json.loads(ws.recv()).get("history", {}).get("prices", [])
                         sig = analyze_price_difference(history)
                         if sig:
@@ -165,7 +159,7 @@ def main_loop(state_proxy):
             time.sleep(0.5)
         except: time.sleep(1)
 
-# --- بقية دوال الواجهة (Login, Admin Panel, الخ) كما هي ---
+# --- BOT INTERFACE & ADMIN PANEL ---
 @bot.message_handler(commands=['start'])
 def welcome(m):
     bot.send_message(m.chat.id, "👋 Welcome! Enter your registered email:")
@@ -203,7 +197,7 @@ def save_stake(m):
 def save_tp(m):
     try:
         state["tp"] = float(m.text); state["is_running"] = True
-        bot.send_message(m.chat.id, "🚀 Running Time Strategy (Diff >= 2)...", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
+        bot.send_message(m.chat.id, "🚀 Running 30s Strategy (Direct)...", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
     except: bot.send_message(m.chat.id, "Error.")
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
