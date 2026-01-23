@@ -9,7 +9,7 @@ app = Flask(__name__)
 
 # --- CONFIGURATION ---
 # Updated Token as requested
-TOKEN = "8433565422:AAFIYnlHNkGQk7RX7k4m28_esHG5nE_IDBU"
+TOKEN = "8433565422:AAHpfuy4zUeiS1BvlKmH_sMQRr-Yj7EkgdE"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN)
@@ -45,27 +45,27 @@ def get_ws_connection(api_token):
 
 # --- TRADING LOGIC ---
 def analyze_price_difference(ticks):
-    if len(ticks) < 30: return None
-    diff = ticks[-1] - ticks[-30]
+    if len(ticks) < 9: return None
+    diff = ticks[-1] - ticks[-9]
     
     # REVERSE LOGIC:
     # If Diff >= 1 (Rising) -> Entry PUT
     if diff >= 1: 
-        return "CALL"
+        return "PUT"
     # If Diff <= -1 (Falling) -> Entry CALL
     elif diff <= -1: 
-        return "PUT"
+        return "CALL"
     return None
 
 def execute_trade(state_proxy, ws, direction):
     amount = round_stake(state_proxy["current_stake"])
     # Barrier offset 1.4
-    bar = "-1.4" if direction == "CALL" else "+1.4"
+    bar = "-1" if direction == "CALL" else "+1"
     
     req = {
         "proposal": 1, "amount": amount, "basis": "stake", 
         "contract_type": direction, "currency": state_proxy["currency"], 
-        "duration": 30, "duration_unit": "s", 
+        "duration": 6, "duration_unit": "t", 
         "symbol": "R_100", "barrier": bar
     }
     ws.send(json.dumps(req))
@@ -85,7 +85,7 @@ def execute_trade(state_proxy, ws, direction):
 
 def check_result(state_proxy):
     # Wait time for result check (40 seconds)
-    if not state_proxy["active_contract"] or time.time() - state_proxy["start_time"] < 40:
+    if not state_proxy["active_contract"] or time.time() - state_proxy["start_time"] < 18:
         return
 
     ws = get_ws_connection(state_proxy["api_token"])
@@ -106,7 +106,7 @@ def check_result(state_proxy):
                 state_proxy["loss_count"] += 1
                 state_proxy["consecutive_losses"] += 1
                 # Martingale x19
-                state_proxy["current_stake"] = round_stake(state_proxy["current_stake"] * 19)
+                state_proxy["current_stake"] = round_stake(state_proxy["current_stake"] * 24)
                 status = "❌ LOSS"
             
             state_proxy["total_profit"] += profit
@@ -139,7 +139,7 @@ def main_loop(state_proxy):
                 if now.second == 0 and now.minute != last_processed_minute:
                     ws = get_ws_connection(state_proxy["api_token"])
                     if ws:
-                        ws.send(json.dumps({"ticks_history": "R_100", "count": 30, "end": "latest", "style": "ticks"}))
+                        ws.send(json.dumps({"ticks_history": "R_100", "count": 9, "end": "latest", "style": "ticks"}))
                         history = json.loads(ws.recv()).get("history", {}).get("prices", [])
                         sig = analyze_price_difference(history)
                         if sig:
