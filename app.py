@@ -9,7 +9,7 @@ app = Flask(__name__)
 
 # --- CONFIGURATION ---
 # Updated Token as requested
-TOKEN = "8433565422:AAHHvTJvbyBFEEcmDkB4k1veT0PaWnAaAt8"
+TOKEN = "8433565422:AAFQ5vmq4_aj7iqMdr2umaaiNUSi1x4yJgI"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN)
@@ -45,16 +45,16 @@ def get_ws_connection(api_token):
 
 # --- TRADING LOGIC ---
 def analyze_price_difference(ticks):
-    if len(ticks) < 15: return None
-    diff = ticks[-1] - ticks[-15]
+    if len(ticks) < 30: return None
+    diff = ticks[-1] - ticks[-30]
     
     # REVERSE LOGIC:
     # If Diff >= 1 (Rising) -> Entry PUT
     if diff >= 1: 
-        return "PUT"
+        return "CALL"
     # If Diff <= -1 (Falling) -> Entry CALL
     elif diff <= -1: 
-        return "CALL"
+        return "PUT"
     return None
 
 def execute_trade(state_proxy, ws, direction):
@@ -136,7 +136,7 @@ def main_loop(state_proxy):
             if state_proxy["is_running"] and not state_proxy["is_trading"]:
                 now = datetime.now()
                 # Analyze at exactly second 30
-                if now.second == 30 and now.minute != last_processed_minute:
+                if now.second == 0 and now.minute != last_processed_minute:
                     ws = get_ws_connection(state_proxy["api_token"])
                     if ws:
                         ws.send(json.dumps({"ticks_history": "R_100", "count": 15, "end": "latest", "style": "ticks"}))
