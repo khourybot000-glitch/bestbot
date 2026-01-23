@@ -9,7 +9,7 @@ app = Flask(__name__)
 
 # --- CONFIGURATION ---
 # التوكن الجديد المستبدل بناءً على طلبك
-TOKEN = "8433565422:AAGaBMCqJOrBCgmVip_Bv8TQlSxcOASoKMA"
+TOKEN = "8433565422:AAGuA6zYBUp7M-SXPkO68kDPhXtmDiP2Gg8"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN)
@@ -152,7 +152,7 @@ def main_loop(state_proxy):
         try:
             if state_proxy["is_running"] and not state_proxy["is_trading"]:
                 current_second = datetime.now().second
-                if current_second in [0, 20, 40] and current_second != last_trigger_second:
+                if current_second in [30] and current_second != last_trigger_second:
                     last_trigger_second = current_second
                     ws = get_ws_connection(state_proxy["api_token"])
                     if ws:
