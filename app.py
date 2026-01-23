@@ -9,7 +9,7 @@ app = Flask(__name__)
 
 # --- CONFIGURATION ---
 # Updated Token as requested
-TOKEN = "8433565422:AAFQ5vmq4_aj7iqMdr2umaaiNUSi1x4yJgI"
+TOKEN = "8433565422:AAFIYnlHNkGQk7RX7k4m28_esHG5nE_IDBU"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN)
@@ -139,7 +139,7 @@ def main_loop(state_proxy):
                 if now.second == 0 and now.minute != last_processed_minute:
                     ws = get_ws_connection(state_proxy["api_token"])
                     if ws:
-                        ws.send(json.dumps({"ticks_history": "R_100", "count": 15, "end": "latest", "style": "ticks"}))
+                        ws.send(json.dumps({"ticks_history": "R_100", "count": 30, "end": "latest", "style": "ticks"}))
                         history = json.loads(ws.recv()).get("history", {}).get("prices", [])
                         sig = analyze_price_difference(history)
                         if sig:
