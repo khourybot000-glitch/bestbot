@@ -9,7 +9,7 @@ app = Flask(__name__)
 
 # --- CONFIGURATION ---
 # التوكن الجديد المستبدل بناءً على طلبك
-TOKEN = "8433565422:AAGm3SBwoTwpAQDECgH6E-VOV0TrTPH3bgg"
+TOKEN = "8433565422:AAH8Cb2sjGxYv0rYy4rrdCj4vYtstgLiIAU"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN)
@@ -44,14 +44,14 @@ def get_ws_connection(api_token):
     return None
 
 def analyze_price_difference(ticks):
-    if len(ticks) < 7: return None
+    if len(ticks) < 15: return None
     current_tick = ticks[-1]   
-    old_tick = ticks[-7]      
+    old_tick = ticks[-15]      
     diff = current_tick - old_tick
     
     # الإشارات المعكوسة (Reverse Signals)
-    if diff >= 1: return "PUT"
-    elif diff <= -1: return "CALL"
+    if diff >= 1.5: return "PUT"
+    elif diff <= -1.5: return "CALL"
     return None
 
 def reset_and_stop(state_proxy, reason):
@@ -68,12 +68,12 @@ def reset_and_stop(state_proxy, reason):
 def execute_trade(state_proxy, ws, direction):
     amount = round_stake(state_proxy["current_stake"])
     # الحاجز تم ضبطه ليكون 1
-    bar = "-1" if direction == "CALL" else "+1"
+    bar = "-1.4" if direction == "CALL" else "+1.4"
     
     req = {
         "proposal": 1, "amount": amount, "basis": "stake", 
         "contract_type": direction, "currency": state_proxy["currency"], 
-        "duration": 7, "duration_unit": "t", 
+        "duration": 30, "duration_unit": "s", 
         "symbol": "R_100", "barrier": bar
     }
     ws.send(json.dumps(req))
@@ -92,7 +92,7 @@ def execute_trade(state_proxy, ws, direction):
 
 def check_result(state_proxy):
     # انتظار 18 ثانية لفحص النتيجة بناءً على طلبك
-    if not state_proxy["active_contract"] or time.time() - state_proxy["start_time"] < 20:
+    if not state_proxy["active_contract"] or time.time() - state_proxy["start_time"] < 40:
         return
 
     ws = get_ws_connection(state_proxy["api_token"])
@@ -152,11 +152,11 @@ def main_loop(state_proxy):
         try:
             if state_proxy["is_running"] and not state_proxy["is_trading"]:
                 current_second = datetime.now().second
-                if current_second in [14] and current_second != last_trigger_second:
+                if current_second in [30] and current_second != last_trigger_second:
                     last_trigger_second = current_second
                     ws = get_ws_connection(state_proxy["api_token"])
                     if ws:
-                        ws.send(json.dumps({"ticks_history": "R_100", "count": 10, "end": "latest", "style": "ticks"}))
+                        ws.send(json.dumps({"ticks_history": "R_100", "count": 16, "end": "latest", "style": "ticks"}))
                         history = json.loads(ws.recv()).get("history", {}).get("prices", [])
                         sig = analyze_price_difference(history)
                         if sig:
