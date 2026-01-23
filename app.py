@@ -9,7 +9,7 @@ app = Flask(__name__)
 
 # --- CONFIGURATION ---
 # Updated Token as requested
-TOKEN = "8433565422:AAHpfuy4zUeiS1BvlKmH_sMQRr-Yj7EkgdE"
+TOKEN = "8433565422:AAGQJwFvhvfDB1na_MpdEqJJQM_W0PhsCtw"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN)
@@ -51,10 +51,10 @@ def analyze_price_difference(ticks):
     # REVERSE LOGIC:
     # If Diff >= 1 (Rising) -> Entry PUT
     if diff >= 1: 
-        return "PUT"
+        return "CALL"
     # If Diff <= -1 (Falling) -> Entry CALL
     elif diff <= -1: 
-        return "CALL"
+        return "PUT"
     return None
 
 def execute_trade(state_proxy, ws, direction):
