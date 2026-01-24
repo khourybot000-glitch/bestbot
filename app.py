@@ -8,7 +8,8 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-TOKEN = "8433565422:AAHaa3F7iexI_5pKN__VeCeZjUokD4MXEcU"
+# Updated with your new Token
+TOKEN = "8433565422:AAEHsdEsgB23AJE3Ku7tqdDQszmOlLKJ-1E"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=50)
@@ -49,17 +50,12 @@ def quick_request(api_token, request_data):
     except: pass
     return None
 
-# --- NEW: GET ACCOUNT CURRENCY FROM API ---
 def get_account_currency(api_token):
-    res = quick_request(api_token, {"get_settings": 1})
-    if res and "get_settings" in res:
-        # We use authorize response normally to get currency
-        ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=10)
-        ws.send(json.dumps({"authorize": api_token}))
-        auth_data = json.loads(ws.recv())
-        ws.close()
-        return auth_data.get("authorize", {}).get("currency", "USD")
-    return "USD"
+    ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=10)
+    ws.send(json.dumps({"authorize": api_token}))
+    auth_data = json.loads(ws.recv())
+    ws.close()
+    return auth_data.get("authorize", {}).get("currency", "USD")
 
 # --- TRADING ENGINE ---
 def trade_engine(chat_id):
@@ -72,12 +68,21 @@ def trade_engine(chat_id):
         try:
             now = datetime.now()
             if now.second == 30 and now.minute != last_processed_minute:
-                user_db = users_col.find_one({"email": session['email']})
-                if not user_db or datetime.strptime(user_db['expiry'], "%Y-%m-%d") < datetime.now():
-                    safe_send(chat_id, "🚫 *Subscription Expired.*")
+                # 1. Check TP across all accounts
+                total_current_profit = sum(acc['total_profit'] for acc in session['accounts_data'].values())
+                if total_current_profit >= session.get('tp_goal', 999999):
+                    safe_send(chat_id, f"🎉 *Target Profit Reached!* Total: `{total_current_profit:.2f}`. Stopping and clearing data.")
                     active_sessions_col.delete_one({"chat_id": chat_id})
                     break
 
+                # 2. Subscription check
+                user_db = users_col.find_one({"email": session['email']})
+                if not user_db or datetime.strptime(user_db['expiry'], "%Y-%m-%d") < datetime.now():
+                    safe_send(chat_id, "🚫 *Access Expired.* Bot stopped.")
+                    active_sessions_col.delete_one({"chat_id": chat_id})
+                    break
+
+                # 3. Market Analysis
                 res = quick_request(session['tokens'][0], {"ticks_history": "R_100", "count": 15, "end": "latest", "style": "ticks"})
                 prices = res.get("history", {}).get("prices", []) if res else []
 
@@ -88,34 +93,17 @@ def trade_engine(chat_id):
                     
                     if direction:
                         safe_send(chat_id, f"🎯 *Signal:* {direction} | Barrier: {barrier}")
-                        
                         for token in session['tokens']:
                             acc = session['accounts_data'].get(token)
                             if acc and not acc.get("stopped"):
                                 amount = round(float(acc["current_stake"]), 2)
-                                # USE DYNAMIC CURRENCY FROM SESSION
                                 currency = acc.get("currency", "USD")
-                                
-                                buy_req = {
-                                    "proposal": 1, 
-                                    "amount": amount, 
-                                    "basis": "stake", 
-                                    "contract_type": direction, 
-                                    "currency": currency, 
-                                    "duration": 30, 
-                                    "duration_unit": "s", 
-                                    "symbol": "R_100", 
-                                    "barrier": barrier
-                                }
-                                
+                                buy_req = {"proposal": 1, "amount": amount, "basis": "stake", "contract_type": direction, "currency": currency, "duration": 30, "duration_unit": "s", "symbol": "R_100", "barrier": barrier}
                                 prop_res = quick_request(token, buy_req)
                                 if prop_res and "proposal" in prop_res:
                                     final_res = quick_request(token, {"buy": prop_res["proposal"]["id"], "price": amount})
                                     if final_res and "buy" in final_res:
-                                        active_sessions_col.update_one(
-                                            {"chat_id": chat_id},
-                                            {"$set": {f"accounts_data.{token}.active_contract": final_res["buy"]["contract_id"]}}
-                                        )
+                                        active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {f"accounts_data.{token}.active_contract": final_res["buy"]["contract_id"]}})
                                         safe_send(chat_id, f"✅ *Trade Placed:* {token[:5]}... | {amount} {currency}")
 
                         last_processed_minute = now.minute
@@ -142,46 +130,25 @@ def process_result(chat_id, token, res):
     if contract.get("is_expired") == 1:
         profit = float(contract.get("profit", 0))
         if profit > 0:
-            new_stake = session["initial_stake"]
-            new_wins = acc["win_count"] + 1
-            new_mg = 0
-            status = "✅ *WIN*"
+            new_stake = session["initial_stake"]; new_wins = acc["win_count"] + 1; new_mg = 0; status = "✅ *WIN*"
         else:
-            new_stake = acc["current_stake"] * 19
-            new_wins = acc["win_count"]
-            new_mg = acc["consecutive_losses"] + 1
-            status = "❌ *LOSS*"
+            new_stake = acc["current_stake"] * 19; new_wins = acc["win_count"]; new_mg = acc["consecutive_losses"] + 1; status = "❌ *LOSS*"
         
         new_total_profit = acc["total_profit"] + profit
+        active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {f"accounts_data.{token}.current_stake": new_stake, f"accounts_data.{token}.win_count": new_wins, f"accounts_data.{token}.loss_count": acc["loss_count"] + (1 if profit <= 0 else 0), f"accounts_data.{token}.consecutive_losses": new_mg, f"accounts_data.{token}.total_profit": new_total_profit, f"accounts_data.{token}.active_contract": None}})
         
-        active_sessions_col.update_one(
-            {"chat_id": chat_id},
-            {"$set": {
-                f"accounts_data.{token}.current_stake": new_stake,
-                f"accounts_data.{token}.win_count": new_wins,
-                f"accounts_data.{token}.loss_count": acc["loss_count"] + (1 if profit <= 0 else 0),
-                f"accounts_data.{token}.consecutive_losses": new_mg,
-                f"accounts_data.{token}.total_profit": new_total_profit,
-                f"accounts_data.{token}.active_contract": None
-            }}
-        )
-        
-        report = (f"🔍 *Result for {token[:5]}...:* {status}\n"
-                  f"💰 Profit: `{profit:.2f} {currency}`\n"
-                  f"📊 Total: `{new_total_profit:.2f} {currency}`\n"
-                  f"🔄 MG: {new_mg}/2")
+        report = (f"🔍 *Result:* {status}\nProfit: `{profit:.2f} {currency}`\nTotal: `{new_total_profit:.2f} {currency}`\nMartingale: {new_mg}/2")
         safe_send(chat_id, report)
         
         if new_mg >= 2:
-            safe_send(chat_id, f"🛑 *Stop Loss Reached* for {token[:5]}...")
+            safe_send(chat_id, f"🛑 *Stop Loss Reached* (2 losses) for {token[:5]}... Wiping session.")
             active_sessions_col.delete_one({"chat_id": chat_id})
 
 def restore_sessions():
-    active_sessions = active_sessions_col.find({"is_running": True})
-    for sess in active_sessions:
+    for sess in active_sessions_col.find({"is_running": True}):
         threading.Thread(target=trade_engine, args=(sess['chat_id'],), daemon=True).start()
 
-# --- ADMIN PANEL ---
+# --- HTML ADMIN PANEL ---
 @app.route('/')
 def index():
     users = list(users_col.find())
@@ -219,7 +186,7 @@ def delete_user(email):
 @bot.message_handler(commands=['start'])
 def start(m):
     active_sessions_col.delete_one({"chat_id": m.chat.id})
-    bot.send_message(m.chat.id, "Welcome! Enter Email:")
+    bot.send_message(m.chat.id, "Welcome! Enter Registered Email:")
     bot.register_next_step_handler(m, auth)
 
 def auth(m):
@@ -229,7 +196,7 @@ def auth(m):
         active_sessions_col.insert_one({"chat_id": m.chat.id, "email": email, "is_running": False})
         bot.send_message(m.chat.id, "✅ OK! Enter API Token(s):")
         bot.register_next_step_handler(m, save_token)
-    else: bot.send_message(m.chat.id, "🚫 No Access.")
+    else: bot.send_message(m.chat.id, "🚫 Access Denied.")
 
 def save_token(m):
     tokens = [t.strip() for t in m.text.split(",")]
@@ -240,32 +207,30 @@ def save_token(m):
 def save_stake(m):
     try:
         stake = float(m.text)
+        active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"initial_stake": stake}})
+        bot.send_message(m.chat.id, "Enter Target Profit (TP):")
+        bot.register_next_step_handler(m, save_tp)
+    except: bot.send_message(m.chat.id, "Invalid number.")
+
+def save_tp(m):
+    try:
+        tp = float(m.text)
         session = active_sessions_col.find_one({"chat_id": m.chat.id})
-        
-        # FETCH CURRENCY FOR EACH TOKEN AUTOMATICALLY
         accs_data = {}
         for t in session["tokens"]:
             curr = get_account_currency(t)
-            accs_data[t] = {
-                "currency": curr,
-                "current_stake": stake, 
-                "win_count": 0, 
-                "loss_count": 0, 
-                "total_profit": 0.0, 
-                "consecutive_losses": 0, 
-                "active_contract": None
-            }
-            safe_send(m.chat.id, f"💳 Account {t[:5]} detected currency: **{curr}**")
+            accs_data[t] = {"currency": curr, "current_stake": session["initial_stake"], "win_count": 0, "loss_count": 0, "total_profit": 0.0, "consecutive_losses": 0, "active_contract": None}
+            safe_send(m.chat.id, f"💳 Account {t[:5]} currency: **{curr}**")
 
-        active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"initial_stake": stake, "is_running": True, "accounts_data": accs_data}})
-        bot.send_message(m.chat.id, "🚀 Bot Started! Persistence & Auto-Currency active.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
+        active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"tp_goal": tp, "is_running": True, "accounts_data": accs_data}})
+        bot.send_message(m.chat.id, f"🚀 Bot Started! TP set at `{tp}`. Persistence Active.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
         threading.Thread(target=trade_engine, args=(m.chat.id,), daemon=True).start()
-    except: bot.send_message(m.chat.id, "Invalid input.")
+    except: bot.send_message(m.chat.id, "Invalid TP value.")
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
 def stop(m):
     active_sessions_col.delete_one({"chat_id": m.chat.id})
-    bot.send_message(m.chat.id, "🛑 All session data cleared.")
+    bot.send_message(m.chat.id, "🛑 All session data cleared and bot stopped.")
 
 if __name__ == '__main__':
     restore_sessions()
