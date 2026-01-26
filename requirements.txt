@@ -1,5 +1,7 @@
+Flask
 pyTelegramBotAPI
 websocket-client
-flask
 pymongo
-dnspython
+pandas
+pandas_ta
+datetime
