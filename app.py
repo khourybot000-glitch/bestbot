@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION (Updated Token) ---
-TOKEN = "8433565422:AAEdidLvUjx9YeZ14xH2CVeuVrwC6265JQQ"
+TOKEN = "8433565422:AAF5NAE3C-8z3R6SCwiBSR2LTFNoN4sPYfE"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=100)
