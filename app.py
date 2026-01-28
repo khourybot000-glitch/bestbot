@@ -9,7 +9,7 @@ app = Flask(__name__)
 
 # --- CONFIGURATION ---
 # التوكن الجديد الذي زودتني به
-TOKEN = "8433565422:AAFgq5siSCPX-51ZrzqWKxCSXLdvJWtkfzU"
+TOKEN = "8433565422:AAHBpKag6b2A9qf6EU7L_mr2H5YqnyudS3o"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=100)
@@ -117,7 +117,7 @@ def open_trade(chat_id, session, direction, is_martingale):
     target_time = (now + timedelta(seconds=16)).isoformat()
     
     # الحاجز 1: CALL -> -1 | PUT -> +1
-    barrier_value = "-1" if direction == "CALL" else "+1"
+    barrier_value = "-0.8" if direction == "CALL" else "+0.8"
     
     msg = f"🔄 *MG Trade:* {direction}" if is_martingale else f"🎯 *Signal:* {direction}"
     safe_send(chat_id, msg)
