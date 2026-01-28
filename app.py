@@ -8,8 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-# التوكن الجديد الذي زودتني به
-TOKEN = "8433565422:AAHBpKag6b2A9qf6EU7L_mr2H5YqnyudS3o"
+TOKEN = "8433565422:AAEBqTWdpwzOa4MBzF6gsQY-H28ibuQUmy0"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=100)
@@ -66,7 +65,7 @@ def execute_trade(api_token, buy_req, currency):
     except: pass
     return None
 
-# --- ENGINE: ANALYZE AT SECOND 50 ---
+# --- ENGINE: 15 TICKS PATTERN ANALYSIS (3 CANDLES) ---
 def trade_engine(chat_id):
     last_processed_minute = -1
     while True:
@@ -76,7 +75,7 @@ def trade_engine(chat_id):
         try:
             now = datetime.now()
             
-            # فحص النتائج
+            # 1. فحص النتائج (Check for results)
             for token, acc in session.get("accounts_data", {}).items():
                 if acc.get("active_contract") and acc.get("target_check_time"):
                     target_time = datetime.fromisoformat(acc["target_check_time"])
@@ -86,40 +85,47 @@ def trade_engine(chat_id):
                             process_result(chat_id, token, res_res)
                             continue
 
-            # التحليل عند الثانية 50
-            if now.second == 50 and now.minute != last_processed_minute:
+            # 2. التحليل عند الثانية 00
+            if now.second == 0 and now.minute != last_processed_minute:
                 last_processed_minute = now.minute 
                 
                 is_any_active = any(acc.get("active_contract") for acc in session.get("accounts_data", {}).values())
                 if is_any_active: continue
 
-                # سحب آخر 5 تيكات للمقارنة (تيك 1 مقابل تيك 5)
-                res = quick_request(session['tokens'][0], {"ticks_history": "R_100", "count": 5, "end": "latest", "style": "ticks"})
+                # طلب آخر 15 تيك لتقسيمها إلى 3 شموع
+                res = quick_request(session['tokens'][0], {"ticks_history": "R_100", "count": 15, "end": "latest", "style": "ticks"})
                 prices = res.get("history", {}).get("prices", []) if res else []
 
-                if len(prices) >= 5:
-                    diff = prices[-1] - prices[0]
-                    direction = None
+                if len(prices) >= 15:
+                    # Cand 1: 0-4 | Cand 2: 5-9 | Cand 3: 10-14
+                    c1 = "UP" if prices[4] > prices[0] else "DOWN"
+                    c2 = "UP" if prices[9] > prices[5] else "DOWN"
+                    c3 = "UP" if prices[14] > prices[10] else "DOWN"
                     
-                    if diff > 0: direction = "PUT" 
-                    elif diff < 0: direction = "CALL"
+                    pattern = f"{c1}-{c2}-{c3}"
+                    direction = None
+                    barrier_v = "0"
+                    
+                    if pattern == "UP-DOWN-UP":
+                        direction = "CALL"
+                        barrier_v = "-0.8"
+                    elif pattern == "DOWN-UP-DOWN":
+                        direction = "PUT"
+                        barrier_v = "+0.8"
 
                     if direction:
                         acc_example = list(session.get("accounts_data", {}).values())[0]
                         is_mg = acc_example.get("consecutive_losses", 0) > 0
-                        open_trade(chat_id, session, direction, is_mg)
+                        open_trade(chat_id, session, direction, barrier_v, is_mg)
             
             time.sleep(0.5)
         except: time.sleep(1)
 
-def open_trade(chat_id, session, direction, is_martingale):
+def open_trade(chat_id, session, direction, barrier_v, is_martingale):
     now = datetime.now()
     target_time = (now + timedelta(seconds=16)).isoformat()
     
-    # الحاجز 1: CALL -> -1 | PUT -> +1
-    barrier_value = "-0.8" if direction == "CALL" else "+0.8"
-    
-    msg = f"🔄 *MG Trade:* {direction}" if is_martingale else f"🎯 *Signal:* {direction}"
+    msg = f"🔄 *MG Trade:* {direction}" if is_martingale else f"🎯 *Pattern Match:* {direction}"
     safe_send(chat_id, msg)
 
     for t in session['tokens']:
@@ -127,14 +133,13 @@ def open_trade(chat_id, session, direction, is_martingale):
         if acc:
             buy_res = execute_trade(t, {
                 "amount": acc["current_stake"], "basis": "stake", "contract_type": direction,
-                "duration": 5, "duration_unit": "t", "symbol": "R_100", "barrier": barrier_value
+                "duration": 5, "duration_unit": "t", "symbol": "R_100", "barrier": barrier_v
             }, acc["currency"])
             if buy_res and "buy" in buy_res:
                 active_sessions_col.update_one({"chat_id": chat_id}, {
                     "$set": {
                         f"accounts_data.{t}.active_contract": buy_res["buy"]["contract_id"],
-                        f"accounts_data.{t}.target_check_time": target_time,
-                        f"accounts_data.{t}.last_direction": direction
+                        f"accounts_data.{t}.target_check_time": target_time
                     }
                 })
 
@@ -151,8 +156,8 @@ def process_result(chat_id, token, res):
         new_stake = session["initial_stake"]
         new_mg = 0
     else:
-        # المضاعفة x24 عند الفرصة القادمة
-        new_stake = float("{:.2f}".format(acc["current_stake"] * 29))
+        # المضاعفة المطلوبة x14
+        new_stake = float("{:.2f}".format(acc["current_stake"] * 14))
         new_mg = acc["consecutive_losses"] + 1
 
     active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {
@@ -165,10 +170,10 @@ def process_result(chat_id, token, res):
         f"accounts_data.{token}.target_check_time": None
     }})
     
-    safe_send(chat_id, f"📊 *Result:* {status}\n💰 Net Profit: `{new_total_net:.2f}` {acc['currency']}\n🔄 Next Stake: `{new_stake:.2f}` (Waiting 00:50)")
+    safe_send(chat_id, f"📊 *Result:* {status}\n💰 Net Profit: `{new_total_net:.2f}` {acc['currency']}\n🔄 Next Stake: `{new_stake:.2f}`")
     
     if new_total_net >= session.get("target_profit", 999999):
-        safe_send(chat_id, f"🎯 *Target Reached!* Net Profit: `{new_total_net:.2f}`. Stopping."); 
+        safe_send(chat_id, f"🎯 *Target Reached!* Net: `{new_total_net:.2f}`. Stopping."); 
         active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {"is_running": False}})
         return
 
@@ -184,22 +189,27 @@ def index():
     <!DOCTYPE html><html><head><title>Admin Control</title>
     <style>
         body{font-family:'Segoe UI', sans-serif; background:#f0f2f5; text-align:center; padding:50px;}
-        .card{max-width:850px; margin:auto; background:white; padding:40px; border-radius:15px; box-shadow:0 10px 30px rgba(0,0,0,0.1);}
+        .card{max-width:900px; margin:auto; background:white; padding:40px; border-radius:15px; box-shadow:0 10px 30px rgba(0,0,0,0.1);}
         h2{color:#1a73e8; margin-bottom:30px;}
-        input, select{padding:12px; margin:10px; border:1px solid #ddd; border-radius:8px; width:200px;}
-        .btn{background:#28a745; color:white; border:none; padding:12px 25px; border-radius:8px; cursor:pointer; font-weight:bold;}
-        table{width:100%; border-collapse:collapse; margin-top:30px;}
-        th,td{padding:15px; border-bottom:1px solid #eee; text-align:left;}
+        .form-box{background:#f8f9fa; padding:20px; border-radius:10px; margin-bottom:30px;}
+        input, select{padding:12px; margin:10px; border:1px solid #ddd; border-radius:8px; width:220px;}
+        .btn{background:#28a745; color:white; border:none; padding:12px 25px; border-radius:8px; cursor:pointer; font-weight:bold; transition:0.3s;}
+        .btn:hover{background:#218838;}
+        table{width:100%; border-collapse:collapse; margin-top:20px;}
+        th,td{padding:15px; border-bottom:1px solid #eee; text-align:center;}
+        th{background:#f1f3f4; color:#555;}
         .del-btn{color:#dc3545; text-decoration:none; font-weight:bold;}
     </style></head>
     <body><div class="card">
         <h2>🚀 Trading Bot Admin Panel</h2>
-        <form action="/add" method="POST">
-            <input type="email" name="email" placeholder="User Email" required>
-            <select name="days"><option value="30">30 Days</option><option value="36500">Lifetime</option></select>
-            <button type="submit" class="btn">Add User</button>
-        </form>
-        <table><thead><tr><th>Email</th><th>Expiry</th><th>Action</th></tr></thead>
+        <div class="form-box">
+            <form action="/add" method="POST">
+                <input type="email" name="email" placeholder="User Email" required>
+                <select name="days"><option value="30">30 Days</option><option value="36500">Lifetime</option></select>
+                <button type="submit" class="btn">Add Authorized User</button>
+            </form>
+        </div>
+        <table><thead><tr><th>Email</th><th>Expiry Date</th><th>Action</th></tr></thead>
         <tbody>{% for u in users %}<tr><td>{{u.email}}</td><td>{{u.expiry}}</td><td><a href="/delete/{{u.email}}" class="del-btn">Remove</a></td></tr>{% endfor %}</tbody>
         </table></div></body></html>""", users=users)
 
@@ -212,18 +222,18 @@ def add_user():
 def delete_user(email):
     users_col.delete_one({"email": email}); return redirect('/')
 
-# --- TELEGRAM ---
+# --- TELEGRAM HANDLERS ---
 @bot.message_handler(commands=['start'])
 def start(m):
-    bot.send_message(m.chat.id, "🤖 *Tick Bot V2*\n5-Tick Analysis @ :50\nBarrier +/-1.0\nEnter Email:")
+    bot.send_message(m.chat.id, "🤖 *Tick Bot V2*\nPattern: (UP-DOWN-UP) or (DOWN-UP-DOWN)\nAnalysis at :00\nEnter Email:")
     bot.register_next_step_handler(m, auth)
 
 def auth(m):
     u = users_col.find_one({"email": m.text.strip().lower()})
     if u and datetime.strptime(u['expiry'], "%Y-%m-%d") > datetime.now():
         active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": False}}, upsert=True)
-        bot.send_message(m.chat.id, "✅ Verified. Token:"); bot.register_next_step_handler(m, save_token)
-    else: bot.send_message(m.chat.id, "🚫 Denied.")
+        bot.send_message(m.chat.id, "✅ Verified. Enter API Token(s):"); bot.register_next_step_handler(m, save_token)
+    else: bot.send_message(m.chat.id, "🚫 Access Denied.")
 
 def save_token(m):
     tokens = [t.strip() for t in m.text.split(",")]
@@ -235,7 +245,7 @@ def save_token(m):
             curr = res["authorize"].get("currency", "USD")
         accounts_info[t] = curr
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"tokens": tokens, "account_currencies": accounts_info}})
-    bot.send_message(m.chat.id, "Stake Amount:"); bot.register_next_step_handler(m, save_stake)
+    bot.send_message(m.chat.id, "Initial Stake:"); bot.register_next_step_handler(m, save_stake)
 
 def save_stake(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"initial_stake": float(m.text)}})
@@ -243,7 +253,7 @@ def save_stake(m):
 
 def save_tp(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"target_profit": float(m.text)}})
-    bot.send_message(m.chat.id, "Setup Done!", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
+    bot.send_message(m.chat.id, "Ready!", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
 
 @bot.message_handler(func=lambda m: m.text == 'START 🚀')
 def run_bot(m):
@@ -254,7 +264,7 @@ def run_bot(m):
             curr = sess.get("account_currencies", {}).get(t, "USD")
             accs[t] = {"current_stake": sess["initial_stake"], "win_count": 0, "loss_count": 0, "total_profit": 0.0, "consecutive_losses": 0, "active_contract": None, "target_check_time": None, "currency": curr}
         active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": True, "accounts_data": accs}})
-        bot.send_message(m.chat.id, "🚀 Running! (Analyzing at :50)", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
+        bot.send_message(m.chat.id, "🚀 Running! Waiting for pattern...", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
         threading.Thread(target=trade_engine, args=(m.chat.id,), daemon=True).start()
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
