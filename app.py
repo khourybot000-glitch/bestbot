@@ -9,7 +9,7 @@ app = Flask(__name__)
 
 # --- CONFIGURATION ---
 # التوكن الجديد الذي زودتني به
-TOKEN = "8433565422:AAEAPOhunEnVgAhXx-479Tv8I1Osp-TZ6Ag"
+TOKEN = "8433565422:AAFgq5siSCPX-51ZrzqWKxCSXLdvJWtkfzU"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=100)
@@ -101,8 +101,8 @@ def trade_engine(chat_id):
                     diff = prices[-1] - prices[0]
                     direction = None
                     
-                    if diff > 0: direction = "CALL" 
-                    elif diff < 0: direction = "PUT"
+                    if diff > 0: direction = "PUT" 
+                    elif diff < 0: direction = "CALL"
 
                     if direction:
                         acc_example = list(session.get("accounts_data", {}).values())[0]
@@ -152,7 +152,7 @@ def process_result(chat_id, token, res):
         new_mg = 0
     else:
         # المضاعفة x24 عند الفرصة القادمة
-        new_stake = float("{:.2f}".format(acc["current_stake"] * 24))
+        new_stake = float("{:.2f}".format(acc["current_stake"] * 29))
         new_mg = acc["consecutive_losses"] + 1
 
     active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {
