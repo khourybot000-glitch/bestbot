@@ -8,177 +8,144 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-TOKEN = "8433565422:AAEBqTWdpwzOa4MBzF6gsQY-H28ibuQUmy0"
+TOKEN = "8433565422:AAGc5pl9hMGwj9AC04Db0cv-CFWIlKLkvVI"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
-bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=100)
+bot = telebot.TeleBot(TOKEN, threaded=True)
 db_client = MongoClient(MONGO_URI)
 db = db_client['Trading_System_V2']
 users_col = db['Authorized_Users']
 active_sessions_col = db['Active_Sessions']
 
-msg_queue = queue.Queue()
+# تخزين التيكات لكل مستخدم (Moving Window)
+user_ticks = {} 
 
-def message_worker():
-    while True:
-        try:
-            chat_id, text = msg_queue.get()
-            bot.send_message(chat_id, text, parse_mode="Markdown")
-            msg_queue.task_done()
-            time.sleep(0.04) 
-        except: pass
+def calculate_sma(prices):
+    return sum(prices) / 30
 
-threading.Thread(target=message_worker, daemon=True).start()
+def process_trade_logic(chat_id, current_price):
+    if chat_id not in user_ticks: user_ticks[chat_id] = []
+    
+    user_ticks[chat_id].append(current_price)
+    
+    # النافذة المتحركة: حذف الأقدم إذا تجاوزنا 30
+    if len(user_ticks[chat_id]) > 30:
+        user_ticks[chat_id].pop(0)
+    
+    # التحليل عند اكتمال 30 تيك
+    if len(user_ticks[chat_id]) == 30:
+        prices = user_ticks[chat_id]
+        sma30 = calculate_sma(prices)
+        p29 = prices[-2]
+        p30 = prices[-1]
+        
+        # شرط CALL: من تحت الـ SMA إلى فوقه
+        if p29 < sma30 and p30 > sma30:
+            return "CALL", "-0.8"
+        # شرط PUT: من فوق الـ SMA إلى تحته
+        elif p29 > sma30 and p30 < sma30:
+            return "PUT", "+0.8"
+            
+    return None, None
 
-def safe_send(chat_id, text):
-    msg_queue.put((chat_id, text))
-
-def quick_request(api_token, request_data):
-    try:
-        ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=12)
-        ws.send(json.dumps({"authorize": api_token}))
-        res_auth = json.loads(ws.recv())
-        if "authorize" in res_auth:
-            ws.send(json.dumps(request_data))
-            res = json.loads(ws.recv())
-            ws.close()
-            return res
-        ws.close()
-    except: pass
-    return None
-
-def execute_trade(api_token, buy_req, currency):
-    try:
-        ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=12)
-        ws.send(json.dumps({"authorize": api_token}))
-        if "authorize" in json.loads(ws.recv()):
-            buy_req['amount'] = float("{:.2f}".format(buy_req['amount']))
-            buy_req['currency'] = currency
-            ws.send(json.dumps({"proposal": 1, **buy_req}))
-            prop_res = json.loads(ws.recv())
-            if "proposal" in prop_res:
-                ws.send(json.dumps({"buy": prop_res["proposal"]["id"], "price": buy_req['amount']}))
-                res = json.loads(ws.recv())
-                ws.close()
-                return res
-        ws.close()
-    except: pass
-    return None
-
-# --- ENGINE: 15 TICKS PATTERN ANALYSIS (3 CANDLES) ---
-def trade_engine(chat_id):
-    last_processed_minute = -1
+def trade_stream(chat_id, token):
     while True:
         session = active_sessions_col.find_one({"chat_id": chat_id})
         if not session or not session.get("is_running"): break
         
         try:
-            now = datetime.now()
+            ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=15)
+            ws.send(json.dumps({"authorize": token}))
+            auth_res = json.loads(ws.recv())
             
-            # 1. فحص النتائج (Check for results)
-            for token, acc in session.get("accounts_data", {}).items():
-                if acc.get("active_contract") and acc.get("target_check_time"):
-                    target_time = datetime.fromisoformat(acc["target_check_time"])
-                    if now >= target_time:
-                        res_res = quick_request(token, {"proposal_open_contract": 1, "contract_id": acc["active_contract"]})
-                        if res_res and res_res.get("proposal_open_contract", {}).get("is_expired"):
-                            process_result(chat_id, token, res_res)
-                            continue
-
-            # 2. التحليل عند الثانية 00
-            if now.second == 0 and now.minute != last_processed_minute:
-                last_processed_minute = now.minute 
+            if "authorize" in auth_res:
+                currency = auth_res["authorize"].get("currency", "USD")
+                ws.send(json.dumps({"ticks": "R_100"})) 
                 
-                is_any_active = any(acc.get("active_contract") for acc in session.get("accounts_data", {}).values())
-                if is_any_active: continue
+                while True:
+                    session = active_sessions_col.find_one({"chat_id": chat_id})
+                    if not session or not session.get("is_running"): 
+                        ws.close(); return
 
-                # طلب آخر 15 تيك لتقسيمها إلى 3 شموع
-                res = quick_request(session['tokens'][0], {"ticks_history": "R_100", "count": 15, "end": "latest", "style": "ticks"})
-                prices = res.get("history", {}).get("prices", []) if res else []
+                    try:
+                        msg = json.loads(ws.recv())
+                    except: break # إعادة اتصال تلقائي
 
-                if len(prices) >= 15:
-                    # Cand 1: 0-4 | Cand 2: 5-9 | Cand 3: 10-14
-                    c1 = "UP" if prices[4] > prices[0] else "DOWN"
-                    c2 = "UP" if prices[9] > prices[5] else "DOWN"
-                    c3 = "UP" if prices[14] > prices[10] else "DOWN"
-                    
-                    pattern = f"{c1}-{c2}-{c3}"
-                    direction = None
-                    barrier_v = "0"
-                    
-                    if pattern == "UP-DOWN-UP":
-                        direction = "CALL"
-                        barrier_v = "-0.8"
-                    elif pattern == "DOWN-UP-DOWN":
-                        direction = "PUT"
-                        barrier_v = "+0.8"
-
-                    if direction:
-                        acc_example = list(session.get("accounts_data", {}).values())[0]
-                        is_mg = acc_example.get("consecutive_losses", 0) > 0
-                        open_trade(chat_id, session, direction, barrier_v, is_mg)
-            
-            time.sleep(0.5)
+                    if "tick" in msg:
+                        price = msg["tick"]["quote"]
+                        direction, barrier = process_trade_logic(chat_id, price)
+                        
+                        if direction:
+                            acc_data = session["accounts_data"][token]
+                            stake = acc_data["current_stake"]
+                            
+                            # إرسال طلب الصفقة
+                            ws.send(json.dumps({
+                                "proposal": 1, "amount": stake, "basis": "stake",
+                                "contract_type": direction, "duration": 5, "duration_unit": "t",
+                                "symbol": "R_100", "barrier": barrier, "currency": currency
+                            }))
+                            prop = json.loads(ws.recv())
+                            
+                            if "proposal" in prop:
+                                ws.send(json.dumps({"buy": prop["proposal"]["id"], "price": stake}))
+                                buy_res = json.loads(ws.recv())
+                                
+                                if "buy" in buy_res:
+                                    contract_id = buy_res["buy"]["contract_id"]
+                                    bot.send_message(chat_id, f"🎯 *Signal:* {direction}\n📊 SMA-30 Cross Confirmed!")
+                                    
+                                    # إدارة الانقطاع والانتظار المطلوبة
+                                    ws.close()             
+                                    user_ticks[chat_id] = [] # تصفير القائمة لبدء 30 جديدة
+                                    time.sleep(18)         
+                                    
+                                    # جلب النتيجة وتحديث الإحصائيات
+                                    res_msg = quick_check_result(token, contract_id)
+                                    update_stats(chat_id, token, res_msg)
+                                    break 
+            ws.close()
         except: time.sleep(1)
 
-def open_trade(chat_id, session, direction, barrier_v, is_martingale):
-    now = datetime.now()
-    target_time = (now + timedelta(seconds=16)).isoformat()
-    
-    msg = f"🔄 *MG Trade:* {direction}" if is_martingale else f"🎯 *Pattern Match:* {direction}"
-    safe_send(chat_id, msg)
+def quick_check_result(token, contract_id):
+    try:
+        ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=10)
+        ws.send(json.dumps({"authorize": token}))
+        ws.recv()
+        ws.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id}))
+        res = json.loads(ws.recv())
+        ws.close()
+        return res
+    except: return {}
 
-    for t in session['tokens']:
-        acc = session['accounts_data'].get(t)
-        if acc:
-            buy_res = execute_trade(t, {
-                "amount": acc["current_stake"], "basis": "stake", "contract_type": direction,
-                "duration": 5, "duration_unit": "t", "symbol": "R_100", "barrier": barrier_v
-            }, acc["currency"])
-            if buy_res and "buy" in buy_res:
-                active_sessions_col.update_one({"chat_id": chat_id}, {
-                    "$set": {
-                        f"accounts_data.{t}.active_contract": buy_res["buy"]["contract_id"],
-                        f"accounts_data.{t}.target_check_time": target_time
-                    }
-                })
-
-def process_result(chat_id, token, res):
+def update_stats(chat_id, token, res):
     session = active_sessions_col.find_one({"chat_id": chat_id})
-    acc = session['accounts_data'].get(token)
+    acc = session['accounts_data'][token]
     contract = res.get("proposal_open_contract", {})
     profit = float(contract.get("profit", 0))
-    status = "✅ *WIN*" if profit > 0 else "❌ *LOSS*"
     
+    status = "✅ *WIN*" if profit > 0 else "❌ *LOSS*"
     new_total_net = acc["total_profit"] + profit
     
     if profit > 0:
         new_stake = session["initial_stake"]
         new_mg = 0
     else:
-        # المضاعفة المطلوبة x14
-        new_stake = float("{:.2f}".format(acc["current_stake"] * 14))
+        new_stake = float("{:.2f}".format(acc["current_stake"] * 19)) # المضاعفة x19
         new_mg = acc["consecutive_losses"] + 1
 
     active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {
         f"accounts_data.{token}.current_stake": new_stake,
-        f"accounts_data.{token}.win_count": acc["win_count"] + (1 if profit > 0 else 0),
-        f"accounts_data.{token}.loss_count": acc["loss_count"] + (1 if profit <= 0 else 0),
-        f"accounts_data.{token}.consecutive_losses": new_mg,
         f"accounts_data.{token}.total_profit": new_total_net,
-        f"accounts_data.{token}.active_contract": None,
-        f"accounts_data.{token}.target_check_time": None
+        f"accounts_data.{token}.consecutive_losses": new_mg,
+        f"accounts_data.{token}.win_count": acc["win_count"] + (1 if profit > 0 else 0),
+        f"accounts_data.{token}.loss_count": acc["loss_count"] + (1 if profit <= 0 else 0)
     }})
     
-    safe_send(chat_id, f"📊 *Result:* {status}\n💰 Net Profit: `{new_total_net:.2f}` {acc['currency']}\n🔄 Next Stake: `{new_stake:.2f}`")
+    bot.send_message(chat_id, f"📊 *Result:* {status}\n💰 Total Net: `{new_total_net:.2f}`\n🔄 Next Stake: `{new_stake:.2f}`\n\n⌛ *Restarting SMA Analysis...*")
     
-    if new_total_net >= session.get("target_profit", 999999):
-        safe_send(chat_id, f"🎯 *Target Reached!* Net: `{new_total_net:.2f}`. Stopping."); 
-        active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {"is_running": False}})
-        return
-
     if new_mg >= 2:
-        safe_send(chat_id, "🛑 *Limit Reached (2 Losses)!* Stopping."); 
+        bot.send_message(chat_id, "🛑 *Limit Reached (2 Losses)!* Stopping.")
         active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {"is_running": False}})
 
 # --- HTML ADMIN PANEL ---
@@ -191,7 +158,7 @@ def index():
         body{font-family:'Segoe UI', sans-serif; background:#f0f2f5; text-align:center; padding:50px;}
         .card{max-width:900px; margin:auto; background:white; padding:40px; border-radius:15px; box-shadow:0 10px 30px rgba(0,0,0,0.1);}
         h2{color:#1a73e8; margin-bottom:30px;}
-        .form-box{background:#f8f9fa; padding:20px; border-radius:10px; margin-bottom:30px;}
+        .form-box{background:#f8f9fa; padding:20px; border-radius:10px; margin-bottom:30px; border:1px solid #e1e4e8;}
         input, select{padding:12px; margin:10px; border:1px solid #ddd; border-radius:8px; width:220px;}
         .btn{background:#28a745; color:white; border:none; padding:12px 25px; border-radius:8px; cursor:pointer; font-weight:bold; transition:0.3s;}
         .btn:hover{background:#218838;}
@@ -201,7 +168,7 @@ def index():
         .del-btn{color:#dc3545; text-decoration:none; font-weight:bold;}
     </style></head>
     <body><div class="card">
-        <h2>🚀 Trading Bot Admin Panel</h2>
+        <h2>🚀 SMA-30 Hybrid Admin Panel</h2>
         <div class="form-box">
             <form action="/add" method="POST">
                 <input type="email" name="email" placeholder="User Email" required>
@@ -222,54 +189,40 @@ def add_user():
 def delete_user(email):
     users_col.delete_one({"email": email}); return redirect('/')
 
-# --- TELEGRAM HANDLERS ---
+# --- TELEGRAM ---
 @bot.message_handler(commands=['start'])
-def start(m):
-    bot.send_message(m.chat.id, "🤖 *Tick Bot V2*\nPattern: (UP-DOWN-UP) or (DOWN-UP-DOWN)\nAnalysis at :00\nEnter Email:")
-    bot.register_next_step_handler(m, auth)
+def start_cmd(m):
+    bot.send_message(m.chat.id, "🤖 *SMA-30 Hybrid Bot*\nAnalysis: Moving Window (30 Ticks)\nCooldown: 18s (Total Disconnect)\nEnter Email:")
+    bot.register_next_step_handler(m, verify_auth)
 
-def auth(m):
+def verify_auth(m):
     u = users_col.find_one({"email": m.text.strip().lower()})
     if u and datetime.strptime(u['expiry'], "%Y-%m-%d") > datetime.now():
-        active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": False}}, upsert=True)
-        bot.send_message(m.chat.id, "✅ Verified. Enter API Token(s):"); bot.register_next_step_handler(m, save_token)
+        bot.send_message(m.chat.id, "✅ Verified. Send API Token:"); bot.register_next_step_handler(m, set_token)
     else: bot.send_message(m.chat.id, "🚫 Access Denied.")
 
-def save_token(m):
-    tokens = [t.strip() for t in m.text.split(",")]
-    accounts_info = {}
-    for t in tokens:
-        res = quick_request(t, {"get_settings": 1})
-        curr = "USD"
-        if res and "authorize" in res:
-            curr = res["authorize"].get("currency", "USD")
-        accounts_info[t] = curr
-    active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"tokens": tokens, "account_currencies": accounts_info}})
-    bot.send_message(m.chat.id, "Initial Stake:"); bot.register_next_step_handler(m, save_stake)
+def set_token(m):
+    token = m.text.strip()
+    active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"tokens": [token], "initial_stake": 0.35, "is_running": False}}, upsert=True)
+    bot.send_message(m.chat.id, "Stake Amount:"); bot.register_next_step_handler(m, set_stake)
 
-def save_stake(m):
+def set_stake(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"initial_stake": float(m.text)}})
-    bot.send_message(m.chat.id, "Target Profit (TP):"); bot.register_next_step_handler(m, save_tp)
-
-def save_tp(m):
-    active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"target_profit": float(m.text)}})
     bot.send_message(m.chat.id, "Ready!", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
 
 @bot.message_handler(func=lambda m: m.text == 'START 🚀')
-def run_bot(m):
+def run_trading(m):
     sess = active_sessions_col.find_one({"chat_id": m.chat.id})
-    if sess:
-        accs = {}
-        for t in sess["tokens"]:
-            curr = sess.get("account_currencies", {}).get(t, "USD")
-            accs[t] = {"current_stake": sess["initial_stake"], "win_count": 0, "loss_count": 0, "total_profit": 0.0, "consecutive_losses": 0, "active_contract": None, "target_check_time": None, "currency": curr}
-        active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": True, "accounts_data": accs}})
-        bot.send_message(m.chat.id, "🚀 Running! Waiting for pattern...", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
-        threading.Thread(target=trade_engine, args=(m.chat.id,), daemon=True).start()
+    accs = {sess["tokens"][0]: {"current_stake": sess["initial_stake"], "total_profit": 0, "consecutive_losses": 0, "win_count": 0, "loss_count": 0}}
+    active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": True, "accounts_data": accs}})
+    user_ticks[m.chat.id] = [] # تصفير القائمة عند البداية
+    threading.Thread(target=trade_stream, args=(m.chat.id, sess["tokens"][0]), daemon=True).start()
+    bot.send_message(m.chat.id, "🚀 Running! Collecting 30 Ticks...", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
-def stop(m):
-    active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": False}}); bot.send_message(m.chat.id, "🛑 Stopped.")
+def stop_bot(m):
+    active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": False}})
+    bot.send_message(m.chat.id, "🛑 Stopped.")
 
 if __name__ == '__main__':
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000))), daemon=True).start()
