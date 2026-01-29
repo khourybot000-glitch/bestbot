@@ -7,8 +7,8 @@ from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
-# --- CONFIGURATION ---
-TOKEN = "8433565422:AAEe0YXImB2lrsRB5YRbvTIhOOh6dbNAVQc"
+# --- الإعدادات (التوكن الجديد) ---
+TOKEN = "8433565422:AAFOvdP2gpuR7E6wVaNyw3gtY9Zwp_hLa0E"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN, threaded=True)
@@ -18,81 +18,87 @@ users_col = db['Authorized_Users']
 active_sessions_col = db['Active_Sessions']
 
 def get_deriv_data(token, request_data):
-    """اتصال قوي: يحاول حتى ينجح جلب البيانات ويغلق الاتصال فوراً"""
-    while True:
-        try:
-            ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=10)
-            ws.send(json.dumps({"authorize": token}))
-            auth_res = json.loads(ws.recv())
-            if "authorize" in auth_res:
-                ws.send(json.dumps(request_data))
-                response = json.loads(ws.recv())
-                ws.close()
-                return response, auth_res["authorize"].get("currency", "USD")
+    """جلب البيانات مع محاولة إعادة الاتصال عند الفشل"""
+    try:
+        ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=8)
+        ws.send(json.dumps({"authorize": token}))
+        auth_res = json.loads(ws.recv())
+        if "authorize" in auth_res:
+            ws.send(json.dumps(request_data))
+            response = json.loads(ws.recv())
             ws.close()
-        except:
-            time.sleep(1)
+            return response, auth_res["authorize"].get("currency", "USD")
+        ws.close()
+    except:
+        pass
+    return None, None
 
 def trade_engine(chat_id):
     last_trigger_time = "" 
-    
     while True:
         session = active_sessions_col.find_one({"chat_id": chat_id})
         if not session or not session.get("is_running"): break
         
         now = datetime.now()
-        current_mark = f"{now.minute}:{now.second}"
-        
-        # التفعيل عند الثواني 0، 20، 40
-        if now.second in [0, 20, 40] and current_mark != last_trigger_time:
-            last_trigger_time = current_mark
-            token = session['tokens'][0]
-            
-            # جلب آخر 10 تيكات
-            tick_req = {"ticks_history": "R_100", "count": 10, "end": "latest", "style": "ticks"}
-            res, currency = get_deriv_data(token, tick_req)
-            prices = res.get("history", {}).get("prices", [])
-            
-            if len(prices) >= 10:
-                t1 = prices[0]   # التيك الأول في المصفوفة
-                t5 = prices[4]   # التيك الخامس
-                t10 = prices[9]  # التيك العاشر والأحدث
+        # فحص الثواني المطلوبة
+        if now.second in [0, 20, 40]:
+            current_mark = f"{now.minute}:{now.second}"
+            if current_mark != last_trigger_time:
+                last_trigger_time = current_mark
+                token = session['tokens'][0]
                 
-                direction, barrier = None, "0"
+                # جلب آخر 10 تيكات
+                tick_req = {"ticks_history": "R_100", "count": 10, "end": "latest", "style": "ticks"}
+                res, currency = get_deriv_data(token, tick_req)
                 
-                # منطق الاستراتيجية المطلوب بدقة:
-                # CALL: T1 > T5 AND T10 > T1
-                if t1 > t5 and t10 > t1:
-                    direction, barrier = "CALL", "-0.8"
-                # PUT: T1 < T5 AND T10 < T1
-                elif t1 < t5 and t10 < t1:
-                    direction, barrier = "PUT", "+0.8"
+                if res and "history" in res:
+                    prices = res["history"]["prices"]
+                    if len(prices) >= 10:
+                        t1 = prices[0]  # الأقدم
+                        t5 = prices[4]  # المنتصف
+                        t10 = prices[9] # الأحدث
+                        
+                        direction, barrier = None, "0"
+                        
+                        # منطق الاستراتيجية المطلوب
+                        # CALL: T1 > T5 AND T10 > T1
+                        if t1 > t5 and t10 > t1:
+                            direction, barrier = "CALL", "-0.8"
+                        # PUT: T1 < T5 AND T10 < T1
+                        elif t1 < t5 and t10 < t1:
+                            direction, barrier = "PUT", "+0.8"
+                        
+                        if direction:
+                            acc = session["accounts_data"][token]
+                            buy_req = {
+                                "proposal": 1, "amount": acc["current_stake"], "basis": "stake",
+                                "contract_type": direction, "duration": 5, "duration_unit": "t",
+                                "symbol": "R_100", "barrier": barrier, "currency": currency
+                            }
+                            prop_res, _ = get_deriv_data(token, buy_req)
+                            
+                            if prop_res and "proposal" in prop_res:
+                                buy_id = prop_res["proposal"]["id"]
+                                exec_res, _ = get_deriv_data(token, {"buy": buy_id, "price": acc["current_stake"]})
+                                
+                                if exec_res and "buy" in exec_res:
+                                    contract_id = exec_res["buy"]["contract_id"]
+                                    bot.send_message(chat_id, f"🚀 *تم دخول صفقة {direction}*\nT1: {t1} | T5: {t5} | T10: {t10}")
+                                    
+                                    # انتظار النتيجة 18 ثانية
+                                    time.sleep(18)
+                                    final_res, _ = get_deriv_data(token, {"proposal_open_contract": 1, "contract_id": contract_id})
+                                    update_stats(chat_id, token, final_res)
                 
-                if direction:
-                    acc = session["accounts_data"][token]
-                    buy_req = {
-                        "proposal": 1, "amount": acc["current_stake"], "basis": "stake",
-                        "contract_type": direction, "duration": 5, "duration_unit": "t",
-                        "symbol": "R_100", "barrier": barrier, "currency": currency
-                    }
-                    prop_res, _ = get_deriv_data(token, buy_req)
-                    if "proposal" in prop_res:
-                        exec_res, _ = get_deriv_data(token, {"buy": prop_res["proposal"]["id"], "price": acc["current_stake"]})
-                        if "buy" in exec_res:
-                            contract_id = exec_res["buy"]["contract_id"]
-                            bot.send_message(chat_id, f"🚀 *Signal Confirmed!* \nType: {direction} \n(T1: {t1}, T5: {t5}, T10: {t10})")
-                            time.sleep(18) # انتظار النتيجة (18 ثانية)
-                            final_res, _ = get_deriv_data(token, {"proposal_open_contract": 1, "contract_id": contract_id})
-                            update_stats(chat_id, token, final_res)
-        
-        time.sleep(0.1)
+        time.sleep(0.1) # سرعة فحص الثواني
 
 def update_stats(chat_id, token, res):
     session = active_sessions_col.find_one({"chat_id": chat_id})
     acc = session['accounts_data'][token]
-    profit = float(res.get("proposal_open_contract", {}).get("profit", 0))
-    status = "✅ *WIN*" if profit > 0 else "❌ *LOSS*"
+    contract = res.get("proposal_open_contract", {})
+    profit = float(contract.get("profit", 0))
     
+    status = "✅ *WIN*" if profit > 0 else "❌ *LOSS*"
     new_total_net = acc["total_profit"] + profit
     win_count = acc["win_count"] + (1 if profit > 0 else 0)
     loss_count = acc["loss_count"] + (1 if profit <= 0 else 0)
@@ -111,13 +117,17 @@ def update_stats(chat_id, token, res):
         f"accounts_data.{token}.loss_count": loss_count
     }})
     
-    bot.send_message(chat_id, f"📊 *Result:* {status}\n💰 Net: `{new_total_net:.2f}`\n🏆 W: `{win_count}` | L: `{loss_count}`\n🔄 Next Stake: `{new_stake:.2f}`")
+    bot.send_message(chat_id, 
+        f"📊 *النتيجة:* {status}\n"
+        f"💰 صافي الربح: `{new_total_net:.2f}`\n"
+        f"🏆 ربح: `{win_count}` | خسارة: `{loss_count}`\n"
+        f"🔄 الرهان القادم: `{new_stake:.2f}`")
 
     if new_total_net >= session.get("target_profit", 99999) or new_mg >= 2:
-        bot.send_message(chat_id, "🛑 *Limit Reached!* Stopping."); 
+        bot.send_message(chat_id, "🛑 توقف البوت تلقائياً."); 
         active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {"is_running": False}})
 
-# --- الواجهة الأصلية المطلوبة (HTML Admin) ---
+# --- واجهة الـ HTML (Admin Panel) ---
 @app.route('/')
 def index():
     users = list(users_col.find())
@@ -161,29 +171,29 @@ def add_user():
 def delete_user(email):
     users_col.delete_one({"email": email}); return redirect('/')
 
-# --- TELEGRAM ---
+# --- أوامر التلغرام ---
 @bot.message_handler(commands=['start'])
 def start_cmd(m):
-    bot.send_message(m.chat.id, "🤖 *Pulse Bot (10 Ticks Analysis)*\nChecks at: 0s, 20s, 40s\nEnter Email:")
+    bot.send_message(m.chat.id, "🤖 *Pulse Bot v2.0*\nتحليل 10 تيكات عند ثانية 0، 20، 40\nأدخل الإيميل:")
     bot.register_next_step_handler(m, verify_auth)
 
 def verify_auth(m):
     u = users_col.find_one({"email": m.text.strip().lower()})
     if u and datetime.strptime(u['expiry'], "%Y-%m-%d") > datetime.now():
-        bot.send_message(m.chat.id, "✅ OK. Send API Token:"); bot.register_next_step_handler(m, setup_bot)
-    else: bot.send_message(m.chat.id, "🚫 No Access.")
+        bot.send_message(m.chat.id, "✅ تم التحقق. أرسل API Token الخاص بك:"); bot.register_next_step_handler(m, setup_bot)
+    else: bot.send_message(m.chat.id, "🚫 إيميل غير مسجل أو منتهي الصلاحية.")
 
 def setup_bot(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"tokens": [m.text.strip()], "is_running": False}}, upsert=True)
-    bot.send_message(m.chat.id, "Initial Stake:"); bot.register_next_step_handler(m, set_stake)
+    bot.send_message(m.chat.id, "أدخل مبلغ الرهان الأساسي (Stake):"); bot.register_next_step_handler(m, set_stake)
 
 def set_stake(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"initial_stake": float(m.text)}})
-    bot.send_message(m.chat.id, "Target Profit:"); bot.register_next_step_handler(m, set_tp)
+    bot.send_message(m.chat.id, "أدخل الهدف (Target Profit):"); bot.register_next_step_handler(m, set_tp)
 
 def set_tp(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"target_profit": float(m.text)}})
-    bot.send_message(m.chat.id, "Ready!", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
+    bot.send_message(m.chat.id, "تم الإعداد بنجاح!", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
 
 @bot.message_handler(func=lambda m: m.text == 'START 🚀')
 def run_trading(m):
@@ -191,11 +201,11 @@ def run_trading(m):
     accs = {sess["tokens"][0]: {"current_stake": sess["initial_stake"], "total_profit": 0.0, "consecutive_losses": 0, "win_count": 0, "loss_count": 0}}
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": True, "accounts_data": accs}})
     threading.Thread(target=trade_engine, args=(m.chat.id,), daemon=True).start()
-    bot.send_message(m.chat.id, "🚀 Running! Analysis at 0s, 20s, 40s.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
+    bot.send_message(m.chat.id, "🚀 البوت يعمل الآن ويراقب السوق كل 20 ثانية.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
 def stop_bot(m):
-    active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": False}}); bot.send_message(m.chat.id, "🛑 Stopped.")
+    active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": False}}); bot.send_message(m.chat.id, "🛑 تم إيقاف البوت.")
 
 if __name__ == '__main__':
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000), daemon=True).start()
