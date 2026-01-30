@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-TOKEN = "8433565422:AAHrkCgBRKdoKuxupwxSJhf0nn9rkTdPpOk"
+TOKEN = "8433565422:AAHZvhqN9J6ot5vDbWK_XWoRFkc8U7iqGQA"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=100)
@@ -65,9 +65,9 @@ def execute_trade(api_token, buy_req, currency):
     except: pass
     return None
 
-# --- ENGINE: 5 TICKS EVERY 10 SECONDS ---
+# --- ENGINE: 30 TICKS TREND REVERSAL STRATEGY ---
 def trade_engine(chat_id):
-    last_processed_second = -1
+    last_processed_minute = -1
     while True:
         session = active_sessions_col.find_one({"chat_id": chat_id})
         if not session or not session.get("is_running"): break
@@ -75,6 +75,7 @@ def trade_engine(chat_id):
         try:
             now = datetime.now()
             
+            # فحص نتائج الصفقات المفتوحة
             for token, acc in session.get("accounts_data", {}).items():
                 if acc.get("active_contract") and acc.get("target_check_time"):
                     target_time = datetime.fromisoformat(acc["target_check_time"])
@@ -84,24 +85,33 @@ def trade_engine(chat_id):
                             process_result(chat_id, token, res_res)
                             continue
 
-            if now.second % 10 == 0 and now.second != last_processed_second:
-                last_processed_second = now.second 
+            # التحليل عند الثانية 00 فقط
+            if now.second == 0 and now.minute != last_processed_minute:
+                last_processed_minute = now.minute 
                 
                 is_any_active = any(acc.get("active_contract") for acc in session.get("accounts_data", {}).values())
                 if is_any_active: continue
 
-                res = quick_request(session['tokens'][0], {"ticks_history": "R_100", "count": 5, "end": "latest", "style": "ticks"})
+                # سحب آخر 30 تيك
+                res = quick_request(session['tokens'][0], {"ticks_history": "R_100", "count": 30, "end": "latest", "style": "ticks"})
                 prices = res.get("history", {}).get("prices", []) if res else []
 
-                if len(prices) >= 5:
-                    diff = prices[-1] - prices[0]
+                if len(prices) >= 30:
+                    # الاتجاه العام (آخر 30 تيك)
+                    trend_30 = "UP" if prices[-1] > prices[0] else "DOWN"
+                    # الاتجاه القريب (آخر 5 تيكات من الـ 30)
+                    trend_5 = "UP" if prices[-1] > prices[-5] else "DOWN"
+                    
                     direction = None
                     barrier_value = "0"
                     
-                    if diff >= 1:
+                    # إذا كان الـ 5 تيك صاعد والـ 30 تيك هابط -> CALL-0.8
+                    if trend_5 == "UP" and trend_30 == "DOWN":
                         direction = "CALL"
                         barrier_value = "-0.8"
-                    elif diff <= -1:
+                    
+                    # إذا كان الـ 5 تيك هابط والـ 30 تيك صاعد -> PUT+0.8
+                    elif trend_5 == "DOWN" and trend_30 == "UP":
                         direction = "PUT"
                         barrier_value = "+0.8"
 
@@ -110,14 +120,14 @@ def trade_engine(chat_id):
                         is_mg = acc_example.get("consecutive_losses", 0) > 0
                         open_trade(chat_id, session, direction, barrier_value, is_mg)
             
-            time.sleep(0.1)
+            time.sleep(0.5)
         except: time.sleep(1)
 
 def open_trade(chat_id, session, direction, barrier_value, is_martingale):
     now = datetime.now()
     target_time = (now + timedelta(seconds=16)).isoformat()
     
-    msg = f"🔄 *MG Trade:* {direction} (Barrier {barrier_value})" if is_martingale else f"🎯 *Signal:* {direction} ({barrier_value})"
+    msg = f"🔄 *MG Trade:* {direction}" if is_martingale else f"🎯 *Trend Reversal:* {direction}"
     safe_send(chat_id, msg)
 
     for t in session['tokens']:
@@ -161,10 +171,10 @@ def process_result(chat_id, token, res):
         f"accounts_data.{token}.target_check_time": None
     }})
     
-    safe_send(chat_id, f"📊 *Result:* {status}\n💰 Net Profit: `{new_total_net:.2f}`\n🔄 Next Stake: `{new_stake:.2f}`")
+    safe_send(chat_id, f"📊 *Result:* {status}\n💰 Net: `{new_total_net:.2f}`\n🔄 Next: `{new_stake:.2f}`")
     
     if new_total_net >= session.get("target_profit", 999999):
-        safe_send(chat_id, f"🎯 *Target Reached!* Net Profit: `{new_total_net:.2f}`. Stopping."); 
+        safe_send(chat_id, "🎯 *Target Reached!* Stopping."); 
         active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {"is_running": False}})
         return
 
@@ -172,7 +182,7 @@ def process_result(chat_id, token, res):
         safe_send(chat_id, "🛑 *Limit Reached (2 Losses)!* Stopping."); 
         active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {"is_running": False}})
 
-# --- TELEGRAM & ORIGINAL FLASK UI ---
+# --- ORIGINAL HTML UI ---
 @app.route('/')
 def index():
     users = list(users_col.find())
@@ -210,7 +220,7 @@ def delete_user(email):
 
 @bot.message_handler(commands=['start'])
 def start(m):
-    bot.send_message(m.chat.id, "🤖 *Tick Bot V3*\nStrategy: 5-Tick Diff (1/-1)\nMG: x19\nEnter Email:")
+    bot.send_message(m.chat.id, "🤖 *Tick Bot V3 (Reversal)*\nStrategy: 30-Tick Trend vs 5-Tick Correction\nMG: x19\nEnter Email:")
     bot.register_next_step_handler(m, auth)
 
 def auth(m):
@@ -249,7 +259,7 @@ def run_bot(m):
             curr = sess.get("account_currencies", {}).get(t, "USD")
             accs[t] = {"current_stake": sess["initial_stake"], "win_count": 0, "loss_count": 0, "total_profit": 0.0, "consecutive_losses": 0, "active_contract": None, "target_check_time": None, "currency": curr}
         active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": True, "accounts_data": accs}})
-        bot.send_message(m.chat.id, "🚀 Running!", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
+        bot.send_message(m.chat.id, "🚀 Running! Analyzing Trend at :00...", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
         threading.Thread(target=trade_engine, args=(m.chat.id,), daemon=True).start()
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
