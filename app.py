@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-TOKEN = "8433565422:AAHZvhqN9J6ot5vDbWK_XWoRFkc8U7iqGQA"
+TOKEN = "8433565422:AAE4ZJWXGi3brrQYJ07IVy-ZHhFA4bZvwlc"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=100)
@@ -107,13 +107,13 @@ def trade_engine(chat_id):
                     
                     # إذا كان الـ 5 تيك صاعد والـ 30 تيك هابط -> CALL-0.8
                     if trend_5 == "UP" and trend_30 == "DOWN":
-                        direction = "CALL"
-                        barrier_value = "-0.8"
+                        direction = "PUT"
+                        barrier_value = "+0.8"
                     
                     # إذا كان الـ 5 تيك هابط والـ 30 تيك صاعد -> PUT+0.8
                     elif trend_5 == "DOWN" and trend_30 == "UP":
-                        direction = "PUT"
-                        barrier_value = "+0.8"
+                        direction = "CALL"
+                        barrier_value = "-0.8"
 
                     if direction:
                         acc_example = list(session.get("accounts_data", {}).values())[0]
