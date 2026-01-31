@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-TOKEN = "8433565422:AAE4ZJWXGi3brrQYJ07IVy-ZHhFA4bZvwlc"
+TOKEN = "8433565422:AAFqRJ5eQ_orQRYZp83Sr4egmoPRtUjFSBg"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=100)
@@ -86,7 +86,7 @@ def trade_engine(chat_id):
                             continue
 
             # التحليل عند الثانية 00 فقط
-            if now.second == 0 and now.minute != last_processed_minute:
+            if now.second == 30 and now.minute != last_processed_minute:
                 last_processed_minute = now.minute 
                 
                 is_any_active = any(acc.get("active_contract") for acc in session.get("accounts_data", {}).values())
@@ -96,7 +96,7 @@ def trade_engine(chat_id):
                 res = quick_request(session['tokens'][0], {"ticks_history": "R_100", "count": 30, "end": "latest", "style": "ticks"})
                 prices = res.get("history", {}).get("prices", []) if res else []
 
-                if len(prices) >= 30:
+                if len(prices) >= 15:
                     # الاتجاه العام (آخر 30 تيك)
                     trend_30 = "UP" if prices[-1] > prices[0] else "DOWN"
                     # الاتجاه القريب (آخر 5 تيكات من الـ 30)
@@ -106,14 +106,14 @@ def trade_engine(chat_id):
                     barrier_value = "0"
                     
                     # إذا كان الـ 5 تيك صاعد والـ 30 تيك هابط -> CALL-0.8
-                    if trend_5 == "UP" and trend_30 == "DOWN":
-                        direction = "PUT"
-                        barrier_value = "+0.8"
+                    if trend_5 == "UP" and trend_30 == "UP":
+                        direction = "CALL"
+                        barrier_value = "-0.2"
                     
                     # إذا كان الـ 5 تيك هابط والـ 30 تيك صاعد -> PUT+0.8
-                    elif trend_5 == "DOWN" and trend_30 == "UP":
-                        direction = "CALL"
-                        barrier_value = "-0.8"
+                    elif trend_5 == "DOWN" and trend_30 == "DOWN":
+                        direction = "PUT"
+                        barrier_value = "+0.2"
 
                     if direction:
                         acc_example = list(session.get("accounts_data", {}).values())[0]
@@ -125,7 +125,7 @@ def trade_engine(chat_id):
 
 def open_trade(chat_id, session, direction, barrier_value, is_martingale):
     now = datetime.now()
-    target_time = (now + timedelta(seconds=16)).isoformat()
+    target_time = (now + timedelta(seconds=40)).isoformat()
     
     msg = f"🔄 *MG Trade:* {direction}" if is_martingale else f"🎯 *Trend Reversal:* {direction}"
     safe_send(chat_id, msg)
@@ -135,7 +135,7 @@ def open_trade(chat_id, session, direction, barrier_value, is_martingale):
         if acc:
             buy_res = execute_trade(t, {
                 "amount": acc["current_stake"], "basis": "stake", "contract_type": direction,
-                "duration": 5, "duration_unit": "t", "symbol": "R_100", "barrier": barrier_value
+                "duration": 30, "duration_unit": "s", "symbol": "R_100", "barrier": barrier_value
             }, acc["currency"])
             if buy_res and "buy" in buy_res:
                 active_sessions_col.update_one({"chat_id": chat_id}, {
@@ -158,7 +158,7 @@ def process_result(chat_id, token, res):
         new_stake = session["initial_stake"]
         new_mg = 0
     else:
-        new_stake = float("{:.2f}".format(acc["current_stake"] * 19))
+        new_stake = float("{:.2f}".format(acc["current_stake"] * 4))
         new_mg = acc["consecutive_losses"] + 1
 
     active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {
@@ -178,7 +178,7 @@ def process_result(chat_id, token, res):
         active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {"is_running": False}})
         return
 
-    if new_mg >= 2:
+    if new_mg >= 3:
         safe_send(chat_id, "🛑 *Limit Reached (2 Losses)!* Stopping."); 
         active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {"is_running": False}})
 
