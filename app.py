@@ -8,7 +8,8 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-TOKEN = "8433565422:AAFqRJ5eQ_orQRYZp83Sr4egmoPRtUjFSBg"
+# التوكن الجديد الذي طلبته
+TOKEN = "8433565422:AAG55NTJGDCMToxiGXIogPQYJ67ySa01ttk"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=100)
@@ -52,9 +53,7 @@ def execute_trade(api_token, buy_req, currency):
         ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=12)
         ws.send(json.dumps({"authorize": api_token}))
         if "authorize" in json.loads(ws.recv()):
-            buy_req['amount'] = float("{:.2f}".format(buy_req['amount']))
-            buy_req['currency'] = currency
-            ws.send(json.dumps({"proposal": 1, **buy_req}))
+            ws.send(json.dumps({"proposal": 1, **buy_req, "currency": currency}))
             prop_res = json.loads(ws.recv())
             if "proposal" in prop_res:
                 ws.send(json.dumps({"buy": prop_res["proposal"]["id"], "price": buy_req['amount']}))
@@ -65,9 +64,9 @@ def execute_trade(api_token, buy_req, currency):
     except: pass
     return None
 
-# --- ENGINE: 30 TICKS TREND REVERSAL STRATEGY ---
+# --- ENGINE: DIGIT UNDER 9 (1 TICK TRADE) ---
 def trade_engine(chat_id):
-    last_processed_minute = -1
+    last_processed_second = -1
     while True:
         session = active_sessions_col.find_one({"chat_id": chat_id})
         if not session or not session.get("is_running"): break
@@ -75,67 +74,49 @@ def trade_engine(chat_id):
         try:
             now = datetime.now()
             
-            # فحص نتائج الصفقات المفتوحة
+            # فحص النتائج (انتظار 10 ثوانٍ كما طلبت لضمان تحديث السيرفر)
             for token, acc in session.get("accounts_data", {}).items():
                 if acc.get("active_contract") and acc.get("target_check_time"):
-                    target_time = datetime.fromisoformat(acc["target_check_time"])
-                    if now >= target_time:
+                    if now >= datetime.fromisoformat(acc["target_check_time"]):
                         res_res = quick_request(token, {"proposal_open_contract": 1, "contract_id": acc["active_contract"]})
                         if res_res and res_res.get("proposal_open_contract", {}).get("is_expired"):
                             process_result(chat_id, token, res_res)
-                            continue
 
-            # التحليل عند الثانية 00 فقط
-            if now.second == 30 and now.minute != last_processed_minute:
-                last_processed_minute = now.minute 
+            # التحليل عند الثواني 0, 20, 40
+            if now.second in [0, 20, 40] and now.second != last_processed_second:
+                last_processed_second = now.second 
                 
                 is_any_active = any(acc.get("active_contract") for acc in session.get("accounts_data", {}).values())
                 if is_any_active: continue
 
-                # سحب آخر 30 تيك
-                res = quick_request(session['tokens'][0], {"ticks_history": "R_100", "count": 30, "end": "latest", "style": "ticks"})
-                prices = res.get("history", {}).get("prices", []) if res else []
+                res = quick_request(session['tokens'][0], {"ticks_history": "R_100", "count": 10, "end": "latest", "style": "ticks"})
+                if res and "history" in res:
+                    prices = res["history"]["prices"]
+                    # استخراج الرقم الأخير بدقة %.2f
+                    last_digits = [int(str('%.2f' % p)[-1]) for p in prices]
+                    
+                    if 9 not in last_digits:
+                        open_trade(chat_id, session, last_digits)
+                    else:
+                        safe_send(chat_id, f"⚠️ تخطي ثانية {now.second}: الرقم 9 ظهر في {last_digits}")
 
-                if len(prices) >= 15:
-                    # الاتجاه العام (آخر 30 تيك)
-                    trend_30 = "UP" if prices[-1] > prices[0] else "DOWN"
-                    # الاتجاه القريب (آخر 5 تيكات من الـ 30)
-                    trend_5 = "UP" if prices[-1] > prices[-5] else "DOWN"
-                    
-                    direction = None
-                    barrier_value = "0"
-                    
-                    # إذا كان الـ 5 تيك صاعد والـ 30 تيك هابط -> CALL-0.8
-                    if trend_5 == "UP" and trend_30 == "UP":
-                        direction = "CALL"
-                        barrier_value = "-0.2"
-                    
-                    # إذا كان الـ 5 تيك هابط والـ 30 تيك صاعد -> PUT+0.8
-                    elif trend_5 == "DOWN" and trend_30 == "DOWN":
-                        direction = "PUT"
-                        barrier_value = "+0.2"
-
-                    if direction:
-                        acc_example = list(session.get("accounts_data", {}).values())[0]
-                        is_mg = acc_example.get("consecutive_losses", 0) > 0
-                        open_trade(chat_id, session, direction, barrier_value, is_mg)
-            
-            time.sleep(0.5)
+            time.sleep(0.1)
         except: time.sleep(1)
 
-def open_trade(chat_id, session, direction, barrier_value, is_martingale):
-    now = datetime.now()
-    target_time = (now + timedelta(seconds=40)).isoformat()
-    
-    msg = f"🔄 *MG Trade:* {direction}" if is_martingale else f"🎯 *Trend Reversal:* {direction}"
-    safe_send(chat_id, msg)
-
+def open_trade(chat_id, session, digits):
+    # مدة الانتظار للمعالجة أصبحت 10 ثوانٍ
+    target_time = (datetime.now() + timedelta(seconds=10)).isoformat()
     for t in session['tokens']:
         acc = session['accounts_data'].get(t)
         if acc:
             buy_res = execute_trade(t, {
-                "amount": acc["current_stake"], "basis": "stake", "contract_type": direction,
-                "duration": 30, "duration_unit": "s", "symbol": "R_100", "barrier": barrier_value
+                "amount": acc["current_stake"], 
+                "basis": "stake", 
+                "contract_type": "DIGITUNDER",
+                "duration": 1, # مدة الصفقة 1 تيك
+                "duration_unit": "t", 
+                "symbol": "R_100", 
+                "barrier": "9"
             }, acc["currency"])
             if buy_res and "buy" in buy_res:
                 active_sessions_col.update_one({"chat_id": chat_id}, {
@@ -144,45 +125,38 @@ def open_trade(chat_id, session, direction, barrier_value, is_martingale):
                         f"accounts_data.{t}.target_check_time": target_time
                     }
                 })
+                safe_send(chat_id, f"🎯 دخول Under 9 بمبلغ `{acc['current_stake']}`\n🔢 الأرقام: `{digits}`")
 
 def process_result(chat_id, token, res):
     session = active_sessions_col.find_one({"chat_id": chat_id})
     acc = session['accounts_data'].get(token)
-    contract = res.get("proposal_open_contract", {})
-    profit = float(contract.get("profit", 0))
-    status = "✅ *WIN*" if profit > 0 else "❌ *LOSS*"
-    
-    new_total_net = acc["total_profit"] + profit
+    profit = float(res.get("proposal_open_contract", {}).get("profit", 0))
+    new_total = acc["total_profit"] + profit
     
     if profit > 0:
         new_stake = session["initial_stake"]
-        new_mg = 0
+        new_loss_streak = 0
+        status = "✅ ربح"
     else:
-        new_stake = float("{:.2f}".format(acc["current_stake"] * 4))
-        new_mg = acc["consecutive_losses"] + 1
+        new_stake = float("{:.2f}".format(acc["current_stake"] * 14))
+        new_loss_streak = acc.get("consecutive_losses", 0) + 1
+        status = "❌ خسارة"
 
     active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {
         f"accounts_data.{token}.current_stake": new_stake,
-        f"accounts_data.{token}.win_count": acc["win_count"] + (1 if profit > 0 else 0),
-        f"accounts_data.{token}.loss_count": acc["loss_count"] + (1 if profit <= 0 else 0),
-        f"accounts_data.{token}.consecutive_losses": new_mg,
-        f"accounts_data.{token}.total_profit": new_total_net,
+        f"accounts_data.{token}.consecutive_losses": new_loss_streak,
+        f"accounts_data.{token}.total_profit": new_total,
         f"accounts_data.{token}.active_contract": None,
         f"accounts_data.{token}.target_check_time": None
     }})
     
-    safe_send(chat_id, f"📊 *Result:* {status}\n💰 Net: `{new_total_net:.2f}`\n🔄 Next: `{new_stake:.2f}`")
-    
-    if new_total_net >= session.get("target_profit", 999999):
-        safe_send(chat_id, "🎯 *Target Reached!* Stopping."); 
-        active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {"is_running": False}})
-        return
+    safe_send(chat_id, f"📊 {status}\n💰 الصافي: `{new_total:.2f}`\n🔄 القادم: `{new_stake}`")
 
-    if new_mg >= 3:
-        safe_send(chat_id, "🛑 *Limit Reached (2 Losses)!* Stopping."); 
+    if new_loss_streak >= 2:
+        safe_send(chat_id, "🛑 توقف: خسارتين متتاليتين.")
         active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {"is_running": False}})
 
-# --- ORIGINAL HTML UI ---
+# --- UPDATED HTML UI WITH 1 DAY OPTION ---
 @app.route('/')
 def index():
     users = list(users_col.find())
@@ -202,7 +176,10 @@ def index():
         <h2>🚀 Trading Bot Admin Panel</h2>
         <form action="/add" method="POST">
             <input type="email" name="email" placeholder="User Email" required>
-            <select name="days"><option value="30">30 Days</option><option value="36500">Lifetime</option></select>
+            <select name="days">
+                <option value="1">1 Day</option> <option value="30">30 Days</option>
+                <option value="36500">Lifetime</option>
+            </select>
             <button type="submit" class="btn">Add User</button>
         </form>
         <table><thead><tr><th>Email</th><th>Expiry</th><th>Action</th></tr></thead>
@@ -218,53 +195,47 @@ def add_user():
 def delete_user(email):
     users_col.delete_one({"email": email}); return redirect('/')
 
+# --- TELEGRAM COMMANDS ---
 @bot.message_handler(commands=['start'])
 def start(m):
-    bot.send_message(m.chat.id, "🤖 *Tick Bot V3 (Reversal)*\nStrategy: 30-Tick Trend vs 5-Tick Correction\nMG: x19\nEnter Email:")
+    bot.send_message(m.chat.id, "🤖 *Under 9 Bot V5*\n- صفقات 1 تيك\n- انتظار 10 ثواني\n- مضاعفة ×14\nأدخل البريد:")
     bot.register_next_step_handler(m, auth)
 
 def auth(m):
     u = users_col.find_one({"email": m.text.strip().lower()})
     if u and datetime.strptime(u['expiry'], "%Y-%m-%d") > datetime.now():
-        active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": False}}, upsert=True)
-        bot.send_message(m.chat.id, "✅ Verified. Token:"); bot.register_next_step_handler(m, save_token)
-    else: bot.send_message(m.chat.id, "🚫 Denied.")
+        bot.send_message(m.chat.id, "✅ تم التحقق. أدخل التوكنات:")
+        bot.register_next_step_handler(m, save_token)
+    else: bot.send_message(m.chat.id, "🚫 اشتراكك منتهي أو غير مسجل.")
 
 def save_token(m):
     tokens = [t.strip() for t in m.text.split(",")]
-    accounts_info = {}
-    for t in tokens:
-        res = quick_request(t, {"get_settings": 1})
-        curr = "USD"
-        if res and "authorize" in res:
-            curr = res["authorize"].get("currency", "USD")
-        accounts_info[t] = curr
-    active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"tokens": tokens, "account_currencies": accounts_info}})
-    bot.send_message(m.chat.id, "Stake Amount:"); bot.register_next_step_handler(m, save_stake)
+    active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"tokens": tokens, "is_running": False}}, upsert=True)
+    bot.send_message(m.chat.id, "المبلغ (Stake):")
+    bot.register_next_step_handler(m, save_stake)
 
 def save_stake(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"initial_stake": float(m.text)}})
-    bot.send_message(m.chat.id, "Target Profit (TP):"); bot.register_next_step_handler(m, save_tp)
+    bot.send_message(m.chat.id, "الهدف (TP):")
+    bot.register_next_step_handler(m, save_tp)
 
 def save_tp(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"target_profit": float(m.text)}})
-    bot.send_message(m.chat.id, "Setup Done!", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
+    bot.send_message(m.chat.id, "جاهز!", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
 
 @bot.message_handler(func=lambda m: m.text == 'START 🚀')
 def run_bot(m):
     sess = active_sessions_col.find_one({"chat_id": m.chat.id})
     if sess:
-        accs = {}
-        for t in sess["tokens"]:
-            curr = sess.get("account_currencies", {}).get(t, "USD")
-            accs[t] = {"current_stake": sess["initial_stake"], "win_count": 0, "loss_count": 0, "total_profit": 0.0, "consecutive_losses": 0, "active_contract": None, "target_check_time": None, "currency": curr}
+        accs = {t: {"current_stake": sess["initial_stake"], "total_profit": 0.0, "consecutive_losses": 0, "active_contract": None, "target_check_time": None, "currency": "USD"} for t in sess["tokens"]}
         active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": True, "accounts_data": accs}})
-        bot.send_message(m.chat.id, "🚀 Running! Analyzing Trend at :00...", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
+        bot.send_message(m.chat.id, "🚀 انطلق البوت!", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
         threading.Thread(target=trade_engine, args=(m.chat.id,), daemon=True).start()
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
 def stop(m):
-    active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": False}}); bot.send_message(m.chat.id, "🛑 Stopped.")
+    active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": False}})
+    bot.send_message(m.chat.id, "🛑 توقف.")
 
 if __name__ == '__main__':
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000))), daemon=True).start()
