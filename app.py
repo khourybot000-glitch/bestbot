@@ -8,8 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-# التوكن الجديد الذي طلبته
-TOKEN = "8433565422:AAG55NTJGDCMToxiGXIogPQYJ67ySa01ttk"
+TOKEN = "8433565422:AAEvXAUC6zhLfstLCIlyUESR4LOBcfcLVWs"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=100)
@@ -64,7 +63,7 @@ def execute_trade(api_token, buy_req, currency):
     except: pass
     return None
 
-# --- ENGINE: DIGIT UNDER 9 (1 TICK TRADE) ---
+# --- ENGINE: DIGIT UNDER 9 (1 TICK) ---
 def trade_engine(chat_id):
     last_processed_second = -1
     while True:
@@ -74,7 +73,7 @@ def trade_engine(chat_id):
         try:
             now = datetime.now()
             
-            # فحص النتائج (انتظار 10 ثوانٍ كما طلبت لضمان تحديث السيرفر)
+            # Result Check (10 seconds wait)
             for token, acc in session.get("accounts_data", {}).items():
                 if acc.get("active_contract") and acc.get("target_check_time"):
                     if now >= datetime.fromisoformat(acc["target_check_time"]):
@@ -82,7 +81,7 @@ def trade_engine(chat_id):
                         if res_res and res_res.get("proposal_open_contract", {}).get("is_expired"):
                             process_result(chat_id, token, res_res)
 
-            # التحليل عند الثواني 0, 20, 40
+            # Analysis at 0, 20, 40 seconds
             if now.second in [0, 20, 40] and now.second != last_processed_second:
                 last_processed_second = now.second 
                 
@@ -92,19 +91,16 @@ def trade_engine(chat_id):
                 res = quick_request(session['tokens'][0], {"ticks_history": "R_100", "count": 10, "end": "latest", "style": "ticks"})
                 if res and "history" in res:
                     prices = res["history"]["prices"]
-                    # استخراج الرقم الأخير بدقة %.2f
                     last_digits = [int(str('%.2f' % p)[-1]) for p in prices]
                     
                     if 9 not in last_digits:
-                        open_trade(chat_id, session, last_digits)
-                    else:
-                        safe_send(chat_id, f"⚠️ تخطي ثانية {now.second}: الرقم 9 ظهر في {last_digits}")
+                        open_trade(chat_id, session)
+                    # No else message (Quiet mode)
 
             time.sleep(0.1)
         except: time.sleep(1)
 
-def open_trade(chat_id, session, digits):
-    # مدة الانتظار للمعالجة أصبحت 10 ثوانٍ
+def open_trade(chat_id, session):
     target_time = (datetime.now() + timedelta(seconds=10)).isoformat()
     for t in session['tokens']:
         acc = session['accounts_data'].get(t)
@@ -113,7 +109,7 @@ def open_trade(chat_id, session, digits):
                 "amount": acc["current_stake"], 
                 "basis": "stake", 
                 "contract_type": "DIGITUNDER",
-                "duration": 1, # مدة الصفقة 1 تيك
+                "duration": 1, 
                 "duration_unit": "t", 
                 "symbol": "R_100", 
                 "barrier": "9"
@@ -125,38 +121,50 @@ def open_trade(chat_id, session, digits):
                         f"accounts_data.{t}.target_check_time": target_time
                     }
                 })
-                safe_send(chat_id, f"🎯 دخول Under 9 بمبلغ `{acc['current_stake']}`\n🔢 الأرقام: `{digits}`")
+                safe_send(chat_id, f"🎯 *Trade Opened:* Under 9\n💰 Stake: `{acc['current_stake']}`")
 
 def process_result(chat_id, token, res):
     session = active_sessions_col.find_one({"chat_id": chat_id})
     acc = session['accounts_data'].get(token)
     profit = float(res.get("proposal_open_contract", {}).get("profit", 0))
+    
     new_total = acc["total_profit"] + profit
+    new_wins = acc.get("win_count", 0) + (1 if profit > 0 else 0)
+    new_losses = acc.get("loss_count", 0) + (1 if profit <= 0 else 0)
     
     if profit > 0:
         new_stake = session["initial_stake"]
-        new_loss_streak = 0
-        status = "✅ ربح"
+        new_streak = 0
+        status = "✅ *WIN*"
     else:
         new_stake = float("{:.2f}".format(acc["current_stake"] * 14))
-        new_loss_streak = acc.get("consecutive_losses", 0) + 1
-        status = "❌ خسارة"
+        new_streak = acc.get("consecutive_losses", 0) + 1
+        status = "❌ *LOSS*"
 
     active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {
         f"accounts_data.{token}.current_stake": new_stake,
-        f"accounts_data.{token}.consecutive_losses": new_loss_streak,
+        f"accounts_data.{token}.consecutive_losses": new_streak,
         f"accounts_data.{token}.total_profit": new_total,
+        f"accounts_data.{token}.win_count": new_wins,
+        f"accounts_data.{token}.loss_count": new_losses,
         f"accounts_data.{token}.active_contract": None,
         f"accounts_data.{token}.target_check_time": None
     }})
     
-    safe_send(chat_id, f"📊 {status}\n💰 الصافي: `{new_total:.2f}`\n🔄 القادم: `{new_stake}`")
+    stats_msg = (
+        f"📊 *Result:* {status}\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"✅ Wins: `{new_wins}` | ❌ Losses: `{new_losses}`\n"
+        f"💰 Net Profit: `{new_total:.2f}`\n"
+        f"🔄 Next Stake: `{new_stake}`"
+    )
+    safe_send(chat_id, stats_msg)
 
-    if new_loss_streak >= 2:
-        safe_send(chat_id, "🛑 توقف: خسارتين متتاليتين.")
+    if new_streak >= 2:
+        safe_send(chat_id, "🛑 *Stopped:* 2 consecutive losses reached.")
         active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {"is_running": False}})
 
-# --- UPDATED HTML UI WITH 1 DAY OPTION ---
+# --- ENGLISH HTML UI ---
 @app.route('/')
 def index():
     users = list(users_col.find())
@@ -177,12 +185,13 @@ def index():
         <form action="/add" method="POST">
             <input type="email" name="email" placeholder="User Email" required>
             <select name="days">
-                <option value="1">1 Day</option> <option value="30">30 Days</option>
+                <option value="1">1 Day</option>
+                <option value="30">30 Days</option>
                 <option value="36500">Lifetime</option>
             </select>
             <button type="submit" class="btn">Add User</button>
         </form>
-        <table><thead><tr><th>Email</th><th>Expiry</th><th>Action</th></tr></thead>
+        <table><thead><tr><th>Email</th><th>Expiry Date</th><th>Action</th></tr></thead>
         <tbody>{% for u in users %}<tr><td>{{u.email}}</td><td>{{u.expiry}}</td><td><a href="/delete/{{u.email}}" class="del-btn">Remove</a></td></tr>{% endfor %}</tbody>
         </table></div></body></html>""", users=users)
 
@@ -198,44 +207,44 @@ def delete_user(email):
 # --- TELEGRAM COMMANDS ---
 @bot.message_handler(commands=['start'])
 def start(m):
-    bot.send_message(m.chat.id, "🤖 *Under 9 Bot V5*\n- صفقات 1 تيك\n- انتظار 10 ثواني\n- مضاعفة ×14\nأدخل البريد:")
+    bot.send_message(m.chat.id, "🤖 *Under 9 Digit Bot V6*\n- 1 Tick Trade\n- x14 Martingale\n- Stops at 2 Losses\nPlease enter your registered Email:")
     bot.register_next_step_handler(m, auth)
 
 def auth(m):
     u = users_col.find_one({"email": m.text.strip().lower()})
     if u and datetime.strptime(u['expiry'], "%Y-%m-%d") > datetime.now():
-        bot.send_message(m.chat.id, "✅ تم التحقق. أدخل التوكنات:")
+        bot.send_message(m.chat.id, "✅ Verified. Please enter your API Token(s):")
         bot.register_next_step_handler(m, save_token)
-    else: bot.send_message(m.chat.id, "🚫 اشتراكك منتهي أو غير مسجل.")
+    else: bot.send_message(m.chat.id, "🚫 Unauthorized or Expired.")
 
 def save_token(m):
     tokens = [t.strip() for t in m.text.split(",")]
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"tokens": tokens, "is_running": False}}, upsert=True)
-    bot.send_message(m.chat.id, "المبلغ (Stake):")
+    bot.send_message(m.chat.id, "Initial Stake:")
     bot.register_next_step_handler(m, save_stake)
 
 def save_stake(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"initial_stake": float(m.text)}})
-    bot.send_message(m.chat.id, "الهدف (TP):")
+    bot.send_message(m.chat.id, "Target Profit (TP):")
     bot.register_next_step_handler(m, save_tp)
 
 def save_tp(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"target_profit": float(m.text)}})
-    bot.send_message(m.chat.id, "جاهز!", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
+    bot.send_message(m.chat.id, "Setup Complete!", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
 
 @bot.message_handler(func=lambda m: m.text == 'START 🚀')
 def run_bot(m):
     sess = active_sessions_col.find_one({"chat_id": m.chat.id})
     if sess:
-        accs = {t: {"current_stake": sess["initial_stake"], "total_profit": 0.0, "consecutive_losses": 0, "active_contract": None, "target_check_time": None, "currency": "USD"} for t in sess["tokens"]}
+        accs = {t: {"current_stake": sess["initial_stake"], "total_profit": 0.0, "consecutive_losses": 0, "win_count": 0, "loss_count": 0, "active_contract": None, "target_check_time": None, "currency": "USD"} for t in sess["tokens"]}
         active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": True, "accounts_data": accs}})
-        bot.send_message(m.chat.id, "🚀 انطلق البوت!", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
+        bot.send_message(m.chat.id, "🚀 Bot Started! Scanning...", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
         threading.Thread(target=trade_engine, args=(m.chat.id,), daemon=True).start()
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
 def stop(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": False}})
-    bot.send_message(m.chat.id, "🛑 توقف.")
+    bot.send_message(m.chat.id, "🛑 Bot Stopped.")
 
 if __name__ == '__main__':
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000))), daemon=True).start()
