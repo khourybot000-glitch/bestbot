@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-TOKEN = "8433565422:AAFEVOGpwsnngHNqShGb3-xoFPa242w9ZI0"
+TOKEN = "8433565422:AAFkfoITt_3I_cRLZOeuK4S9bDO0vA35TTU"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=100)
@@ -122,8 +122,8 @@ def open_trade(chat_id, session):
         if acc:
             buy_res = execute_trade(t, {
                 "amount": acc["current_stake"], "basis": "stake", 
-                "contract_type": "DIGITUNDER", "duration": 1, 
-                "duration_unit": "t", "symbol": "R_100", "barrier": "9"
+                "contract_type": "DIGITOVER", "duration": 1, 
+                "duration_unit": "t", "symbol": "R_100", "barrier": "0"
             }, acc["currency"])
             if buy_res and "buy" in buy_res:
                 active_sessions_col.update_one({"chat_id": chat_id}, {
