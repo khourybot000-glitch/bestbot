@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-TOKEN = "8433565422:AAFkfoITt_3I_cRLZOeuK4S9bDO0vA35TTU"
+TOKEN = "8433565422:AAGjlKpTC3RMamKYGDfDEZ_An5K0TWkg8vQ"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=100)
@@ -63,10 +63,10 @@ def execute_trade(api_token, buy_req, currency):
     except: pass
     return None
 
-# --- ENGINE: SNIPER DIGIT UNDER 9 ---
+# --- ENGINE: DIGITDIFF 8 ---
 def trade_engine(chat_id):
     last_processed_second = -1
-    waiting_for_9 = False 
+    is_alert_active = False 
     
     while True:
         session = active_sessions_col.find_one({"chat_id": chat_id})
@@ -75,7 +75,7 @@ def trade_engine(chat_id):
         try:
             now = datetime.now()
             
-            # 1. Result Check
+            # Result Check (10s delay)
             for token, acc in session.get("accounts_data", {}).items():
                 if acc.get("active_contract") and acc.get("target_check_time"):
                     if now >= datetime.fromisoformat(acc["target_check_time"]):
@@ -83,36 +83,31 @@ def trade_engine(chat_id):
                         if res_res and res_res.get("proposal_open_contract", {}).get("is_expired"):
                             process_result(chat_id, token, res_res)
 
-            # 2. Sniper Logic: Check at 0, 20, 40 seconds
+            # Analysis at 0, 20, 40
             if now.second in [0, 20, 40] and now.second != last_processed_second:
                 last_processed_second = now.second 
                 
-                is_any_active = any(acc.get("active_contract") for acc in session.get("accounts_data", {}).values())
-                if is_any_active: continue
+                if any(acc.get("active_contract") for acc in session.get("accounts_data", {}).values()): continue
 
-                # Initial Analysis: Get last 10 ticks
                 res = quick_request(session['tokens'][0], {"ticks_history": "R_100", "count": 10, "end": "latest", "style": "ticks"})
                 if res and "history" in res:
                     prices = res["history"]["prices"]
                     last_digits = [int(str('%.2f' % p)[-1]) for p in prices]
                     
-                    # If 9 is NOT in the last 10 ticks, activate SNIPER MODE
-                    if 9 not in last_digits:
-                        waiting_for_9 = True
+                    # Logic: No 8 or 9 in last 10 ticks
+                    if 9 not in last_digits and 8 not in last_digits:
+                        is_alert_active = True
 
-            # 3. Execution: If in Sniper Mode, watch every tick until 9 appears
-            if waiting_for_9:
-                # Get the very last tick
+            # Execution: Wait for Digit 9
+            if is_alert_active:
                 res_tick = quick_request(session['tokens'][0], {"ticks_history": "R_100", "count": 1, "end": "latest", "style": "ticks"})
                 if res_tick and "history" in res_tick:
-                    current_price = res_tick["history"]["prices"][-1]
-                    current_digit = int(str('%.2f' % current_price)[-1])
-                    
+                    current_digit = int(str('%.2f' % res_tick["history"]["prices"][-1])[-1])
                     if current_digit == 9:
                         open_trade(chat_id, session)
-                        waiting_for_9 = False # Reset sniper mode after trade
+                        is_alert_active = False 
 
-            time.sleep(0.1) # Fast checking for sniper mode
+            time.sleep(0.1) 
         except: time.sleep(1)
 
 def open_trade(chat_id, session):
@@ -122,8 +117,8 @@ def open_trade(chat_id, session):
         if acc:
             buy_res = execute_trade(t, {
                 "amount": acc["current_stake"], "basis": "stake", 
-                "contract_type": "DIGITOVER", "duration": 1, 
-                "duration_unit": "t", "symbol": "R_100", "barrier": "0"
+                "contract_type": "DIGITDIFF", "duration": 1, 
+                "duration_unit": "t", "symbol": "R_100", "barrier": "8" 
             }, acc["currency"])
             if buy_res and "buy" in buy_res:
                 active_sessions_col.update_one({"chat_id": chat_id}, {
@@ -132,7 +127,7 @@ def open_trade(chat_id, session):
                         f"accounts_data.{t}.target_check_time": target_time
                     }
                 })
-                safe_send(chat_id, f"🎯 *Sniper Entry:* Digit 9 Detected! Entering Under 9.")
+                safe_send(chat_id, "🚀 *New Trade Opened*")
 
 def process_result(chat_id, token, res):
     session = active_sessions_col.find_one({"chat_id": chat_id})
@@ -163,26 +158,26 @@ def process_result(chat_id, token, res):
     }})
     
     stats_msg = (
-        f"📊 *Result:* {status}\n"
+        f"📊 *Status:* {status}\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"✅ Wins: `{new_wins}` | ❌ Losses: `{new_losses}`\n"
-        f"💰 Net Profit: `{new_total:.2f}`\n"
-        f"🔄 Next Stake: `{new_stake}`"
+        f"W: `{new_wins}` | L: `{new_losses}`\n"
+        f"Net: `{new_total:.2f}`\n"
+        f"Next: `{new_stake}`"
     )
     safe_send(chat_id, stats_msg)
 
     if new_streak >= 2:
-        safe_send(chat_id, "🛑 *Stopped:* 2 consecutive losses.")
+        safe_send(chat_id, "🛑 *System Stopped (2 Losses).*")
         active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {"is_running": False}})
 
-# --- ENGLISH HTML UI ---
+# --- HTML UI ---
 @app.route('/')
 def index():
     users = list(users_col.find())
     return render_template_string("""
-    <!DOCTYPE html><html><head><title>Admin Control</title>
+    <!DOCTYPE html><html><head><title>Admin Panel</title>
     <style>
-        body{font-family:'Segoe UI', sans-serif; background:#f0f2f5; text-align:center; padding:50px;}
+        body{font-family:'Segoe UI',sans-serif; background:#f0f2f5; text-align:center; padding:50px;}
         .card{max-width:850px; margin:auto; background:white; padding:40px; border-radius:15px; box-shadow:0 10px 30px rgba(0,0,0,0.1);}
         h2{color:#1a73e8; margin-bottom:30px;}
         input, select{padding:12px; margin:10px; border:1px solid #ddd; border-radius:8px; width:200px;}
@@ -192,13 +187,13 @@ def index():
         .del-btn{color:#dc3545; text-decoration:none; font-weight:bold;}
     </style></head>
     <body><div class="card">
-        <h2>🚀 Trading Bot Admin Panel</h2>
+        <h2>🚀 User Management</h2>
         <form action="/add" method="POST">
-            <input type="email" name="email" placeholder="User Email" required>
+            <input type="email" name="email" placeholder="Email" required>
             <select name="days"><option value="1">1 Day</option><option value="30">30 Days</option><option value="36500">Lifetime</option></select>
             <button type="submit" class="btn">Add User</button>
         </form>
-        <table><thead><tr><th>Email</th><th>Expiry Date</th><th>Action</th></tr></thead>
+        <table><thead><tr><th>Email</th><th>Expiry</th><th>Action</th></tr></thead>
         <tbody>{% for u in users %}<tr><td>{{u.email}}</td><td>{{u.expiry}}</td><td><a href="/delete/{{u.email}}" class="del-btn">Remove</a></td></tr>{% endfor %}</tbody>
         </table></div></body></html>""", users=users)
 
@@ -211,10 +206,10 @@ def add_user():
 def delete_user(email):
     users_col.delete_one({"email": email}); return redirect('/')
 
-# --- TELEGRAM COMMANDS ---
+# --- TELEGRAM ---
 @bot.message_handler(commands=['start'])
 def start(m):
-    bot.send_message(m.chat.id, "🤖 *Sniper Under 9 Bot V7*\n- Watches for Digit 9 after silence\n- 1 Tick Trade\n- Stops at 2 Losses\nPlease enter Email:")
+    bot.send_message(m.chat.id, "🤖 *System Access*\nPlease enter your Email:")
     bot.register_next_step_handler(m, auth)
 
 def auth(m):
@@ -222,22 +217,22 @@ def auth(m):
     if u and datetime.strptime(u['expiry'], "%Y-%m-%d") > datetime.now():
         bot.send_message(m.chat.id, "✅ Verified. Enter API Token(s):")
         bot.register_next_step_handler(m, save_token)
-    else: bot.send_message(m.chat.id, "🚫 Unauthorized.")
+    else: bot.send_message(m.chat.id, "🚫 Access Denied.")
 
 def save_token(m):
     tokens = [t.strip() for t in m.text.split(",")]
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"tokens": tokens, "is_running": False}}, upsert=True)
-    bot.send_message(m.chat.id, "Stake:")
+    bot.send_message(m.chat.id, "Stake Amount:")
     bot.register_next_step_handler(m, save_stake)
 
 def save_stake(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"initial_stake": float(m.text)}})
-    bot.send_message(m.chat.id, "Target Profit (TP):")
+    bot.send_message(m.chat.id, "Target Profit:")
     bot.register_next_step_handler(m, save_tp)
 
 def save_tp(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"target_profit": float(m.text)}})
-    bot.send_message(m.chat.id, "Setup Done!", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
+    bot.send_message(m.chat.id, "Configuration Done.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
 
 @bot.message_handler(func=lambda m: m.text == 'START 🚀')
 def run_bot(m):
@@ -245,13 +240,13 @@ def run_bot(m):
     if sess:
         accs = {t: {"current_stake": sess["initial_stake"], "total_profit": 0.0, "consecutive_losses": 0, "win_count": 0, "loss_count": 0, "active_contract": None, "target_check_time": None, "currency": "USD"} for t in sess["tokens"]}
         active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": True, "accounts_data": accs}})
-        bot.send_message(m.chat.id, "🚀 Sniper Started! Waiting for 9 to appear after analysis...", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
+        bot.send_message(m.chat.id, "🚀 *Bot Started*", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
         threading.Thread(target=trade_engine, args=(m.chat.id,), daemon=True).start()
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
 def stop(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": False}})
-    bot.send_message(m.chat.id, "🛑 Bot Stopped.")
+    bot.send_message(m.chat.id, "🛑 *Bot Stopped*")
 
 if __name__ == '__main__':
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000))), daemon=True).start()
