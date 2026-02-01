@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-TOKEN = "8433565422:AAFFUyIgDd7LUHiNohf1fjbZVR67RgoC3rg"
+TOKEN = "8433565422:AAEnku035sQ_4v1MU06RlNtP4SqsjPdWEig"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=100)
@@ -63,9 +63,9 @@ def execute_trade(api_token, buy_req, currency):
     except: pass
     return None
 
-# --- ENGINE: LOGIC V10 (Price Comparison when Digit 9 is spotted) ---
+# --- ENGINE: 60 TICKS STRATEGY ---
 def trade_engine(chat_id):
-    last_processed_second = -1
+    last_processed_minute = -1
     
     while True:
         session = active_sessions_col.find_one({"chat_id": chat_id})
@@ -74,7 +74,7 @@ def trade_engine(chat_id):
         try:
             now = datetime.now()
             
-            # 1. Result Check (18s delay)
+            # 1. Result Check (Wait 18s)
             for token, acc in session.get("accounts_data", {}).items():
                 if acc.get("active_contract") and acc.get("target_check_time"):
                     if now >= datetime.fromisoformat(acc["target_check_time"]):
@@ -82,32 +82,25 @@ def trade_engine(chat_id):
                         if res_res and res_res.get("proposal_open_contract", {}).get("is_expired"):
                             process_result(chat_id, token, res_res)
 
-            # 2. Execution Timing: 0, 10, 20, 30, 40, 50
-            if now.second in [0] and now.second != last_processed_second:
-                last_processed_second = now.second
+            # 2. Analysis ONLY AT SECOND 0
+            if now.second == 0 and now.minute != last_processed_minute:
+                last_processed_minute = now.minute
                 
                 if any(acc.get("active_contract") for acc in session.get("accounts_data", {}).values()): continue
 
-                # Get the last 2 ticks
-                res = quick_request(session['tokens'][0], {"ticks_history": "R_100", "count": 2, "end": "latest", "style": "ticks"})
+                res = quick_request(session['tokens'][0], {"ticks_history": "R_100", "count": 60, "end": "latest", "style": "ticks"})
                 if res and "history" in res:
                     prices = res["history"]["prices"]
-                    tick_now = prices[-1]
-                    tick_prev = prices[-2]
+                    c1_trend = "UP" if prices[29] > prices[0] else "DOWN"
+                    c2_trend = "UP" if prices[59] > prices[30] else "DOWN"
+                    last_5_trend = "UP" if prices[-1] > prices[-5] else "DOWN"
                     
-                    # Extract 1st digit after dot of the CURRENT tick
-                    d1_now = int(str(tick_now).split('.')[1][0]) if '.' in str(tick_now) else 0
-                    
-                    if d1_now == 9:
-                        # Compare full PRICE of Tick 2 vs Tick 1
-                        if tick_now > tick_prev:
-                            # PRICE UP -> PUT +0.8
-                            open_trade(chat_id, session, "PUT", "+0.8")
-                        elif tick_now < tick_prev:
-                            # PRICE DOWN -> CALL -0.8
-                            open_trade(chat_id, session, "CALL", "-0.8")
+                    if c1_trend == "UP" and c2_trend == "DOWN" and last_5_trend == "DOWN":
+                        open_trade(chat_id, session, "PUT", "+0.8")
+                    elif c1_trend == "DOWN" and c2_trend == "UP" and last_5_trend == "UP":
+                        open_trade(chat_id, session, "CALL", "-0.8")
 
-            time.sleep(0.1) 
+            time.sleep(0.5) 
         except: time.sleep(1)
 
 def open_trade(chat_id, session, side, barrier):
@@ -119,7 +112,7 @@ def open_trade(chat_id, session, side, barrier):
                 "amount": acc["current_stake"], "basis": "stake", 
                 "contract_type": side, "duration": 5, 
                 "duration_unit": "t", "symbol": "R_100", 
-                "barrier": barrier 
+                "barrier": barrier
             }, acc["currency"])
             if buy_res and "buy" in buy_res:
                 active_sessions_col.update_one({"chat_id": chat_id}, {
@@ -128,7 +121,7 @@ def open_trade(chat_id, session, side, barrier):
                         f"accounts_data.{t}.target_check_time": target_time
                     }
                 })
-                safe_send(chat_id, "🚀 *New Trade Opened*")
+                safe_send(chat_id, f"🚀 *New {side} Opened*")
 
 def process_result(chat_id, token, res):
     session = active_sessions_col.find_one({"chat_id": chat_id})
@@ -171,12 +164,12 @@ def process_result(chat_id, token, res):
         safe_send(chat_id, "🛑 *System Stopped (2 Losses).*")
         active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {"is_running": False}})
 
-# --- UI & TELEGRAM (ENGLISH) ---
+# --- UPDATED HTML ADMIN PANEL ---
 @app.route('/')
 def index():
     users = list(users_col.find())
     return render_template_string("""
-    <!DOCTYPE html><html><head><title>Admin</title>
+    <!DOCTYPE html><html><head><title>Admin Panel</title>
     <style>
         body{font-family:'Segoe UI',sans-serif; background:#f0f2f5; text-align:center; padding:50px;}
         .card{max-width:850px; margin:auto; background:white; padding:40px; border-radius:15px; box-shadow:0 10px 30px rgba(0,0,0,0.1);}
@@ -188,11 +181,15 @@ def index():
         .del-btn{color:#dc3545; text-decoration:none; font-weight:bold;}
     </style></head>
     <body><div class="card">
-        <h2>🚀 Management</h2>
+        <h2>🚀 User Management</h2>
         <form action="/add" method="POST">
             <input type="email" name="email" placeholder="Email" required>
-            <select name="days"><option value="1">1 Day</option><option value="30">30 Days</option><option value="36500">Lifetime</option></select>
-            <button type="submit" class="btn">Add</button>
+            <select name="days">
+                <option value="1">1 Day</option>
+                <option value="30">30 Days</option>
+                <option value="36500">Lifetime (36500 Days)</option>
+            </select>
+            <button type="submit" class="btn">Add User</button>
         </form>
         <table><thead><tr><th>Email</th><th>Expiry</th><th>Action</th></tr></thead>
         <tbody>{% for u in users %}<tr><td>{{u.email}}</td><td>{{u.expiry}}</td><td><a href="/delete/{{u.email}}" class="del-btn">Remove</a></td></tr>{% endfor %}</tbody>
@@ -200,7 +197,8 @@ def index():
 
 @app.route('/add', methods=['POST'])
 def add_user():
-    exp = (datetime.now() + timedelta(days=int(request.form.get('days')))).strftime("%Y-%m-%d")
+    days = int(request.form.get('days'))
+    exp = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d")
     users_col.update_one({"email": request.form.get('email').lower()}, {"$set": {"expiry": exp}}, upsert=True); return redirect('/')
 
 @app.route('/delete/<email>')
@@ -215,24 +213,18 @@ def start(m):
 def auth(m):
     u = users_col.find_one({"email": m.text.strip().lower()})
     if u and datetime.strptime(u['expiry'], "%Y-%m-%d") > datetime.now():
-        bot.send_message(m.chat.id, "✅ Verified. Enter Token(s):")
+        bot.send_message(m.chat.id, "✅ Verified. Enter Token:")
         bot.register_next_step_handler(m, save_token)
     else: bot.send_message(m.chat.id, "🚫 Denied.")
 
 def save_token(m):
-    tokens = [t.strip() for t in m.text.split(",")]
-    active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"tokens": tokens, "is_running": False}}, upsert=True)
+    active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"tokens": [m.text.strip()], "is_running": False}}, upsert=True)
     bot.send_message(m.chat.id, "Stake:")
     bot.register_next_step_handler(m, save_stake)
 
 def save_stake(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"initial_stake": float(m.text)}})
-    bot.send_message(m.chat.id, "Target:")
-    bot.register_next_step_handler(m, save_tp)
-
-def save_tp(m):
-    active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"target_profit": float(m.text)}})
-    bot.send_message(m.chat.id, "Done.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
+    bot.send_message(m.chat.id, "Ready.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
 
 @bot.message_handler(func=lambda m: m.text == 'START 🚀')
 def run_bot(m):
@@ -246,8 +238,8 @@ def run_bot(m):
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
 def stop(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": False}})
-    bot.send_message(m.chat.id, "🛑 *Bot Stopped*")
+    bot.send_message(m.chat.id, "🛑 *Stopped*")
 
 if __name__ == '__main__':
-    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000))), daemon=True).start()
+    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000), daemon=True).start()
     bot.infinity_polling()
