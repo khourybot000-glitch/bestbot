@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-TOKEN = "8433565422:AAEM9EMeJ5U4jnnZ_HClj77aUsBqInv_Hqc"
+TOKEN = "8433565422:AAFFUyIgDd7LUHiNohf1fjbZVR67RgoC3rg"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=100)
@@ -83,7 +83,7 @@ def trade_engine(chat_id):
                             process_result(chat_id, token, res_res)
 
             # 2. Execution Timing: 0, 10, 20, 30, 40, 50
-            if now.second in [0, 10, 20, 30, 40, 50] and now.second != last_processed_second:
+            if now.second in [0] and now.second != last_processed_second:
                 last_processed_second = now.second
                 
                 if any(acc.get("active_contract") for acc in session.get("accounts_data", {}).values()): continue
