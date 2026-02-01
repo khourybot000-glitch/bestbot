@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-TOKEN = "8433565422:AAETsMLxjUHotBoFux0rBCX471WvRrm5W9w"
+TOKEN = "8433565422:AAEM9EMeJ5U4jnnZ_HClj77aUsBqInv_Hqc"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=100)
@@ -63,9 +63,9 @@ def execute_trade(api_token, buy_req, currency):
     except: pass
     return None
 
-# --- ENGINE: DIGITDIFF LAST TICK AT SECOND 0 ---
+# --- ENGINE: LOGIC V10 (Price Comparison when Digit 9 is spotted) ---
 def trade_engine(chat_id):
-    last_processed_minute = -1
+    last_processed_second = -1
     
     while True:
         session = active_sessions_col.find_one({"chat_id": chat_id})
@@ -74,7 +74,7 @@ def trade_engine(chat_id):
         try:
             now = datetime.now()
             
-            # 1. Result Check (Wait 10s for the previous trade)
+            # 1. Result Check (18s delay)
             for token, acc in session.get("accounts_data", {}).items():
                 if acc.get("active_contract") and acc.get("target_check_time"):
                     if now >= datetime.fromisoformat(acc["target_check_time"]):
@@ -82,35 +82,44 @@ def trade_engine(chat_id):
                         if res_res and res_res.get("proposal_open_contract", {}).get("is_expired"):
                             process_result(chat_id, token, res_res)
 
-            # 2. Execution at Second 0
-            if now.second == 0 and now.minute != last_processed_minute:
-                last_processed_minute = now.minute
+            # 2. Execution Timing: 0, 10, 20, 30, 40, 50
+            if now.second in [0, 10, 20, 30, 40, 50] and now.second != last_processed_second:
+                last_processed_second = now.second
                 
-                # Check if any account is already in a trade
                 if any(acc.get("active_contract") for acc in session.get("accounts_data", {}).values()): continue
 
-                # Get the very last tick to determine the barrier
-                res = quick_request(session['tokens'][0], {"ticks_history": "R_100", "count": 1, "end": "latest", "style": "ticks"})
+                # Get the last 2 ticks
+                res = quick_request(session['tokens'][0], {"ticks_history": "R_100", "count": 2, "end": "latest", "style": "ticks"})
                 if res and "history" in res:
-                    last_price = res["history"]["prices"][-1]
-                    target_digit = int(str('%.2f' % last_price)[-1])
+                    prices = res["history"]["prices"]
+                    tick_now = prices[-1]
+                    tick_prev = prices[-2]
                     
-                    open_trade(chat_id, session, target_digit)
+                    # Extract 1st digit after dot of the CURRENT tick
+                    d1_now = int(str(tick_now).split('.')[1][0]) if '.' in str(tick_now) else 0
+                    
+                    if d1_now == 9:
+                        # Compare full PRICE of Tick 2 vs Tick 1
+                        if tick_now > tick_prev:
+                            # PRICE UP -> PUT +0.8
+                            open_trade(chat_id, session, "PUT", "+0.8")
+                        elif tick_now < tick_prev:
+                            # PRICE DOWN -> CALL -0.8
+                            open_trade(chat_id, session, "CALL", "-0.8")
 
-            time.sleep(0.5) 
+            time.sleep(0.1) 
         except: time.sleep(1)
 
-def open_trade(chat_id, session, diff_digit):
-    # 10 seconds wait for result
-    target_time = (datetime.now() + timedelta(seconds=10)).isoformat()
+def open_trade(chat_id, session, side, barrier):
+    target_time = (datetime.now() + timedelta(seconds=18)).isoformat()
     for t in session['tokens']:
         acc = session['accounts_data'].get(t)
         if acc:
             buy_res = execute_trade(t, {
                 "amount": acc["current_stake"], "basis": "stake", 
-                "contract_type": "DIGITDIFF", "duration": 1, 
+                "contract_type": side, "duration": 5, 
                 "duration_unit": "t", "symbol": "R_100", 
-                "barrier": str(diff_digit) 
+                "barrier": barrier 
             }, acc["currency"])
             if buy_res and "buy" in buy_res:
                 active_sessions_col.update_one({"chat_id": chat_id}, {
@@ -135,7 +144,7 @@ def process_result(chat_id, token, res):
         new_streak = 0
         status = "✅ *WIN*"
     else:
-        new_stake = float("{:.2f}".format(acc["current_stake"] * 14))
+        new_stake = float("{:.2f}".format(acc["current_stake"] * 19))
         new_streak = acc.get("consecutive_losses", 0) + 1
         status = "❌ *LOSS*"
 
@@ -154,20 +163,20 @@ def process_result(chat_id, token, res):
         f"━━━━━━━━━━━━━━━\n"
         f"W: `{new_wins}` | L: `{new_losses}`\n"
         f"Net: `{new_total:.2f}`\n"
-        f"Next Stake: `{new_stake}`"
+        f"Next: `{new_stake}`"
     )
     safe_send(chat_id, stats_msg)
 
     if new_streak >= 2:
-        safe_send(chat_id, "🛑 *System Stopped.*")
+        safe_send(chat_id, "🛑 *System Stopped (2 Losses).*")
         active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {"is_running": False}})
 
-# --- HTML & TELEGRAM (English) ---
+# --- UI & TELEGRAM (ENGLISH) ---
 @app.route('/')
 def index():
     users = list(users_col.find())
     return render_template_string("""
-    <!DOCTYPE html><html><head><title>Admin Panel</title>
+    <!DOCTYPE html><html><head><title>Admin</title>
     <style>
         body{font-family:'Segoe UI',sans-serif; background:#f0f2f5; text-align:center; padding:50px;}
         .card{max-width:850px; margin:auto; background:white; padding:40px; border-radius:15px; box-shadow:0 10px 30px rgba(0,0,0,0.1);}
@@ -179,11 +188,11 @@ def index():
         .del-btn{color:#dc3545; text-decoration:none; font-weight:bold;}
     </style></head>
     <body><div class="card">
-        <h2>🚀 User Management</h2>
+        <h2>🚀 Management</h2>
         <form action="/add" method="POST">
             <input type="email" name="email" placeholder="Email" required>
             <select name="days"><option value="1">1 Day</option><option value="30">30 Days</option><option value="36500">Lifetime</option></select>
-            <button type="submit" class="btn">Add User</button>
+            <button type="submit" class="btn">Add</button>
         </form>
         <table><thead><tr><th>Email</th><th>Expiry</th><th>Action</th></tr></thead>
         <tbody>{% for u in users %}<tr><td>{{u.email}}</td><td>{{u.expiry}}</td><td><a href="/delete/{{u.email}}" class="del-btn">Remove</a></td></tr>{% endfor %}</tbody>
@@ -208,22 +217,22 @@ def auth(m):
     if u and datetime.strptime(u['expiry'], "%Y-%m-%d") > datetime.now():
         bot.send_message(m.chat.id, "✅ Verified. Enter Token(s):")
         bot.register_next_step_handler(m, save_token)
-    else: bot.send_message(m.chat.id, "🚫 Access Denied.")
+    else: bot.send_message(m.chat.id, "🚫 Denied.")
 
 def save_token(m):
     tokens = [t.strip() for t in m.text.split(",")]
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"tokens": tokens, "is_running": False}}, upsert=True)
-    bot.send_message(m.chat.id, "Stake Amount:")
+    bot.send_message(m.chat.id, "Stake:")
     bot.register_next_step_handler(m, save_stake)
 
 def save_stake(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"initial_stake": float(m.text)}})
-    bot.send_message(m.chat.id, "Target Profit:")
+    bot.send_message(m.chat.id, "Target:")
     bot.register_next_step_handler(m, save_tp)
 
 def save_tp(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"target_profit": float(m.text)}})
-    bot.send_message(m.chat.id, "Ready.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
+    bot.send_message(m.chat.id, "Done.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
 
 @bot.message_handler(func=lambda m: m.text == 'START 🚀')
 def run_bot(m):
