@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-TOKEN = "8433565422:AAGjlKpTC3RMamKYGDfDEZ_An5K0TWkg8vQ"
+TOKEN = "8433565422:AAETsMLxjUHotBoFux0rBCX471WvRrm5W9w"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=100)
@@ -63,10 +63,9 @@ def execute_trade(api_token, buy_req, currency):
     except: pass
     return None
 
-# --- ENGINE: DIGITDIFF 8 ---
+# --- ENGINE: DIGITDIFF LAST TICK AT SECOND 0 ---
 def trade_engine(chat_id):
-    last_processed_second = -1
-    is_alert_active = False 
+    last_processed_minute = -1
     
     while True:
         session = active_sessions_col.find_one({"chat_id": chat_id})
@@ -75,7 +74,7 @@ def trade_engine(chat_id):
         try:
             now = datetime.now()
             
-            # Result Check (10s delay)
+            # 1. Result Check (Wait 10s for the previous trade)
             for token, acc in session.get("accounts_data", {}).items():
                 if acc.get("active_contract") and acc.get("target_check_time"):
                     if now >= datetime.fromisoformat(acc["target_check_time"]):
@@ -83,34 +82,26 @@ def trade_engine(chat_id):
                         if res_res and res_res.get("proposal_open_contract", {}).get("is_expired"):
                             process_result(chat_id, token, res_res)
 
-            # Analysis at 0, 20, 40
-            if now.second in [0, 20, 40] and now.second != last_processed_second:
-                last_processed_second = now.second 
+            # 2. Execution at Second 0
+            if now.second == 0 and now.minute != last_processed_minute:
+                last_processed_minute = now.minute
                 
+                # Check if any account is already in a trade
                 if any(acc.get("active_contract") for acc in session.get("accounts_data", {}).values()): continue
 
-                res = quick_request(session['tokens'][0], {"ticks_history": "R_100", "count": 10, "end": "latest", "style": "ticks"})
+                # Get the very last tick to determine the barrier
+                res = quick_request(session['tokens'][0], {"ticks_history": "R_100", "count": 1, "end": "latest", "style": "ticks"})
                 if res and "history" in res:
-                    prices = res["history"]["prices"]
-                    last_digits = [int(str('%.2f' % p)[-1]) for p in prices]
+                    last_price = res["history"]["prices"][-1]
+                    target_digit = int(str('%.2f' % last_price)[-1])
                     
-                    # Logic: No 8 or 9 in last 10 ticks
-                    if 9 not in last_digits and 8 not in last_digits:
-                        is_alert_active = True
+                    open_trade(chat_id, session, target_digit)
 
-            # Execution: Wait for Digit 9
-            if is_alert_active:
-                res_tick = quick_request(session['tokens'][0], {"ticks_history": "R_100", "count": 1, "end": "latest", "style": "ticks"})
-                if res_tick and "history" in res_tick:
-                    current_digit = int(str('%.2f' % res_tick["history"]["prices"][-1])[-1])
-                    if current_digit == 9:
-                        open_trade(chat_id, session)
-                        is_alert_active = False 
-
-            time.sleep(0.1) 
+            time.sleep(0.5) 
         except: time.sleep(1)
 
-def open_trade(chat_id, session):
+def open_trade(chat_id, session, diff_digit):
+    # 10 seconds wait for result
     target_time = (datetime.now() + timedelta(seconds=10)).isoformat()
     for t in session['tokens']:
         acc = session['accounts_data'].get(t)
@@ -118,7 +109,8 @@ def open_trade(chat_id, session):
             buy_res = execute_trade(t, {
                 "amount": acc["current_stake"], "basis": "stake", 
                 "contract_type": "DIGITDIFF", "duration": 1, 
-                "duration_unit": "t", "symbol": "R_100", "barrier": "8" 
+                "duration_unit": "t", "symbol": "R_100", 
+                "barrier": str(diff_digit) 
             }, acc["currency"])
             if buy_res and "buy" in buy_res:
                 active_sessions_col.update_one({"chat_id": chat_id}, {
@@ -162,15 +154,15 @@ def process_result(chat_id, token, res):
         f"━━━━━━━━━━━━━━━\n"
         f"W: `{new_wins}` | L: `{new_losses}`\n"
         f"Net: `{new_total:.2f}`\n"
-        f"Next: `{new_stake}`"
+        f"Next Stake: `{new_stake}`"
     )
     safe_send(chat_id, stats_msg)
 
     if new_streak >= 2:
-        safe_send(chat_id, "🛑 *System Stopped (2 Losses).*")
+        safe_send(chat_id, "🛑 *System Stopped.*")
         active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {"is_running": False}})
 
-# --- HTML UI ---
+# --- HTML & TELEGRAM (English) ---
 @app.route('/')
 def index():
     users = list(users_col.find())
@@ -206,16 +198,15 @@ def add_user():
 def delete_user(email):
     users_col.delete_one({"email": email}); return redirect('/')
 
-# --- TELEGRAM ---
 @bot.message_handler(commands=['start'])
 def start(m):
-    bot.send_message(m.chat.id, "🤖 *System Access*\nPlease enter your Email:")
+    bot.send_message(m.chat.id, "🤖 *System Interface*\nPlease enter Email:")
     bot.register_next_step_handler(m, auth)
 
 def auth(m):
     u = users_col.find_one({"email": m.text.strip().lower()})
     if u and datetime.strptime(u['expiry'], "%Y-%m-%d") > datetime.now():
-        bot.send_message(m.chat.id, "✅ Verified. Enter API Token(s):")
+        bot.send_message(m.chat.id, "✅ Verified. Enter Token(s):")
         bot.register_next_step_handler(m, save_token)
     else: bot.send_message(m.chat.id, "🚫 Access Denied.")
 
@@ -232,7 +223,7 @@ def save_stake(m):
 
 def save_tp(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"target_profit": float(m.text)}})
-    bot.send_message(m.chat.id, "Configuration Done.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
+    bot.send_message(m.chat.id, "Ready.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
 
 @bot.message_handler(func=lambda m: m.text == 'START 🚀')
 def run_bot(m):
