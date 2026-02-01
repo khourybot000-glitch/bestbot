@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-TOKEN = "8433565422:AAEnku035sQ_4v1MU06RlNtP4SqsjPdWEig"
+TOKEN = "8433565422:AAFJBVRAtQ_hqa0VbQmNUz5OOoDOWkbM3iA"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=100)
@@ -63,7 +63,7 @@ def execute_trade(api_token, buy_req, currency):
     except: pass
     return None
 
-# --- ENGINE: 60 TICKS STRATEGY ---
+# --- ENGINE: 60 TICKS (2 CANDLES) STRATEGY ---
 def trade_engine(chat_id):
     last_processed_minute = -1
     
@@ -95,10 +95,11 @@ def trade_engine(chat_id):
                     c2_trend = "UP" if prices[59] > prices[30] else "DOWN"
                     last_5_trend = "UP" if prices[-1] > prices[-5] else "DOWN"
                     
+                    # Barrier 0.7
                     if c1_trend == "UP" and c2_trend == "DOWN" and last_5_trend == "DOWN":
-                        open_trade(chat_id, session, "PUT", "+0.8")
+                        open_trade(chat_id, session, "PUT", "+0.7")
                     elif c1_trend == "DOWN" and c2_trend == "UP" and last_5_trend == "UP":
-                        open_trade(chat_id, session, "CALL", "-0.8")
+                        open_trade(chat_id, session, "CALL", "-0.7")
 
             time.sleep(0.5) 
         except: time.sleep(1)
@@ -137,7 +138,8 @@ def process_result(chat_id, token, res):
         new_streak = 0
         status = "✅ *WIN*"
     else:
-        new_stake = float("{:.2f}".format(acc["current_stake"] * 19))
+        # Multiplier x9
+        new_stake = float("{:.2f}".format(acc["current_stake"] * 9))
         new_streak = acc.get("consecutive_losses", 0) + 1
         status = "❌ *LOSS*"
 
@@ -160,11 +162,14 @@ def process_result(chat_id, token, res):
     )
     safe_send(chat_id, stats_msg)
 
-    if new_streak >= 2:
-        safe_send(chat_id, "🛑 *System Stopped (2 Losses).*")
+    if new_total >= session.get("target_profit", 999999):
+        safe_send(chat_id, "🎯 *Target Profit Reached!*")
+        active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {"is_running": False}})
+    elif new_streak >= 2:
+        safe_send(chat_id, "🛑 *Stopped (2 Losses).*")
         active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {"is_running": False}})
 
-# --- UPDATED HTML ADMIN PANEL ---
+# --- HTML ADMIN PANEL ---
 @app.route('/')
 def index():
     users = list(users_col.find())
@@ -187,7 +192,7 @@ def index():
             <select name="days">
                 <option value="1">1 Day</option>
                 <option value="30">30 Days</option>
-                <option value="36500">Lifetime (36500 Days)</option>
+                <option value="36500">36500 Days</option>
             </select>
             <button type="submit" class="btn">Add User</button>
         </form>
@@ -205,6 +210,7 @@ def add_user():
 def delete_user(email):
     users_col.delete_one({"email": email}); return redirect('/')
 
+# --- TELEGRAM ---
 @bot.message_handler(commands=['start'])
 def start(m):
     bot.send_message(m.chat.id, "🤖 *System Interface*\nPlease enter Email:")
@@ -219,11 +225,16 @@ def auth(m):
 
 def save_token(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"tokens": [m.text.strip()], "is_running": False}}, upsert=True)
-    bot.send_message(m.chat.id, "Stake:")
+    bot.send_message(m.chat.id, "Stake Amount:")
     bot.register_next_step_handler(m, save_stake)
 
 def save_stake(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"initial_stake": float(m.text)}})
+    bot.send_message(m.chat.id, "Target Profit (TP):")
+    bot.register_next_step_handler(m, save_tp)
+
+def save_tp(m):
+    active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"target_profit": float(m.text)}})
     bot.send_message(m.chat.id, "Ready.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
 
 @bot.message_handler(func=lambda m: m.text == 'START 🚀')
