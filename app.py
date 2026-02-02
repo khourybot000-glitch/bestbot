@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-TOKEN = "8433565422:AAE9iZrgGQT84i8fX8agHTm5PKdjrRStEes"
+TOKEN = "8433565422:AAEid7HjMZr91mLudEY_gVmVIpT0m-9L4tQ"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=100)
@@ -102,9 +102,9 @@ def trade_engine(chat_id):
                     
                     # مثال لاستراتيجية: (يمكنك تعديل الشروط كما تحب)
                     if c1 == "UP" and c2 == "DOWN" and c3 == "UP" and c4 == "DOWN" and c5 == "UP":
-                        open_trade(chat_id, session, "CALL", "-0.6")
-                    elif c1 == "DOWN" and c2 == "UP" and c3 == "DOWN" and c4 == "UP" and c5 == "DOWN":
                         open_trade(chat_id, session, "PUT", "+0.6")
+                    elif c1 == "DOWN" and c2 == "UP" and c3 == "DOWN" and c4 == "UP" and c5 == "DOWN":
+                        open_trade(chat_id, session, "CALL", "-0.6")
 
             time.sleep(0.1)
         except: time.sleep(1)
