@@ -8,7 +8,8 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-TOKEN = "8433565422:AAHXN080Latzw4Em4vE77mKoJUENHGboYwA"
+# تم تحديث التوكن الجديد هنا
+TOKEN = "8433565422:AAH7oQYH_0b9AF7iaIoNneAax2e2ywY9LVM"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN, threaded=True)
@@ -19,15 +20,11 @@ active_sessions_col = db['Active_Sessions']
 
 msg_queue = queue.Queue()
 
-# --- MESSAGE WORKER ---
 def message_worker():
     while True:
         try:
             item = msg_queue.get()
-            chat_id = item[0]
-            text = item[1]
-            markup = item[2] if len(item) > 2 else None
-            bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=markup)
+            bot.send_message(item[0], item[1], parse_mode="Markdown", reply_markup=item[2] if len(item)>2 else None)
             msg_queue.task_done()
             time.sleep(0.1)
         except: pass
@@ -37,7 +34,6 @@ threading.Thread(target=message_worker, daemon=True).start()
 def safe_send(chat_id, text, markup=None):
     msg_queue.put((chat_id, text, markup))
 
-# --- API EXECUTION ---
 def execute_trade(api_token, request_data):
     try:
         ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=8)
@@ -55,12 +51,11 @@ def execute_trade(api_token, request_data):
     except: pass
     return None, "USD"
 
-# --- ENGINE: ANALYSIS & 8% PROFIT EXIT ---
+# --- ENGINE: ENTRY AT SECOND 30 & 8% PROFIT EXIT ---
 def trade_engine(chat_id):
     session = active_sessions_col.find_one({"chat_id": chat_id})
     if not session: return
     token = session['tokens'][0]
-    tick_prices = []
 
     try:
         ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=15)
@@ -69,7 +64,6 @@ def trade_engine(chat_id):
         ws.send(json.dumps({"ticks": "R_10", "subscribe": 1}))
         
         while True:
-            # فحص حالة التوقف في كل نبضة سعرية
             current_status = active_sessions_col.find_one({"chat_id": chat_id})
             if not current_status or not current_status.get("is_running"):
                 ws.close()
@@ -82,18 +76,12 @@ def trade_engine(chat_id):
             except: continue
 
             if "tick" in data:
-                price = data["tick"]["quote"]
-                tick_prices.append(price)
-                if len(tick_prices) > 5: tick_prices.pop(0)
-                
                 now = datetime.now()
-                if now.second in [0, 10, 20, 30, 40, 50]:
-                    if len(tick_prices) == 5:
-                        diff = max(tick_prices) - min(tick_prices)
-                        if diff >= 0.8:
-                            if not any(acc.get("active_contract") for acc in current_status.get("accounts_data", {}).values()):
-                                open_acc_trade(chat_id, current_status, token)
-                                time.sleep(1.2)
+                # الدخول فقط عند الثانية 30
+                if now.second == 30:
+                    if not any(acc.get("active_contract") for acc in current_status.get("accounts_data", {}).values()):
+                        open_acc_trade(chat_id, current_status, token)
+                        time.sleep(1.5)
 
             for t, acc in current_status.get("accounts_data", {}).items():
                 if acc.get("active_contract"):
@@ -129,7 +117,7 @@ def open_acc_trade(chat_id, session, token):
             f"accounts_data.{token}.active_contract": res["buy"]["contract_id"],
             f"accounts_data.{token}.currency": det_curr
         }})
-        safe_send(chat_id, f"🚀 *Trade Open* | Currency: `{det_curr}`")
+        safe_send(chat_id, f"🚀 *Trade Opened at Sec 30* | Stake: `{acc_data['current_stake']}`")
 
 def process_acc_result(chat_id, token, close_res, contract):
     session = active_sessions_col.find_one({"chat_id": chat_id})
@@ -141,7 +129,8 @@ def process_acc_result(chat_id, token, close_res, contract):
     if is_win:
         status, new_stake, new_losses = "✅ WIN (8%+)", session["initial_stake"], 0
     else:
-        status, new_stake, new_losses = "❌ LOSS", float("{:.2f}".format(acc["current_stake"] * 14)), acc.get("consecutive_losses", 0) + 1
+        # المضاعفة x9
+        status, new_stake, new_losses = "❌ LOSS", float("{:.2f}".format(acc["current_stake"] * 9)), acc.get("consecutive_losses", 0) + 1
 
     active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {
         f"accounts_data.{token}.active_contract": None,
@@ -156,22 +145,21 @@ def process_acc_result(chat_id, token, close_res, contract):
         active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {"is_running": False}})
         safe_send(chat_id, "🏁 *Session Finished.*")
 
-# --- FULL HTML ADMIN PANEL ---
+# --- HTML ADMIN PANEL ---
 HTML_ADMIN = """
 <!DOCTYPE html><html><head><title>Admin Panel</title>
 <style>
-    body{font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:#f4f7f6; padding:20px; text-align:center;}
+    body{font-family:sans-serif; background:#f4f7f6; padding:20px; text-align:center;}
     .card{max-width:800px; margin:auto; background:white; padding:30px; border-radius:15px; box-shadow:0 4px 15px rgba(0,0,0,0.1);}
     input, select{padding:12px; margin:5px; border-radius:8px; border:1px solid #ddd; width:220px;}
-    button{padding:12px 25px; background:#3498db; color:white; border:none; border-radius:8px; cursor:pointer; font-weight:bold;}
+    button{padding:12px 25px; background:#3498db; color:white; border:none; border-radius:8px; cursor:pointer;}
     table{width:100%; border-collapse:collapse; margin-top:25px;}
     th, td{padding:15px; border-bottom:1px solid #eee; text-align:left;}
-    .btn-del{color:#e74c3c; text-decoration:none; font-weight:bold;}
 </style></head>
 <body><div class="card">
-    <h2>👥 User Management Control</h2>
+    <h2>👥 User Control (V3.1)</h2>
     <form action="/add" method="POST">
-        <input type="email" name="email" placeholder="Email" required>
+        <input type="email" name="email" placeholder="User Email" required>
         <select name="days">
             <option value="1">1 Day</option>
             <option value="30">30 Days</option>
@@ -183,7 +171,7 @@ HTML_ADMIN = """
         <thead><tr><th>Email</th><th>Expiry</th><th>Action</th></tr></thead>
         <tbody>
             {% for u in users %}
-            <tr><td>{{u.email}}</td><td>{{u.expiry}}</td><td><a href="/delete/{{u.email}}" class="btn-del">Remove</a></td></tr>
+            <tr><td>{{u.email}}</td><td>{{u.expiry}}</td><td><a href="/delete/{{u.email}}" style="color:red; font-weight:bold;">Remove</a></td></tr>
             {% endfor %}
         </tbody>
     </table>
@@ -206,17 +194,17 @@ def delete_user(email):
     users_col.delete_one({"email": email})
     return redirect('/')
 
-# --- TELEGRAM HANDLERS ---
+# --- TELEGRAM BOT LOGIC ---
 @bot.message_handler(commands=['start'])
 def start(m):
     active_sessions_col.delete_one({"chat_id": m.chat.id})
-    safe_send(m.chat.id, "🤖 *Accumulator Pro V2.7*\nEnter Email:")
+    safe_send(m.chat.id, "🤖 *Accumulator Pro V3.1*\nEnter Authorized Email:")
     bot.register_next_step_handler(m, auth)
 
 def auth(m):
     u = users_col.find_one({"email": m.text.lower().strip()})
     if u and datetime.strptime(u['expiry'], "%Y-%m-%d") > datetime.now():
-        safe_send(m.chat.id, "✅ OK. Send Token:")
+        safe_send(m.chat.id, "✅ Access Granted. Send Deriv Token:")
         bot.register_next_step_handler(m, save_token)
     else: safe_send(m.chat.id, "🚫 No Access.")
 
@@ -239,9 +227,9 @@ def setup_tp(m):
         tp = float(m.text)
         active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"target_profit": tp}})
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀')
-        safe_send(m.chat.id, f"✅ Ready! TP: ${tp}. Click Start.", markup)
+        safe_send(m.chat.id, f"✅ Setup Done! TP: ${tp}. Entry: Sec 30. Martingale: x9. Click Start.", markup)
     except:
-        safe_send(m.chat.id, "❌ Invalid TP. Send again:")
+        safe_send(m.chat.id, "❌ Error. Enter TP again:")
         bot.register_next_step_handler(m, setup_tp)
 
 @bot.message_handler(func=lambda m: m.text == 'START 🚀')
@@ -250,7 +238,7 @@ def run_bot(m):
     if sess:
         accs = {t: {"current_stake": sess["initial_stake"], "total_profit": 0, "active_contract": None, "consecutive_losses": 0} for t in sess["tokens"]}
         active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": True, "accounts_data": accs}})
-        safe_send(m.chat.id, "🚀 *Bot Online!*", types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
+        safe_send(m.chat.id, "🚀 *Bot Online! Waiting for Second 30...*", types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
         threading.Thread(target=trade_engine, args=(m.chat.id,), daemon=True).start()
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
