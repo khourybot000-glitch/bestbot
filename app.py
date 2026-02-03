@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-TOKEN = "8433565422:AAFcTciY-QU1x3wo7ww0UJyPrtZzvziQQV8"
+TOKEN = "8433565422:AAHIvoR2fEy3nJ5z5NXhJVAJtDTJnirhc9Q"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN, threaded=True)
@@ -61,7 +61,7 @@ def trade_engine(chat_id):
             ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=15)
             ws.send(json.dumps({"authorize": token}))
             ws.recv()
-            ws.send(json.dumps({"ticks": "R_10", "subscribe": 1}))
+            ws.send(json.dumps({"ticks": "R_100", "subscribe": 1}))
             
             while True:
                 current_status = active_sessions_col.find_one({"chat_id": chat_id})
@@ -94,7 +94,7 @@ def open_digit_trade(chat_id, session, token):
         "buy": 1, "price": acc_data["current_stake"],
         "parameters": {
             "amount": acc_data["current_stake"], "basis": "stake",
-            "contract_type": "DIGITDIFF", "symbol": "R_10", 
+            "contract_type": "DIGITDIFF", "symbol": "R_100", 
             "duration": 1, "duration_unit": "t", "barrier": "1"
         }
     }
