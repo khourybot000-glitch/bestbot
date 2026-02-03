@@ -9,7 +9,7 @@ app = Flask(__name__)
 
 # --- CONFIGURATION ---
 # تم تحديث التوكن الجديد هنا
-TOKEN = "8433565422:AAFV3MFuzb0iVcFnPy_KW4u_WGeyNGZ-pZ0"
+TOKEN = "8433565422:AAENtkThrcpvEhSxFvYcb8BPw5CGR7RzwyA"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=100)
@@ -69,11 +69,12 @@ def execute_trade(api_token, buy_req, currency):
     except: pass
     return None
 
-# --- ENGINE: 30 TICKS / 6 CANDLES (DETAILED) ---
+# --- ENGINE: 15 TICKS / 3 CANDLES ---
 def trade_engine(chat_id):
     last_processed_second = -1
     while True:
         session = active_sessions_col.find_one({"chat_id": chat_id})
+        # إذا تم مسح الجلسة (بسبب STOP أو TP/SL)، يتوقف المحرك فوراً
         if not session or not session.get("is_running"): break
         
         try:
@@ -89,22 +90,25 @@ def trade_engine(chat_id):
                 last_processed_second = now.second
                 if any(acc.get("active_contract") for acc in session.get("accounts_data", {}).values()): continue
 
-                res = quick_request(session['tokens'][0], {"ticks_history": "R_100", "count": 31, "end": "latest", "style": "ticks"})
+                res = quick_request(session['tokens'][0], {"ticks_history": "R_100", "count": 16, "end": "latest", "style": "ticks"})
                 if res and "history" in res:
                     p = res["history"]["prices"]
                     
-                    # التحليل التفصيلي لكل شمعة (كل 5 تيك)
-                    c1 = "UP" if p[5] > p[0] else "DOWN"
-                    c2 = "UP" if p[10] > p[5] else "DOWN"
-                    c3 = "UP" if p[15] > p[10] else "DOWN"
-                    c4 = "UP" if p[20] > p[15] else "DOWN"
-                    c5 = "UP" if p[25] > p[20] else "DOWN"
-                    c6 = "UP" if p[30] > p[25] else "DOWN"
+                    diff1 = abs(p[5] - p[0])
+                    diff2 = abs(p[10] - p[5])
+                    diff3 = abs(p[15] - p[10])
                     
-                    if c1=="UP" and c2=="DOWN" and c3=="UP" and c4=="DOWN" and c5=="UP" and c6=="DOWN":
-                        open_trade(chat_id, session, "PUT", "+0.01")
-                    elif c1=="DOWN" and c2=="UP" and c3=="DOWN" and c4=="UP" and c5=="DOWN" and c6=="UP":
-                        open_trade(chat_id, session, "CALL", "-0.01")
+                    c1_dir = "UP" if p[5] > p[0] else "DOWN"
+                    c2_dir = "UP" if p[10] > p[5] else "DOWN"
+                    c3_dir = "UP" if p[15] > p[10] else "DOWN"
+                    
+                    is_middle_smaller = diff2 < diff1 and diff2 < diff3
+                    
+                    if is_middle_smaller:
+                        if c1_dir == "DOWN" and c2_dir == "UP" and c3_dir == "DOWN":
+                            open_trade(chat_id, session, "PUT", "+0.8")
+                        elif c1_dir == "UP" and c2_dir == "DOWN" and c3_dir == "UP":
+                            open_trade(chat_id, session, "CALL", "-0.8")
 
             time.sleep(0.1)
         except: time.sleep(1)
@@ -121,6 +125,8 @@ def open_trade(chat_id, session, side, barrier):
 
 def process_result(chat_id, token, res):
     session = active_sessions_col.find_one({"chat_id": chat_id})
+    if not session: return
+    
     acc = session['accounts_data'].get(token)
     profit = float(res.get("proposal_open_contract", {}).get("profit", 0))
     
@@ -131,7 +137,7 @@ def process_result(chat_id, token, res):
     if profit > 0:
         new_stake, new_streak, status = session["initial_stake"], 0, "✅ *WIN*"
     else:
-        new_stake = float("{:.2f}".format(acc["current_stake"] * 2.2)) # المضاعفة x20
+        new_stake = float("{:.2f}".format(acc["current_stake"] * 19)) 
         new_streak = acc.get("consecutive_losses", 0) + 1
         status = "❌ *LOSS*"
 
@@ -139,11 +145,15 @@ def process_result(chat_id, token, res):
     
     stats_msg = f"📊 *Result:* {status}\nW: `{new_wins}` | L: `{new_losses}`\nNet: `{new_total:.2f}`\nNext: `{new_stake}`"
 
-    # التوقف عند وصول الهدف أو خسارتين متتاليتين
-    if new_total >= session.get("target_profit", 999999) or new_streak >= 4:
-        active_sessions_col.delete_one({"chat_id": chat_id})
+    # التوقف عند TP أو خسارتين (SL)
+    if new_total >= session.get("target_profit", 999999) or new_streak >= 2:
+        # مسح البيانات بالكامل
+        active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {"is_running": False}, "$unset": {"accounts_data": ""}})
         msg = "🎯 *Target Reached!*" if new_total >= session.get("target_profit", 999999) else "🛑 *Stop Loss (2 Losses).*"
-        safe_send(chat_id, stats_msg + f"\n\n{msg}\n*Session Cleared.* Use /start.")
+        
+        # تحويل الزر إلى START
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀')
+        safe_send(chat_id, stats_msg + f"\n\n{msg}\n*Session Cleared.*", markup=markup)
     else:
         safe_send(chat_id, stats_msg)
 
@@ -187,6 +197,7 @@ def delete_user(email):
 # --- TELEGRAM BOT HANDLERS ---
 @bot.message_handler(commands=['start'])
 def cmd_start(m):
+    # مسح أي جلسة قديمة لضمان واجهة نظيفة
     active_sessions_col.delete_one({"chat_id": m.chat.id})
     bot.send_message(m.chat.id, "🤖 *System Interface*\nPlease enter Email:", reply_markup=types.ReplyKeyboardRemove())
     bot.register_next_step_handler(m, auth)
@@ -213,7 +224,8 @@ def save_stake(m):
 def save_tp(m):
     try:
         active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"target_profit": float(m.text)}})
-        bot.send_message(m.chat.id, "Ready.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀')
+        bot.send_message(m.chat.id, "Setup Ready.", reply_markup=markup)
     except: bot.register_next_step_handler(m, save_tp)
 
 @bot.message_handler(func=lambda m: m.text == 'START 🚀')
@@ -225,14 +237,20 @@ def run_bot(m):
             auth_info = quick_request(t, {"authorize": t})
             currency = auth_info.get("authorize", {}).get("currency", "USD") if auth_info else "USD"
             accs[t] = {"current_stake": sess["initial_stake"], "total_profit": 0.0, "consecutive_losses": 0, "win_count": 0, "loss_count": 0, "active_contract": None, "target_check_time": None, "currency": currency}
+        
         active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": True, "accounts_data": accs}})
-        bot.send_message(m.chat.id, "🚀 *Bot Working...*", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
+        
+        # تغيير الزر إلى STOP
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑')
+        bot.send_message(m.chat.id, "🚀 *Bot Working...*", reply_markup=markup)
         threading.Thread(target=trade_engine, args=(m.chat.id,), daemon=True).start()
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
 def stop_bot(m):
-    active_sessions_col.delete_one({"chat_id": m.chat.id})
-    bot.send_message(m.chat.id, "🛑 *Stopped & All Data Reset.* Use /start.", reply_markup=types.ReplyKeyboardRemove())
+    # مسح البيانات وتغيير الزر عند الضغط على STOP
+    active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": False}, "$unset": {"accounts_data": ""}})
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀')
+    bot.send_message(m.chat.id, "🛑 *Stopped & Data Reset.*", reply_markup=markup)
 
 if __name__ == '__main__':
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000), daemon=True).start()
