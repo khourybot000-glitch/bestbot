@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-TOKEN = "8433565422:AAFXxKFbYRn6HUq-5_5NwAuE8V5hWCG9bFM"
+TOKEN = "8433565422:AAFcTciY-QU1x3wo7ww0UJyPrtZzvziQQV8"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN, threaded=True)
@@ -40,8 +40,6 @@ def execute_trade(api_token, request_data):
         auth_res = json.loads(ws.recv())
         if "authorize" in auth_res:
             user_currency = auth_res["authorize"].get("currency", "USD")
-            if "parameters" in request_data:
-                request_data["parameters"]["currency"] = user_currency
             ws.send(json.dumps(request_data))
             res = json.loads(ws.recv())
             ws.close()
@@ -50,9 +48,9 @@ def execute_trade(api_token, request_data):
     except: pass
     return None, "USD"
 
-# --- ENGINE: TICK ANALYSIS & ROBUST RECONNECT ---
+# --- ENGINE: DIGIT DIFF (INTEGER CHANGE) ---
 def trade_engine(chat_id):
-    tick_history = []
+    last_integer = None
     
     while True:
         session = active_sessions_col.find_one({"chat_id": chat_id})
@@ -60,87 +58,83 @@ def trade_engine(chat_id):
         
         token = session['tokens'][0]
         try:
-            # فتح اتصال مستمر لتحليل التيكات
             ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=15)
             ws.send(json.dumps({"authorize": token}))
             ws.recv()
             ws.send(json.dumps({"ticks": "R_10", "subscribe": 1}))
             
             while True:
-                # التأكد من أن الجلسة ما زالت نشطة
                 current_status = active_sessions_col.find_one({"chat_id": chat_id})
                 if not current_status or not current_status.get("is_running"):
                     ws.close()
                     return
 
                 ws.settimeout(1)
-                try:
-                    data = json.loads(ws.recv())
-                except: break # انقطع الاتصال، اخرج للبدء من جديد (Reconnect)
+                try: data = json.loads(ws.recv())
+                except: break 
 
                 if "tick" in data:
                     price = float(data["tick"]["quote"])
-                    tick_history.append(price)
-                    if len(tick_history) > 2: tick_history.pop(0)
-
-                    # استراتيجية التحليل: الفرق بين آخر 2 تيك أقل من 0.06
-                    if len(tick_history) == 2:
-                        diff = abs(tick_history[0] - tick_history[1])
+                    current_integer = int(price)
+                    
+                    if last_integer is not None and current_integer != last_integer:
                         acc_data = current_status['accounts_data'][token]
-                        
-                        if diff < 0.06 and not acc_data.get("active_contract"):
-                            open_acc_trade(chat_id, current_status, token)
-
-                # مراقبة العقد المفتوح (12% ربح)
-                for t, acc in current_status.get("accounts_data", {}).items():
-                    if acc.get("active_contract"):
-                        c_info, _ = execute_trade(t, {"proposal_open_contract": 1, "contract_id": acc["active_contract"]})
-                        if c_info and "proposal_open_contract" in c_info:
-                            contract = c_info["proposal_open_contract"]
-                            if contract.get("status") != "open":
-                                process_acc_result(chat_id, t, contract)
-                            else:
-                                current_profit = float(contract.get("profit", 0))
-                                stake = float(acc["current_stake"])
-                                if stake > 0 and (current_profit / stake) >= 0.12:
-                                    execute_trade(t, {"sell": acc["active_contract"], "price": 0})
-                                    process_acc_result(chat_id, t, contract)
+                        if not acc_data.get("processing"):
+                            open_digit_trade(chat_id, current_status, token)
+                    
+                    last_integer = current_integer
             ws.close()
-        except:
-            time.sleep(2) # انتظار بسيط قبل إعادة المحاولة في حال فشل الـ Reconnect
+        except: time.sleep(2)
 
-def open_acc_trade(chat_id, session, token):
+def open_digit_trade(chat_id, session, token):
     acc_data = session['accounts_data'][token]
+    active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {f"accounts_data.{token}.processing": True}})
+    
     buy_req = {
         "buy": 1, "price": acc_data["current_stake"],
         "parameters": {
             "amount": acc_data["current_stake"], "basis": "stake",
-            "contract_type": "ACCU", "symbol": "R_10", "growth_rate": 0.04, "currency": ""
+            "contract_type": "DIGITDIFF", "symbol": "R_10", 
+            "duration": 1, "duration_unit": "t", "barrier": "1"
         }
     }
-    res, det_curr = execute_trade(token, buy_req)
+    
+    res, _ = execute_trade(token, buy_req)
     if res and "buy" in res:
-        active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {
-            f"accounts_data.{token}.active_contract": res["buy"]["contract_id"]
-        }})
-        safe_send(chat_id, "🎯 *Analysis Match!* Trade Opened.")
+        contract_id = res["buy"]["contract_id"]
+        threading.Thread(target=monitor_digit_result, args=(chat_id, token, contract_id)).start()
+    else:
+        active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {f"accounts_data.{token}.processing": False}})
 
-def process_acc_result(chat_id, token, contract):
+def monitor_digit_result(chat_id, token, contract_id):
+    time.sleep(2)
+    res, _ = execute_trade(token, {"proposal_open_contract": 1, "contract_id": contract_id})
+    if res and "proposal_open_contract" in res:
+        contract = res["proposal_open_contract"]
+        if contract.get("is_expired"):
+            process_final_result(chat_id, token, contract)
+        else:
+            time.sleep(1)
+            monitor_digit_result(chat_id, token, contract_id)
+
+def process_final_result(chat_id, token, contract):
     session = active_sessions_col.find_one({"chat_id": chat_id})
     acc = session['accounts_data'][token]
     profit = float(contract.get("profit", 0))
     is_win = profit > 0
+    
     new_total = acc["total_profit"] + profit
     win_count = acc.get("win_count", 0) + (1 if is_win else 0)
     loss_count = acc.get("loss_count", 0) + (0 if is_win else 1)
     
     if is_win:
-        status, new_stake, new_losses = "✅ WIN (12%)", session["initial_stake"], 0
+        status, new_stake, new_losses = "✅ WIN", session["initial_stake"], 0
     else:
-        status, new_stake, new_losses = "❌ LOSS", float("{:.2f}".format(acc["current_stake"] * 9)), acc.get("consecutive_losses", 0) + 1
+        # المضاعفة x14 حسب طلبك
+        status, new_stake, new_losses = "❌ LOSS", float("{:.2f}".format(acc["current_stake"] * 14)), acc.get("consecutive_losses", 0) + 1
 
     active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {
-        f"accounts_data.{token}.active_contract": None,
+        f"accounts_data.{token}.processing": False,
         f"accounts_data.{token}.total_profit": new_total,
         f"accounts_data.{token}.current_stake": new_stake,
         f"accounts_data.{token}.consecutive_losses": new_losses,
@@ -148,13 +142,23 @@ def process_acc_result(chat_id, token, contract):
         f"accounts_data.{token}.loss_count": loss_count
     }})
     
-    safe_send(chat_id, f"📊 *Result:* {status}\nNet: `{new_total:.2f}`\n🏆 W: `{win_count}` | 💀 L: `{loss_count}`")
+    msg = (f"📊 *Digit Diff Result:* {status}\n"
+           f"💰 Profit: `{profit:.2f}`\n"
+           f"📈 Net: `{new_total:.2f}`\n"
+           f"--- Statistics ---\n"
+           f"🏆 Wins: `{win_count}`\n"
+           f"💀 Losses: `{loss_count}`")
+    
+    safe_send(chat_id, msg)
 
-    if new_total >= session.get("target_profit", 999999) or new_losses >= 2:
+    # التحقق من شروط التوقف (خسارتين أو الوصول للهدف)
+    if new_losses >= 2 or new_total >= session.get("target_profit", 999999):
         active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {"is_running": False}})
-        safe_send(chat_id, "🏁 *Session Finished.*")
+        # تحويل الزر تلقائياً إلى START
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀')
+        safe_send(chat_id, "🏁 *Session Finished (TP/SL reached).* \nBot is now Offline.", markup)
 
-# --- HTML ADMIN PANEL (القديم المطلوب) ---
+# --- HTML ADMIN PANEL ---
 HTML_ADMIN = """
 <!DOCTYPE html><html><head><title>Admin Panel</title>
 <style>
@@ -166,7 +170,7 @@ HTML_ADMIN = """
     th, td{padding:15px; border-bottom:1px solid #eee; text-align:left;}
 </style></head>
 <body><div class="card">
-    <h2>👥 User Control</h2>
+    <h2>👥 User Control Panel</h2>
     <form action="/add" method="POST">
         <input type="email" name="email" placeholder="Email" required>
         <select name="days">
@@ -204,7 +208,7 @@ def delete_user(email):
 @bot.message_handler(commands=['start'])
 def start(m):
     active_sessions_col.delete_one({"chat_id": m.chat.id})
-    safe_send(m.chat.id, "🤖 *Accumulator Tick Analyzer*\nEnter Email:")
+    safe_send(m.chat.id, "🤖 *Digit Diff V6.1 (Martingale x14)*\nEnter Email:")
     bot.register_next_step_handler(m, auth)
 
 def auth(m):
@@ -232,7 +236,7 @@ def setup_tp(m):
         tp = float(m.text)
         active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"target_profit": tp}})
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀')
-        safe_send(m.chat.id, f"✅ Setup Done! Strategy: Tick Difference < 0.06. Profit: 12%. Click Start.", markup)
+        safe_send(m.chat.id, f"✅ Ready! TP: ${tp}. Mult: x14. Pred: 1. Click Start.", markup)
     except:
         safe_send(m.chat.id, "❌ Error. Enter TP:"); bot.register_next_step_handler(m, setup_tp)
 
@@ -240,15 +244,16 @@ def setup_tp(m):
 def run_bot(m):
     sess = active_sessions_col.find_one({"chat_id": m.chat.id})
     if sess:
-        accs = {t: {"current_stake": sess["initial_stake"], "total_profit": 0, "active_contract": None, "consecutive_losses": 0, "win_count": 0, "loss_count": 0} for t in sess["tokens"]}
+        accs = {t: {"current_stake": sess["initial_stake"], "total_profit": 0, "active_contract": None, "consecutive_losses": 0, "win_count": 0, "loss_count": 0, "processing": False} for t in sess["tokens"]}
         active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": True, "accounts_data": accs}})
-        safe_send(m.chat.id, "🚀 *Bot Online! Analyzing Market...*", types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
+        safe_send(m.chat.id, "🚀 *Bot Online! Monitoring Integer Changes...*", types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
         threading.Thread(target=trade_engine, args=(m.chat.id,), daemon=True).start()
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
 def stop(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": False}})
-    safe_send(m.chat.id, "🛑 Stopping...", types.ReplyKeyboardRemove())
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀')
+    safe_send(m.chat.id, "🛑 Bot Stopped manually.", markup)
 
 if __name__ == '__main__':
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000), daemon=True).start()
