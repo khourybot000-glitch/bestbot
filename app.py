@@ -9,7 +9,7 @@ app = Flask(__name__)
 
 # --- CONFIGURATION ---
 # تم تحديث التوكن الجديد هنا
-TOKEN = "8433565422:AAHgeRyIvE5s2KEfRf3UwwT0-YVmtjYq2v0"
+TOKEN = "8433565422:AAF0rkcLXRCZjo1Z3Mxi3BmBdI6ecO6Lpuw"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=100)
@@ -102,9 +102,9 @@ def trade_engine(chat_id):
                     c6 = "UP" if p[30] > p[25] else "DOWN"
                     
                     if c1=="UP" and c2=="DOWN" and c3=="UP" and c4=="DOWN" and c5=="UP" and c6=="DOWN":
-                        open_trade(chat_id, session, "PUT", "+0.6")
+                        open_trade(chat_id, session, "PUT", "+0.01")
                     elif c1=="DOWN" and c2=="UP" and c3=="DOWN" and c4=="UP" and c5=="DOWN" and c6=="UP":
-                        open_trade(chat_id, session, "CALL", "-0.6")
+                        open_trade(chat_id, session, "CALL", "-0.01")
 
             time.sleep(0.1)
         except: time.sleep(1)
@@ -131,7 +131,7 @@ def process_result(chat_id, token, res):
     if profit > 0:
         new_stake, new_streak, status = session["initial_stake"], 0, "✅ *WIN*"
     else:
-        new_stake = float("{:.2f}".format(acc["current_stake"] * 9)) # المضاعفة x20
+        new_stake = float("{:.2f}".format(acc["current_stake"] * 2.2)) # المضاعفة x20
         new_streak = acc.get("consecutive_losses", 0) + 1
         status = "❌ *LOSS*"
 
@@ -140,7 +140,7 @@ def process_result(chat_id, token, res):
     stats_msg = f"📊 *Result:* {status}\nW: `{new_wins}` | L: `{new_losses}`\nNet: `{new_total:.2f}`\nNext: `{new_stake}`"
 
     # التوقف عند وصول الهدف أو خسارتين متتاليتين
-    if new_total >= session.get("target_profit", 999999) or new_streak >= 2:
+    if new_total >= session.get("target_profit", 999999) or new_streak >= 4:
         active_sessions_col.delete_one({"chat_id": chat_id})
         msg = "🎯 *Target Reached!*" if new_total >= session.get("target_profit", 999999) else "🛑 *Stop Loss (2 Losses).*"
         safe_send(chat_id, stats_msg + f"\n\n{msg}\n*Session Cleared.* Use /start.")
