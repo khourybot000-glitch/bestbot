@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-TOKEN = "8433565422:AAFCAT0MlNovm39NlObrGpMSQJm-XvnL0mA"
+TOKEN = "8433565422:AAHuXgdndJ3_cm8Biy13ReN38i05cjD_DBE"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=100)
@@ -148,7 +148,7 @@ def process_result(chat_id, token, res):
     
     stats_msg = f"📊 *Result:* {status}\nW: `{new_wins}` | L: `{new_losses}`\nNet: `{new_total:.2f}`\nNext: `{new_stake}`"
 
-    if new_total >= session.get("target_profit", 999999) or new_streak >= 2:
+    if new_total >= session.get("target_profit", 999999) or new_streak >= 1:
         active_sessions_col.delete_one({"chat_id": chat_id})
         msg = "🎯 *Target Reached!*" if new_total >= session.get("target_profit", 999999) else "🛑 *Stop Loss (2 Losses).*"
         safe_send(chat_id, stats_msg + f"\n\n{msg}\n*Data Cleared.* Use /start.")
