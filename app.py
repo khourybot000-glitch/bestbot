@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-TOKEN = "8433565422:AAFx2zR6e-k2OYxUoXt5EXTpsp-rvHIoVDg"
+TOKEN = "8433565422:AAH4x4l6E5-Y_DORDOst3o5d-k5hxafzL4Y"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 MARKET_SYMBOL = "R_100"
 
@@ -40,9 +40,9 @@ def quick_execute(token, request_data):
         return res
     except: return None
 
-# --- NEW STRATEGY ENGINE: DIFF >= 0.15 ---
+# --- CORE ENGINE: 3 CONSECUTIVE TICKS DIFF >= 0.1 ---
 def trade_engine(chat_id):
-    prev_tick_price = None
+    tick_history = [] # لتخزين آخر تيكات
     session = active_sessions_col.find_one({"chat_id": chat_id})
     if not session: return
     
@@ -57,7 +57,7 @@ def trade_engine(chat_id):
         ws.recv()
         ws.send(json.dumps({"ticks": MARKET_SYMBOL, "subscribe": 1}))
         
-        bot.send_message(chat_id, "🔍 Strategy Active: Diff >= 0.15 | Barrier = 2nd Decimal")
+        bot.send_message(chat_id, "🔍 Strategy: 3 Consecutive Ticks with Diff >= 0.1")
 
         while True:
             status = active_sessions_col.find_one({"chat_id": chat_id})
@@ -70,34 +70,36 @@ def trade_engine(chat_id):
 
             if "tick" in data:
                 current_price = float(data["tick"]["quote"])
+                tick_history.append(current_price)
                 
-                if prev_tick_price is not None:
-                    diff = abs(current_price - prev_tick_price)
+                # الاحتفاظ بآخر 3 تيكات فقط
+                if len(tick_history) > 3:
+                    tick_history.pop(0)
+
+                # التحقق من وجود 3 تيكات لتحليلها
+                if len(tick_history) == 3:
+                    diff1 = abs(tick_history[2] - tick_history[1]) # الفرق بين الأخير وقبله
+                    diff2 = abs(tick_history[1] - tick_history[0]) # الفرق بين قبل الأخير واللي قبله
                     
-                    if diff >= 0.15:
-                        # استخراج الـ Barrier (الرقم الثاني بعد الفاصلة)
-                        price_str = "{:.2f}".format(current_price) # يضمن وجود رقمين (مثال 100.50)
-                        target_barrier = price_str[-1] # الرقم الأخير في النص هو الرقم الثاني بعد الفاصلة
+                    if diff1 >= 0.1 and diff2 >= 0.1:
+                        # استخراج الـ Barrier من التيك الحالي (الرقم الثاني بعد الفاصلة)
+                        price_str = "{:.2f}".format(current_price)
+                        target_barrier = price_str[-1]
                         
-                        # تنفيذ الصفقة فوراً
                         buy_req = {
-                            "buy": 1, 
-                            "price": current_stake,
+                            "buy": 1, "price": current_stake,
                             "parameters": {
-                                "amount": current_stake,
-                                "basis": "stake",
-                                "contract_type": "DIGITDIFF",
-                                "symbol": MARKET_SYMBOL, 
-                                "duration": 1, 
-                                "duration_unit": "t",
-                                "barrier": target_barrier,
-                                "currency": user_currency
+                                "amount": current_stake, "basis": "stake",
+                                "contract_type": "DIGITDIFF", "symbol": MARKET_SYMBOL, 
+                                "duration": 1, "duration_unit": "t",
+                                "barrier": target_barrier, "currency": user_currency
                             }
                         }
                         
                         res = quick_execute(token, buy_req)
                         if res and "buy" in res:
-                            bot.send_message(chat_id, f"🚀 Diff: {diff:.2f} | Barrier: {target_barrier}\nTrade placed, waiting 8s...")
+                            bot.send_message(chat_id, f"⚡ Sequence Found!\nDiffs: {diff2:.2f} & {diff1:.2f}\nBarrier: {target_barrier}. Waiting 8s...")
+                            tick_history = [] # تصفير القائمة لبدء سلسلة جديدة
                             time.sleep(8)
                             
                             res_contract = quick_execute(token, {"proposal_open_contract": 1, "contract_id": res["buy"]["contract_id"]})
@@ -120,12 +122,11 @@ def trade_engine(chat_id):
                                 
                                 bot.send_message(chat_id, f"📊 *{status_text}*\nNet: `{total_profit:.2f}`\nW: {win_count} | L: {loss_count}", parse_mode="Markdown")
 
-                                if consecutive_losses >= 2 or total_profit >= session.get("target_profit", 9999):
+                                if consecutive_losses >= 4 or total_profit >= session.get("target_profit", 9999):
                                     active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {"is_running": False}})
-                                    bot.send_message(chat_id, "🏁 Stop Condition Met.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
+                                    bot.send_message(chat_id, "🏁 Session Stopped.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
                                     break
                 
-                prev_tick_price = current_price
         ws.close()
     except: time.sleep(2)
 
@@ -149,7 +150,7 @@ HTML_ADMIN = """
     </form>
     <table>
         <thead><tr><th>Email</th><th>Expiry Date</th><th>Action</th></tr></thead>
-        <tbody>{% for u in users %}<tr><td>{{u.email}}</td><td>{{u.expiry}}</td><td><a href="/delete/{{u.email}}" style="color:red;">Remove</a></td></tr>{% endfor %}</tbody>
+        <tbody>{% for u in users %}<tr><td>{{u.email}}</td><td>{{u.expiry}}</td><td><a href="/delete/{{u.email}}" style="color:red; font-weight:bold; text-decoration:none;">Remove</a></td></tr>{% endfor %}</tbody>
     </table>
 </div></body></html>
 """
@@ -169,14 +170,14 @@ def delete_user(email): users_col.delete_one({"email": email}); return redirect(
 
 @bot.message_handler(commands=['start'])
 def start(m):
-    bot.send_message(m.chat.id, "🤖 *Digit Bot V7.6 (English)*\nEnter Email:")
+    bot.send_message(m.chat.id, "🤖 *Digit Bot V7.7*\nEnter Email:")
     bot.register_next_step_handler(m, auth)
 
 def auth(m):
     u = users_col.find_one({"email": m.text.lower().strip()})
     if u and datetime.strptime(u['expiry'], "%Y-%m-%d") > datetime.now():
         bot.send_message(m.chat.id, "✅ Authorized. Enter Token:"); bot.register_next_step_handler(m, save_token)
-    else: bot.send_message(m.chat.id, "🚫 Access Denied.")
+    else: bot.send_message(m.chat.id, "🚫 No access.")
 
 def save_token(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"tokens": [m.text.strip()], "is_running": False}}, upsert=True)
@@ -193,7 +194,7 @@ def setup_tp(m):
 @bot.message_handler(func=lambda m: m.text == 'START 🚀')
 def run(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": True}})
-    bot.send_message(m.chat.id, f"🚀 Monitoring {MARKET_SYMBOL}...", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
+    bot.send_message(m.chat.id, f"🚀 Analyzing {MARKET_SYMBOL}...", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
     threading.Thread(target=trade_engine, args=(m.chat.id,), daemon=True).start()
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
