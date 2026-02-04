@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION (NEW TELEGRAM TOKEN) ---
-TOKEN = "8433565422:AAFjmxWuL63wi1-X8HGEtE_GWvaUf48Rd8Q"
+TOKEN = "8433565422:AAHHwOaclpHDomy57OPq9dWxVsfR-n3raLo"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN)
@@ -56,7 +56,7 @@ def trading_process(chat_id):
                     
                     if signal:
                         # حاجز 1.4 (CALL -1.4 / PUT +1.4) كما طلبت
-                        barrier = "-1.4" if signal == "CALL" else "+1.4"
+                        barrier = "-1" if signal == "CALL" else "+1"
                         
                         # 2. طلب عرض السعر (مدة 6 تيكات)
                         ws.send(json.dumps({
@@ -102,7 +102,7 @@ def process_result(chat_id, res, currency):
         new_stake, c_losses, wins, status = session["initial_stake"], 0, wins + 1, "WIN ✅"
     else:
         # مضاعفة 14x
-        new_stake = float("{:.2f}".format(session["current_stake"] * 14))
+        new_stake = float("{:.2f}".format(session["current_stake"] * 19))
         c_losses, losses_total, status = c_losses + 1, losses_total + 1, "LOSS ❌"
 
     active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {
@@ -118,8 +118,8 @@ def process_result(chat_id, res, currency):
     ))
 
     # التوقف فوراً بعد خسارة واحدة (c_losses >= 1)
-    if total_p >= session.get("target_profit", 9999) or c_losses >= 1:
-        reason = "Target Profit Reached" if total_p >= session.get("target_profit", 9999) else "STOPPED: 1 Loss Hit"
+    if total_p >= session.get("target_profit", 9999) or c_losses >= 2:
+        reason = "Target Profit Reached" if total_p >= session.get("target_profit", 9999) else "STOPPED: 2 Loss Hit"
         active_sessions_col.delete_one({"chat_id": chat_id})
         bot.send_message(chat_id, f"🛑 *SESSION FINISHED*\nReason: {reason}", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
 
