@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION (UPDATED TOKEN) ---
-TOKEN = "8433565422:AAFDSc9FiooqxcN2_W-e9MzHnOm6gspV1BU"
+TOKEN = "8433565422:AAGKuVFQ0pxPW0cDOPbYzIxZIiOlfduw95o"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN, threaded=True)
@@ -32,8 +32,8 @@ def analyze_custom_candles(ticks):
     small_is_up = small_candle_close > small_candle_open
     small_is_down = small_candle_close < small_candle_open
     
-    if big_is_up and small_is_down: return "CALL"
-    if big_is_down and small_is_up: return "PUT"
+    if big_is_up and small_is_down: return "PUT"
+    if big_is_down and small_is_up: return "CALL"
     return None
 
 # --- ENGINE ---
@@ -70,7 +70,7 @@ def trade_engine(chat_id):
                         
                         curr_session = active_sessions_col.find_one({"chat_id": chat_id})
                         if signal and not curr_session.get("active_contract"):
-                            barrier = "-0.5" if signal == "CALL" else "+0.5"
+                            barrier = "-0.7" if signal == "CALL" else "+0.7"
                             stake = curr_session.get("current_stake")
                             
                             ws.send(json.dumps({
@@ -120,7 +120,7 @@ def process_result(chat_id, res):
         losses = 0
         status = "WIN ✅"
     else:
-        new_stake = float("{:.2f}".format(session["current_stake"] * 5)) # 5x Martingale
+        new_stake = float("{:.2f}".format(session["current_stake"] * 14)) # 5x Martingale
         losses = session.get("consecutive_losses", 0) + 1
         status = "LOSS ❌"
 
@@ -134,7 +134,7 @@ def process_result(chat_id, res):
     
     bot.send_message(chat_id, f"📊 *Result:* {status}\n*Profit:* {profit}\n*Net:* {total_p}\n*Next Stake:* {new_stake}")
 
-    if total_p >= session.get("target_profit", 99999) or losses >= 3:
+    if total_p >= session.get("target_profit", 99999) or losses >= 2:
         reason = "Target Profit Reached!" if total_p >= session.get("target_profit", 99999) else "Stop Loss Hit (3 Losses)!"
         stop_and_clear(chat_id, reason)
 
