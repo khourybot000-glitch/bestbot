@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION (NEW TELEGRAM TOKEN) ---
-TOKEN = "8433565422:AAG2DSu_V4MOhekSIjjJ14yHqx8ufHIkAf0"
+TOKEN = "8433565422:AAHCxIPG5_JIgf7ONYOggdbTvzI6ioM-594"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN)
@@ -24,8 +24,8 @@ def analyze_history(prices):
     small_open, small_close = prices[30], prices[44]
     
     # REVERSED: Big Down + Small Up = CALL | Big Up + Small Down = PUT
-    if big_close < big_open and small_close > small_open: return "CALL"
-    if big_close > big_open and small_close < small_open: return "PUT"
+    if big_close < big_open and small_close > small_open: return "PUT"
+    if big_close > big_open and small_close < small_open: return "CALL"
     return None
 
 # --- TRADING ENGINE (SYNCHRONOUS HISTORY MODEL) ---
@@ -59,11 +59,11 @@ def trading_process(chat_id):
                     signal = analyze_history(prices)
                     
                     if signal:
-                        barrier = "-1" if signal == "CALL" else "+1"
+                        barrier = "-1.4" if signal == "CALL" else "+1.4"
                         # 2. Proposal
                         ws.send(json.dumps({
                             "proposal": 1, "amount": session["current_stake"], "basis": "stake",
-                            "contract_type": signal, "duration": 5, "duration_unit": "t",
+                            "contract_type": signal, "duration": 6, "duration_unit": "t",
                             "symbol": "R_100", "barrier": barrier, "currency": currency
                         }))
                         prop_data = json.loads(ws.recv()).get("proposal")
@@ -78,7 +78,7 @@ def trading_process(chat_id):
                                 bot.send_message(chat_id, f"🚀 *Trade Sent:* {signal}\nStake: {session['current_stake']} {currency}")
                                 
                                 # 4. Wait 18 seconds (Transaction wait time)
-                                time.sleep(18)
+                                time.sleep(24)
                                 ws.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id}))
                                 result_data = json.loads(ws.recv()).get("proposal_open_contract", {})
                                 
@@ -120,7 +120,7 @@ def process_result(chat_id, res, currency):
 
     # Stop after TWO consecutive losses
     if total_p >= session.get("target_profit", 9999) or c_losses >= 1:
-        reason = "Target Profit Reached" if total_p >= session.get("target_profit", 9999) else "STOPPED: 2 Consecutive Losses"
+        reason = "Target Profit Reached" if total_p >= session.get("target_profit", 9999) else "STOPPED: 1 Loss"
         active_sessions_col.delete_one({"chat_id": chat_id})
         bot.send_message(chat_id, f"🛑 *SESSION OVER*\nReason: {reason}", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
 
