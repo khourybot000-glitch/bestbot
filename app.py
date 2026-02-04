@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION (NEW TELEGRAM TOKEN) ---
-TOKEN = "8433565422:AAHCxIPG5_JIgf7ONYOggdbTvzI6ioM-594"
+TOKEN = "8433565422:AAG3b2605BP-LG-apY7nVuHcvKlgTG6VqFI"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN)
@@ -24,8 +24,8 @@ def analyze_history(prices):
     small_open, small_close = prices[30], prices[44]
     
     # REVERSED: Big Down + Small Up = CALL | Big Up + Small Down = PUT
-    if big_close < big_open and small_close > small_open: return "PUT"
-    if big_close > big_open and small_close < small_open: return "CALL"
+    if big_close < big_open and small_close > small_open: return "CALL"
+    if big_close > big_open and small_close < small_open: return "PUT"
     return None
 
 # --- TRADING ENGINE (SYNCHRONOUS HISTORY MODEL) ---
