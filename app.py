@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-TOKEN = "8433565422:AAF5aKUymaToeehXMbhJLeWCSodO9TkJZ14"
+TOKEN = "8433565422:AAH5-47y44PIfs7o-6sNntkW4ftprwLgE5E"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=100)
@@ -49,9 +49,9 @@ def get_signals(prices):
     curr_rsi = rsi.iloc[-1]
     
     # CALL: EMA10 crosses above EMA30 AND RSI is between 50-70
-    if prev_e10 <= prev_e30 and curr_e10 > curr_e30 and 50 < curr_rsi < 70: return "CALL"
+    if prev_e10 <= prev_e30 and curr_e10 > curr_e30 and 50 < curr_rsi < 70: return "PUT"
     # PUT: EMA10 crosses below EMA30 AND RSI is between 30-50
-    if prev_e10 >= prev_e30 and curr_e10 < curr_e30 and 30 < curr_rsi < 50: return "PUT"
+    if prev_e10 >= prev_e30 and curr_e10 < curr_e30 and 30 < curr_rsi < 50: return "CALL"
     return None
 
 # --- TRADING ENGINE: SINGLE WEBSOCKET STRUCTURE ---
@@ -140,7 +140,7 @@ def process_result(chat_id, token, res):
     if profit > 0:
         new_stake, new_streak, status = session["initial_stake"], 0, "✅ *WIN*"
     else:
-        new_stake = float("{:.2f}".format(acc["current_stake"] * 14)) # 14x Multiplier
+        new_stake = float("{:.2f}".format(acc["current_stake"] * 5)) # 14x Multiplier
         new_streak = acc.get("consecutive_losses", 0) + 1
         status = "❌ *LOSS*"
 
@@ -156,7 +156,7 @@ def process_result(chat_id, token, res):
     
     stats_msg = f"📊 *Trade Stats:*\nStatus: {status}\nWins: `{new_wins}` | Losses: `{new_losses}`\nNet Profit: `{new_total:.2f}`\nNext Stake: `{new_stake}`"
 
-    if new_total >= session.get("target_profit", 999999) or new_streak >= 2:
+    if new_total >= session.get("target_profit", 999999) or new_streak >= 3:
         active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {"is_running": False}, "$unset": {"accounts_data": ""}})
         msg = "🎯 Target Profit Reached!" if new_total >= session.get("target_profit", 999999) else "🛑 Stopped after 2 Consecutive Losses."
         safe_send(chat_id, stats_msg + f"\n\n{msg}", types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
