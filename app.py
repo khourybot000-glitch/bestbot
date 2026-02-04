@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION (NEW TELEGRAM TOKEN) ---
-TOKEN = "8433565422:AAF5EHDbM-ITKJmOhHRdyF_0y1OmWl6_AME"
+TOKEN = "8433565422:AAG2DSu_V4MOhekSIjjJ14yHqx8ufHIkAf0"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN)
@@ -59,7 +59,7 @@ def trading_process(chat_id):
                     signal = analyze_history(prices)
                     
                     if signal:
-                        barrier = "-0.7" if signal == "CALL" else "+0.7"
+                        barrier = "-1" if signal == "CALL" else "+1"
                         # 2. Proposal
                         ws.send(json.dumps({
                             "proposal": 1, "amount": session["current_stake"], "basis": "stake",
@@ -119,7 +119,7 @@ def process_result(chat_id, res, currency):
     ))
 
     # Stop after TWO consecutive losses
-    if total_p >= session.get("target_profit", 9999) or c_losses >= 2:
+    if total_p >= session.get("target_profit", 9999) or c_losses >= 1:
         reason = "Target Profit Reached" if total_p >= session.get("target_profit", 9999) else "STOPPED: 2 Consecutive Losses"
         active_sessions_col.delete_one({"chat_id": chat_id})
         bot.send_message(chat_id, f"🛑 *SESSION OVER*\nReason: {reason}", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
