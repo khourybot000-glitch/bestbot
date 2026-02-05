@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-TOKEN = "8433565422:AAFGCKaNnJ-A4T5b2RXPDjjbzzL1dQJtRFk"
+TOKEN = "8433565422:AAERUYXvjF89BrLC51qHUOBCB7aHp8xTY-s"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN)
@@ -37,10 +37,11 @@ def quick_check(token, contract_id):
         if ws: ws.close()
         return None
 
-# --- TRADING ENGINE (STREAM MODE) ---
+# --- TRADING ENGINE (FIXED ENTRY LOGIC) ---
 def trading_process(chat_id):
     last_min = -1
     target_digit = None
+    last_tick_id = None # To prevent instant entry on the same analysis tick
     
     while True:
         session = active_sessions_col.find_one({"chat_id": chat_id})
@@ -52,7 +53,7 @@ def trading_process(chat_id):
             ws.recv()
             ws.send(json.dumps({"ticks": "R_100", "subscribe": 1}))
             
-            bot.send_message(chat_id, "📡 *Connected!* Waiting for :00 second to analyze...")
+            bot.send_message(chat_id, "📡 *Bot Online.* Streaming ticks and waiting for :00...")
             
             while True:
                 session = active_sessions_col.find_one({"chat_id": chat_id})
@@ -64,41 +65,46 @@ def trading_process(chat_id):
                 if "tick" in data:
                     tick_time = datetime.fromtimestamp(data["tick"]["epoch"])
                     price = data["tick"]["quote"]
+                    tick_id = data["tick"]["id"]
                     
-                    # 1. Analysis at :00
+                    # 1. ANALYSIS PHASE (Pick Target at :00)
                     if tick_time.second == 0 and tick_time.minute != last_min:
                         last_min = tick_time.minute
                         target_digit, disp_p = get_digit(price)
-                        bot.send_message(chat_id, f"🔍 *Analysis @ :00*\n🔢 Target Digit: `{target_digit}`\n💰 Price: `{disp_p}`\n🔭 Hunting for entry...")
+                        last_tick_id = tick_id # Remember this tick so we don't buy on it
+                        bot.send_message(chat_id, f"🔍 *Analysis @ :00*\n🔢 Target Digit: `{target_digit}`\n💰 Price: `{disp_p}`\n🔭 Waiting for this digit to show up again...")
                     
-                    # 2. Hunting
+                    # 2. HUNTING PHASE (Wait for digit to show up AGAIN)
                     if target_digit is not None and tick_time.minute == last_min:
-                        curr_digit, _ = get_digit(price)
-                        
-                        if curr_digit == target_digit:
-                            stake = session["current_stake"]
-                            ws.send(json.dumps({
-                                "buy": 1, "price": stake,
-                                "parameters": {
-                                    "amount": stake, "basis": "stake", "contract_type": "DIGITDIFF",
-                                    "currency": "USD", "duration": 1, "duration_unit": "t",
-                                    "symbol": "R_100", "barrier": str(target_digit)
-                                }
-                            }))
-                            buy_res = json.loads(ws.recv())
+                        # Only check if it's NOT the same tick we analyzed
+                        if tick_id != last_tick_id:
+                            curr_digit, _ = get_digit(price)
                             
-                            if "buy" in buy_res:
-                                c_id = buy_res["buy"]["contract_id"]
-                                bot.send_message(chat_id, f"🎯 *Digit {target_digit} Spotted!* Trade entered.")
-                                target_digit = None
-                                ws.close() 
+                            if curr_digit == target_digit:
+                                # ENTRY FOUND
+                                stake = session["current_stake"]
+                                ws.send(json.dumps({
+                                    "buy": 1, "price": stake,
+                                    "parameters": {
+                                        "amount": stake, "basis": "stake", "contract_type": "DIGITDIFF",
+                                        "currency": "USD", "duration": 1, "duration_unit": "t",
+                                        "symbol": "R_100", "barrier": str(target_digit)
+                                    }
+                                }))
+                                buy_res = json.loads(ws.recv())
                                 
-                                time.sleep(8) # Wait 8 seconds as requested
-                                result = quick_check(session['api_token'], c_id)
-                                if result:
-                                    profit = float(result["proposal_open_contract"].get("profit", 0))
-                                    handle_stats(chat_id, profit)
-                                break 
+                                if "buy" in buy_res:
+                                    c_id = buy_res["buy"]["contract_id"]
+                                    bot.send_message(chat_id, f"🎯 *Re-appearance of {target_digit}!* Trade executed.")
+                                    target_digit = None # Clear target for this minute
+                                    ws.close() 
+                                    
+                                    time.sleep(8) 
+                                    result = quick_check(session['api_token'], c_id)
+                                    if result:
+                                        profit = float(result["proposal_open_contract"].get("profit", 0))
+                                        handle_stats(chat_id, profit)
+                                    break 
                                 
             if ws: ws.close()
         except:
@@ -116,11 +122,12 @@ def handle_stats(chat_id, profit):
     if is_win:
         nxt = session["initial_stake"]
     else:
+        # Stop after 2 losses rule
         if session["current_stake"] > session["initial_stake"]:
             nxt = session["initial_stake"]
-            stop = True # Stop after 2 losses (Martingale failed)
+            stop = True 
         else:
-            nxt = float("{:.2f}".format(session["initial_stake"] * 14)) # x14 Martingale
+            nxt = float("{:.2f}".format(session["initial_stake"] * 14)) 
 
     active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {
         "total_profit": new_total, 
@@ -129,22 +136,22 @@ def handle_stats(chat_id, profit):
         "loss_count": new_losses
     }})
 
-    status_icon = "✅ WIN" if is_win else "❌ LOSS"
-    stats_msg = (
-        f"📊 *Trade Result:* {status_icon}\n"
+    status = "✅ WIN" if is_win else "❌ LOSS"
+    msg = (
+        f"📊 *Trade Result:* {status}\n"
         f"💰 Profit: `{profit:.2f}`\n"
         f"💵 Total P/L: `{new_total:.2f}`\n"
         f"━━━━━━━━━━━━━━━\n"
         f"🏆 Wins: `{new_wins}` | 💀 Losses: `{new_losses}`"
     )
-    bot.send_message(chat_id, stats_msg)
+    bot.send_message(chat_id, msg)
 
     if stop or new_total >= session["target_profit"]:
         active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {"is_running": False}})
-        reason = "Target Reached! 🏆" if new_total >= session["target_profit"] else "2 Consecutive Losses. 🛑"
-        bot.send_message(chat_id, f"🔚 *Bot Stopped*\nReason: {reason}", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
+        reason = "Target Profit! 🏆" if new_total >= session["target_profit"] else "Max Losses Reached. 🛑"
+        bot.send_message(chat_id, f"🔚 *Session Finished*\nReason: {reason}", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
 
-# --- ADMIN PANEL (HTML) ---
+# --- ADMIN PANEL ---
 HTML_ADMIN = """
 <!DOCTYPE html><html><head><title>Admin Panel</title>
 <style>
@@ -155,12 +162,11 @@ HTML_ADMIN = """
     button { background: #2ecc71; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-weight: bold; }
     table { width: 100%; border-collapse: collapse; }
     th, td { padding: 12px; border-bottom: 1px solid #eee; text-align: left; }
-    th { background: #f8f9fa; }
 </style></head>
 <body><div class="box">
-    <h2>💎 User Access Management</h2>
+    <h2>💎 Digit Differ Control Panel</h2>
     <form class="form" action="/add" method="POST">
-        <input type="email" name="email" placeholder="User Email" required>
+        <input type="email" name="email" placeholder="Email" required>
         <select name="days"><option value="1">1 Day</option><option value="30">30 Days</option><option value="36500">Lifetime</option></select>
         <button type="submit">Add User</button>
     </form>
@@ -182,27 +188,26 @@ def add_user():
 @app.route('/delete/<email>')
 def delete_user(email): users_col.delete_one({"email": email}); return redirect('/')
 
-# --- TELEGRAM COMMANDS ---
 @bot.message_handler(commands=['start', 'START 🚀'])
 def start_bot(m):
-    bot.send_message(m.chat.id, "👋 Welcome! Please enter your registered email:", reply_markup=types.ReplyKeyboardRemove())
+    bot.send_message(m.chat.id, "👋 Enter your registered email:", reply_markup=types.ReplyKeyboardRemove())
     bot.register_next_step_handler(m, auth)
 
 def auth(m):
     u = users_col.find_one({"email": m.text.strip().lower()})
     if u and datetime.strptime(u['expiry'], "%Y-%m-%d") > datetime.now():
-        bot.send_message(m.chat.id, "✅ Access Granted! Enter your API Token:"); bot.register_next_step_handler(m, save_token)
-    else: bot.send_message(m.chat.id, "🚫 Unauthorized or Expired.")
+        bot.send_message(m.chat.id, "✅ Access Granted! Enter API Token:"); bot.register_next_step_handler(m, save_token)
+    else: bot.send_message(m.chat.id, "🚫 Unauthorized.")
 
 def save_token(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"api_token": m.text.strip()}}, upsert=True)
-    bot.send_message(m.chat.id, "Enter Initial Stake (e.g., 1):"); bot.register_next_step_handler(m, save_stake)
+    bot.send_message(m.chat.id, "Initial Stake:"); bot.register_next_step_handler(m, save_stake)
 
 def save_stake(m):
     try:
         s = float(m.text); active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"initial_stake": s, "current_stake": s}})
-        bot.send_message(m.chat.id, "Enter Target Profit (TP):"); bot.register_next_step_handler(m, save_tp)
-    except: bot.send_message(m.chat.id, "Invalid number.")
+        bot.send_message(m.chat.id, "Target Profit (TP):"); bot.register_next_step_handler(m, save_tp)
+    except: bot.send_message(m.chat.id, "Error.")
 
 def save_tp(m):
     try:
@@ -210,14 +215,14 @@ def save_tp(m):
         active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {
             "target_profit": tp, "total_profit": 0, "win_count": 0, "loss_count": 0, "is_running": True
         }})
-        bot.send_message(m.chat.id, "🚀 Bot is Running! Analyzing at :00 seconds...", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
+        bot.send_message(m.chat.id, "🚀 Bot Running! Will hunt for digits appearing AFTER :00.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
         threading.Thread(target=trading_process, args=(m.chat.id,), daemon=True).start()
-    except: bot.send_message(m.chat.id, "Invalid number.")
+    except: bot.send_message(m.chat.id, "Error.")
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
 def stop_btn(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": False}})
-    bot.send_message(m.chat.id, "🛑 Bot Stopped.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
+    bot.send_message(m.chat.id, "🛑 Stopped.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
 
 if __name__ == '__main__':
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000), daemon=True).start()
