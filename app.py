@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-TOKEN = "8433565422:AAFI3CTJFczRW1jOamdxhpH40MLNoutt1K0"
+TOKEN = "8433565422:AAGAU8lmPky6Wxh41v7H1ztCu3_ifYydNzE"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN)
@@ -75,9 +75,9 @@ def trading_process(chat_id):
                             ws.send(json.dumps({
                                 "buy": 1, "price": stake,
                                 "parameters": {
-                                    "amount": stake, "basis": "stake", "contract_type": "DIGITDIFF",
+                                    "amount": stake, "basis": "stake", "contract_type": "DIGITUNDER",
                                     "currency": "USD", "duration": 1, "duration_unit": "t",
-                                    "symbol": "R_100", "barrier": 0
+                                    "symbol": "R_100", "barrier": 8
                                 }
                             }))
                             resp = json.loads(ws.recv())
@@ -89,7 +89,7 @@ def trading_process(chat_id):
                                 ws.close() # Close after entry
                                 
                                 # Wait 18 seconds for result verification
-                                time.sleep(18)
+                                time.sleep(10)
                                 result = quick_check(session['api_token'], c_id)
                                 if result:
                                     profit = float(result["proposal_open_contract"].get("profit", 0))
@@ -119,7 +119,7 @@ def handle_stats(chat_id, profit):
             next_stake = session["initial_stake"]
             stop_session = True # 2nd Loss detected
         else:
-            next_stake = float("{:.2f}".format(session["initial_stake"] * 14))
+            next_stake = float("{:.2f}".format(session["initial_stake"] * 6))
 
     new_total = session.get("total_profit", 0) + profit
     new_wins = session.get("win_count", 0) + (1 if is_win else 0)
