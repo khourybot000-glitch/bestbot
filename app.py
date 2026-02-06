@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION (UPDATED TOKEN) ---
-TOKEN = "8433565422:AAHRiGexiXUVId4P3QIFIEv9hFyAwkBuA8g"
+TOKEN = "8433565422:AAF90xdBtcPgRDVMEEVa23A7izw7a5nLnTM"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN)
@@ -80,7 +80,7 @@ def trading_process(chat_id):
                                 "buy": 1, "price": stake,
                                 "parameters": {
                                     "amount": stake, "basis": "stake", "contract_type": ctype,
-                                    "currency": "USD", "duration": 1, "duration_unit": "t",
+                                    "currency": "USD", "duration": 5, "duration_unit": "t",
                                     "symbol": "R_100", "barrier": barrier
                                 }
                             }))
