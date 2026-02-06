@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION (UPDATED TOKEN) ---
-TOKEN = "8433565422:AAEbKctJA6kUo7sdvgYBpFrqP8APIOoET2E"
+TOKEN = "8433565422:AAFb4sb7KUjT_KJPzTIq78WCrH_6LctXHh8"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN)
@@ -68,7 +68,7 @@ def trading_process(chat_id):
                     
                     # الفحص عند توفر 6 تيكات (الحالي + 5 سابقين) وظهور .00
                     if len(history) >= 6 and check_double_zero_logic(curr_price):
-                        old_price = history[0] # السعر قبل 5 تيكات
+                        old_price = history[-2] # السعر قبل 5 تيكات
                         ctype = None
                         barrier = ""
                         
