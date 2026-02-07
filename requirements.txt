@@ -5,3 +5,4 @@ pymongo
 pandas
 pandas_ta
 datetime
+numpy
