@@ -147,4 +147,5 @@ def stop_btn(m):
     bot.send_message(m.chat.id, "🛑 Bot Stopped.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('/start'))
 
 if __name__ == '__main__':
+    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000), daemon=True).start()
     bot.infinity_polling()
