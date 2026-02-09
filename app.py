@@ -8,8 +8,8 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-# Updated with your new token
-BOT_TOKEN = "8433565422:AAFp-hUbSaeQOxiEltLEBmYhRnYMqQRdenE"
+# Updated with your latest token
+BOT_TOKEN = "8433565422:AAFbPemTSwC_CjrYbOeFDCKFoBx01LEBGBQ"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True, num_threads=100)
@@ -34,50 +34,54 @@ threading.Thread(target=message_worker, daemon=True).start()
 def safe_send(chat_id, text, markup=None):
     msg_queue.put((chat_id, text, markup))
 
-# --- TRADING ENGINE (DUAL DIGIT STRATEGY) ---
+# --- TRADING ENGINE (FIXED STOP LOGIC) ---
 def trade_engine(chat_id):
+    active_pairs = {} 
+
     while True:
+        # Check session status at the start of every loop
         session = active_sessions_col.find_one({"chat_id": chat_id})
-        if not session or not session.get("is_running"): break
+        if not session or not session.get("is_running"):
+            print(f"Stopping thread for chat_id: {chat_id}")
+            break # Fully terminate the thread
+            
         token = session['tokens'][0]
 
         def on_message(ws, message):
             data = json.loads(message)
             
+            # Double check if bot was stopped while waiting for tick
+            current_sess = active_sessions_col.find_one({"chat_id": chat_id})
+            if not current_sess or not current_sess.get("is_running"):
+                ws.close()
+                return
+
             if "tick" in data:
-                # Extract Last Digit
                 last_digit = int(str(data["tick"]["quote"])[-1])
-                
-                # Condition: Open trades when Last Digit is 4
                 if last_digit == 4:
-                    acc = session["accounts_data"][token]
-                    currency = data.get("authorize", {}).get("currency", "USD")
-                    
-                    # Trade 1: DIGITOVER 5
-                    ws.send(json.dumps({
-                        "buy": "1", "price": acc["current_stake"],
-                        "parameters": {
-                            "amount": acc["current_stake"], "basis": "stake",
-                            "contract_type": "DIGITOVER", "barrier": "5",
-                            "duration": 5, "duration_unit": "t", "symbol": "R_100", "currency": currency
-                        }
-                    }))
-                    
-                    # Trade 2: DIGITUNDER 4
-                    ws.send(json.dumps({
-                        "buy": "1", "price": acc["current_stake"],
-                        "parameters": {
-                            "amount": acc["current_stake"], "basis": "stake",
-                            "contract_type": "DIGITUNDER", "barrier": "4",
-                            "duration": 1, "duration_unit": "t", "symbol": "R_100", "currency": currency
-                        }
-                    }))
+                    acc = current_sess["accounts_data"][token]
+                    if not active_pairs.get(chat_id):
+                        active_pairs[chat_id] = {"ids": []}
+                        for c_type, barrier in [("DIGITOVER", "5"), ("DIGITUNDER", "4")]:
+                            ws.send(json.dumps({
+                                "buy": "1", "price": acc["current_stake"],
+                                "parameters": {
+                                    "amount": acc["current_stake"], "basis": "stake",
+                                    "contract_type": c_type, "barrier": barrier,
+                                    "duration": 1, "duration_unit": "t",
+                                    "symbol": "R_100", "currency": "USD"
+                                }
+                            }))
 
             if "buy" in data:
                 cid = data["buy"]["contract_id"]
-                safe_send(chat_id, f"🚀 *Dual Trade Executed!* \nID: `{cid}`")
-                # Wait 18s to request results
-                threading.Timer(8, lambda: check_result_connection(chat_id, token, cid)).start()
+                if chat_id in active_pairs:
+                    active_pairs[chat_id]["ids"].append(cid)
+                    if len(active_pairs[chat_id]["ids"]) == 2:
+                        safe_send(chat_id, "🎯 *Dual trades opened (1 Tick)!*")
+                        cids = active_pairs[chat_id]["ids"].copy()
+                        active_pairs[chat_id] = None 
+                        threading.Timer(8, lambda: check_combined_results(chat_id, token, cids)).start()
 
         def on_open(ws):
             ws.send(json.dumps({"authorize": token}))
@@ -88,61 +92,62 @@ def trade_engine(chat_id):
         ws.run_forever()
         time.sleep(1)
 
-def check_result_connection(chat_id, token, contract_id):
+def check_combined_results(chat_id, token, cids):
+    results = []
     def on_message(ws, message):
         data = json.loads(message)
         if "authorize" in data:
-            ws.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id}))
+            for cid in cids: ws.send(json.dumps({"proposal_open_contract": 1, "contract_id": cid}))
         if "proposal_open_contract" in data:
             poc = data["proposal_open_contract"]
             if poc.get("is_sold"):
-                process_result(chat_id, token, data)
-                ws.close()
+                results.append(poc)
+                if len(results) == 2:
+                    process_group_result(chat_id, token, results)
+                    ws.close()
     def on_open(ws): ws.send(json.dumps({"authorize": token}))
     ws = websocket.WebSocketApp("wss://blue.derivws.com/websockets/v3?app_id=16929", on_open=on_open, on_message=on_message)
     ws.run_forever()
 
-def process_result(chat_id, token, res):
+def process_group_result(chat_id, token, results):
     session = active_sessions_col.find_one({"chat_id": chat_id})
+    if not session: return
+
     acc = session['accounts_data'].get(token)
-    poc = res.get("proposal_open_contract", {})
-    profit = float(poc.get("profit", 0))
+    group_profit = sum(float(r.get("profit", 0)) for r in results)
+    is_win = group_profit > 0
     
-    is_win = profit > 0
     new_wins = acc.get("win_count", 0) + (1 if is_win else 0)
     new_losses = acc.get("loss_count", 0) + (1 if not is_win else 0)
-    new_total = acc.get("total_profit", 0) + profit
+    new_total_net = acc.get("total_profit", 0) + group_profit
     
     if is_win:
         new_stake = session["initial_stake"]
         new_streak = 0
-        status = "✅ *WIN*"
+        status = "✅ *GROUP WIN*"
     else:
-        # Multiplier x5
         new_stake = float("{:.2f}".format(acc["current_stake"] * 5))
         new_streak = acc.get("consecutive_losses", 0) + 1
-        status = "❌ *LOSS*"
+        status = "❌ *GROUP LOSS*"
         
     active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {
         f"accounts_data.{token}.current_stake": new_stake, 
         f"accounts_data.{token}.consecutive_losses": new_streak, 
-        f"accounts_data.{token}.total_profit": new_total, 
+        f"accounts_data.{token}.total_profit": new_total_net, 
         f"accounts_data.{token}.win_count": new_wins, 
         f"accounts_data.{token}.loss_count": new_losses
     }})
     
-    msg = (f"{status}\n💰 Profit: `{profit:.2f}$` | Net: `{new_total:.2f}$`\n"
+    msg = (f"{status}\n💰 Profit: `{group_profit:.2f}$` | Net: `{new_total_net:.2f}$`\n"
            f"🟢 Wins: `{new_wins}` | 🔴 Losses: `{new_losses}`\n"
-           f"⚠️ Streak: `{new_streak}/3` | Next: `{new_stake}`")
+           f"⚠️ Streak: `{new_streak}/3` | Next Stake: `{new_stake}`")
     safe_send(chat_id, msg)
     
-    # Stop after 3 losses or hitting target
-    if new_total >= session.get("target_profit", 10) or new_streak >= 3:
-        active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {"is_running": False}})
-        reason = "Target reached! 🎯" if new_total >= session.get("target_profit", 10) else "Stop Loss (3 Consecutive Losses) ⚠️"
-        safe_send(chat_id, f"🛑 *Session Terminated*\nReason: {reason}")
+    if new_total_net >= session.get("target_profit", 10) or new_streak >= 3:
+        active_sessions_col.delete_one({"chat_id": chat_id}) # Clear data on finish
+        safe_send(chat_id, "🛑 *Session Finished & Data Cleared.*")
 
-# --- ADMIN PANEL HTML ---
+# --- HTML ADMIN PANEL ---
 HTML_ADMIN = """
 <!DOCTYPE html><html><head><title>Admin Panel</title><style>
 body{font-family:sans-serif; background:#0a0a0a; color:#eee; text-align:center; padding:40px;}
@@ -155,14 +160,13 @@ a{color:#ff5555; text-decoration:none; font-size:14px;}
 </style></head>
 <body><div class="box">
     <h2>Access Management</h2>
-    <form action="/add" method="POST"><input name="email" placeholder="User Email" required><select name="days"><option value="1">1 Day</option><option value="30">30 Days</option><option value="36500">Life Time</option></select><button type="submit">Grant Access</button></form>
+    <form action="/add" method="POST"><input name="email" placeholder="Email" required><select name="days"><option value="1">1 Day</option><option value="30">30 Days</option><option value="36500">Life Time</option></select><button type="submit">Grant Access</button></form>
     <table><tr><th>User</th><th>Expiry</th><th>Action</th></tr>
     {% for u in users %}<tr><td>{{u.email}}</td><td>{{u.expiry}}</td><td><a href="/delete/{{u.email}}">Remove</a></td></tr>{% endfor %}
     </table>
 </div></body></html>
 """
 
-# --- FLASK & TELEGRAM HANDLERS ---
 @app.route('/')
 def index(): return render_template_string(HTML_ADMIN, users=list(users_col.find()))
 
@@ -190,7 +194,7 @@ def auth(m):
 
 def save_token(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"tokens": [m.text.strip()], "is_running": False}}, upsert=True)
-    bot.send_message(m.chat.id, "Initial Stake (Lot):")
+    bot.send_message(m.chat.id, "Initial Stake (per trade):")
     bot.register_next_step_handler(m, save_stake)
 
 def save_stake(m):
@@ -208,13 +212,16 @@ def run_bot(m):
     if sess:
         accs = {sess["tokens"][0]: {"current_stake": sess["initial_stake"], "total_profit": 0.0, "consecutive_losses": 0, "win_count": 0, "loss_count": 0}}
         active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": True, "accounts_data": accs}})
-        bot.send_message(m.chat.id, "🚀 *Bot Started (Multiplier x5)*", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
+        bot.send_message(m.chat.id, "🚀 *Bot Active (1 Tick / x5)*", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
         threading.Thread(target=trade_engine, args=(m.chat.id,), daemon=True).start()
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
 def stop_bot(m):
-    active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": False}})
-    bot.send_message(m.chat.id, "🛑 Stopped.", reply_markup=types.ReplyKeyboardRemove())
+    # Completely remove the session to force stop everything
+    active_sessions_col.delete_one({"chat_id": m.chat.id})
+    bot.send_message(m.chat.id, "🛑 Bot Stopped & Data Cleared.", reply_markup=types.ReplyKeyboardRemove())
+    # Briefly wait to ensure threads see the deletion
+    time.sleep(1)
     cmd_start(m)
 
 if __name__ == '__main__':
