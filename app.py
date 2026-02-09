@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-BOT_TOKEN = "8433565422:AAEYTsTTip5Z0XJzL2V_eS51NShiJaZQvVQ"
+BOT_TOKEN = "8433565422:AAEkuSxoH6W9Fq12fXij7YAPxvHur2PHrnQ"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True, num_threads=100)
@@ -48,24 +48,20 @@ def analyze_rebound_strategy(ticks):
     if c1_up and c2_down: return {"signal": "PUT", "barrier": 0.6}
     return {"signal": "NEUTRAL", "barrier": 0}
 
-# --- TRADING ENGINE (The Structure You Provided) ---
+# --- TRADING ENGINE (On-Demand Connection) ---
 def trade_engine(chat_id):
     while True:
         session = active_sessions_col.find_one({"chat_id": chat_id})
         if not session or not session.get("is_running"): break
         
-        # الانتظار حتى الثانية 56 لفتح الاتصال
         if datetime.now().second == 56:
             token = session['tokens'][0]
             
             def on_message(ws, message):
                 data = json.loads(message)
-                
-                # 1. بعد التفويض، نطلب تاريخ التيكات (30 تيك)
                 if "authorize" in data:
                     ws.send(json.dumps({"ticks_history": "R_100", "end": "latest", "count": 30, "style": "ticks"}))
                 
-                # 2. استقبال التيكات والتحليل
                 if "history" in data:
                     ticks = data["history"].get("prices", [])
                     res = analyze_rebound_strategy(ticks)
@@ -83,46 +79,34 @@ def trade_engine(chat_id):
                                 "barrier": barrier, "currency": currency
                             }
                         }))
-                    else:
-                        ws.close() # إغلاق إذا لم توجد فرصة
+                    else: ws.close()
 
-                # 3. بعد الشراء، نحفظ الـ ID ونغلق الاتصال مؤقتاً
                 if "buy" in data:
                     cid = data["buy"]["contract_id"]
-                    safe_send(chat_id, f"⚡ *تم دخول الصفقة!* \nID: `{cid}`")
+                    safe_send(chat_id, f"🚀 *Order Placed!* \nID: `{cid}`")
                     ws.close()
-                    # انتظار 18 ثانية لفتح اتصال جديد للنتيجة
                     threading.Timer(18, lambda: check_result_connection(chat_id, token, cid)).start()
 
             def on_open(ws):
                 ws.send(json.dumps({"authorize": token}))
 
-            def on_error(ws, error): print(f"WS Error: {error}")
-
             ws = websocket.WebSocketApp("wss://blue.derivws.com/websockets/v3?app_id=16929", 
-                                        on_open=on_open, on_message=on_message, on_error=on_error)
+                                        on_open=on_open, on_message=on_message)
             ws.run_forever()
-            
         time.sleep(0.5)
 
-# --- دالة خاصة لجلب النتيجة (بنفس الهيكلية) ---
 def check_result_connection(chat_id, token, contract_id):
     def on_message(ws, message):
         data = json.loads(message)
         if "authorize" in data:
             ws.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id}))
-        
         if "proposal_open_contract" in data:
             poc = data["proposal_open_contract"]
             if poc.get("is_sold"):
                 process_result(chat_id, token, data)
                 ws.close()
-
-    def on_open(ws):
-        ws.send(json.dumps({"authorize": token}))
-
-    ws = websocket.WebSocketApp("wss://blue.derivws.com/websockets/v3?app_id=16929", 
-                                on_open=on_open, on_message=on_message)
+    def on_open(ws): ws.send(json.dumps({"authorize": token}))
+    ws = websocket.WebSocketApp("wss://blue.derivws.com/websockets/v3?app_id=16929", on_open=on_open, on_message=on_message)
     ws.run_forever()
 
 def process_result(chat_id, token, res):
@@ -153,18 +137,18 @@ def process_result(chat_id, token, res):
         f"accounts_data.{token}.loss_count": new_losses
     }})
     
-    msg = (f"{status}\n💰 الربح: `{profit:.2f}$` | صافي الأرباح: `{new_total:.2f}$`\n"
-           f"🟢 صفقات رابحة: `{new_wins}` | 🔴 خاسرة: `{new_losses}`\n"
-           f"⚠️ السلسلة: `{new_streak}/4` | القادم: `{new_stake}`")
+    msg = (f"{status}\n💰 Profit: `{profit:.2f}$` | Net: `{new_total:.2f}$`\n"
+           f"🟢 Wins: `{new_wins}` | 🔴 Losses: `{new_losses}`\n"
+           f"⚠️ Streak: `{new_streak}/2` | Next Stake: `{new_stake}`")
     safe_send(chat_id, msg)
     
-    if new_total >= session.get("target_profit", 10) or new_streak >= 4:
+    # Updated to stop after 2 consecutive losses
+    if new_total >= session.get("target_profit", 10) or new_streak >= 2:
         active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {"is_running": False}})
-        safe_send(chat_id, "🛑 *تم إيقاف الجلسة تلقائياً.*")
+        reason = "Target reached! 🎯" if new_total >= session.get("target_profit", 10) else "Stop Loss: 2 Consecutive Losses ⚠️"
+        safe_send(chat_id, f"🛑 *Session Terminated*\nReason: {reason}")
 
-# --- باقي كود الـ Flask والـ Telegram ---
-# ... (نفس الجزء الخاص بـ Flask و Telegram والحق الوصول)
-
+# --- ADMIN PANEL & FLASK ---
 HTML_ADMIN = """
 <!DOCTYPE html><html><head><title>Admin Panel</title><style>
 body{font-family:sans-serif; background:#0a0a0a; color:#eee; text-align:center; padding:40px;}
@@ -199,29 +183,29 @@ def delete_user(email): users_col.delete_one({"email": email}); return redirect(
 @bot.message_handler(commands=['start'])
 def cmd_start(m):
     active_sessions_col.delete_one({"chat_id": m.chat.id})
-    bot.send_message(m.chat.id, "📧 Enter registered Email:")
+    bot.send_message(m.chat.id, "📧 Enter your registered Email:")
     bot.register_next_step_handler(m, auth)
 
 def auth(m):
     u = users_col.find_one({"email": m.text.strip().lower()})
     if u and datetime.strptime(u['expiry'], "%Y-%m-%d") > datetime.now():
-        bot.send_message(m.chat.id, "✅ Authorized. Enter Deriv Token:")
+        bot.send_message(m.chat.id, "✅ Authorized. Enter your Deriv Token:")
         bot.register_next_step_handler(m, save_token)
-    else: bot.send_message(m.chat.id, "🚫 No active subscription.")
+    else: bot.send_message(m.chat.id, "🚫 No active subscription found.")
 
 def save_token(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"tokens": [m.text.strip()], "is_running": False}}, upsert=True)
-    bot.send_message(m.chat.id, "Initial Stake:")
+    bot.send_message(m.chat.id, "Initial Stake (Lot):")
     bot.register_next_step_handler(m, save_stake)
 
 def save_stake(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"initial_stake": float(m.text)}})
-    bot.send_message(m.chat.id, "Target Profit:")
+    bot.send_message(m.chat.id, "Target Profit ($):")
     bot.register_next_step_handler(m, save_tp)
 
 def save_tp(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"target_profit": float(m.text)}})
-    bot.send_message(m.chat.id, "Setup Finished!", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
+    bot.send_message(m.chat.id, "Configuration Ready!", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('START 🚀'))
 
 @bot.message_handler(func=lambda m: m.text == 'START 🚀')
 def run_bot(m):
@@ -229,13 +213,13 @@ def run_bot(m):
     if sess:
         accs = {sess["tokens"][0]: {"current_stake": sess["initial_stake"], "total_profit": 0.0, "consecutive_losses": 0, "win_count": 0, "loss_count": 0}}
         active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": True, "accounts_data": accs}})
-        bot.send_message(m.chat.id, "🚀 *Bot is active (On-Demand Mode)*", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
+        bot.send_message(m.chat.id, "🚀 *Bot is now running (Strategy: 30 Ticks)*", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
         threading.Thread(target=trade_engine, args=(m.chat.id,), daemon=True).start()
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
 def stop_bot(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": False}})
-    bot.send_message(m.chat.id, "🛑 Session reset.", reply_markup=types.ReplyKeyboardRemove())
+    bot.send_message(m.chat.id, "🛑 Session Stopped.", reply_markup=types.ReplyKeyboardRemove())
     cmd_start(m)
 
 if __name__ == '__main__':
