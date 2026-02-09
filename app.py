@@ -8,8 +8,8 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-# Updated with your newest token
-BOT_TOKEN = "8433565422:AAGTNmwMt2l1UCILXoPC-FT-CE7ODdRAJqM"
+# تم تحديث التوكن للنسخة الجديدة
+BOT_TOKEN = "8433565422:AAGsb6nhOXpSl6n-K3trkCxs2T3rD0KcK7Y"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True, num_threads=100)
@@ -19,7 +19,7 @@ users_col = db['Authorized_Users']
 active_sessions_col = db['Active_Sessions']
 
 msg_queue = queue.Queue()
-trading_lock = {} # Prevents multiple overlapping trades
+trading_lock = {} 
 
 def message_worker():
     while True:
@@ -35,43 +35,37 @@ threading.Thread(target=message_worker, daemon=True).start()
 def safe_send(chat_id, text, markup=None):
     msg_queue.put((chat_id, text, markup))
 
-# --- TRADING ENGINE (1 TICK / 8s WAIT / LOCK ENABLED) ---
+# --- TRADING ENGINE (DIGIT 0 / X6 / DECIMAL FIX) ---
 def trade_engine(chat_id):
     if chat_id not in trading_lock:
         trading_lock[chat_id] = False
 
     while True:
         session = active_sessions_col.find_one({"chat_id": chat_id})
-        if not session or not session.get("is_running"):
-            break
-            
+        if not session or not session.get("is_running"): break
         token = session['tokens'][0]
 
         def on_message(ws, message):
             data = json.loads(message)
-            
-            # 1. Ignore ticks if we are already in a trade or waiting for result
-            if trading_lock.get(chat_id):
-                return
+            if trading_lock.get(chat_id): return
 
             if "tick" in data:
-                last_digit = int(str(data["tick"]["quote"])[-1])
+                # معالجة الرقم الأخير لضمان رقمين بعد الفاصلة
+                raw_price = data["tick"]["quote"]
+                formatted_price = "{:.2f}".format(raw_price) 
+                last_digit = int(formatted_price[-1])
                 
-                # 2. Entry condition: Last digit 4
-                if last_digit == 4:
-                    # Activate lock immediately
+                # الدخول عند الرقم 0
+                if last_digit == 0:
                     trading_lock[chat_id] = True
-                    
-                    # Get fresh stake from DB (in case of martingale)
                     current_sess = active_sessions_col.find_one({"chat_id": chat_id})
                     if not current_sess: return
                     
                     acc = current_sess["accounts_data"][token]
                     stake = acc["current_stake"]
                     
-                    safe_send(chat_id, f"🎯 Last Digit 4! Executing dual trades with `${stake}`")
+                    safe_send(chat_id, f"🎯 Found Digit 0 ({formatted_price})! Opening dual trades: `{stake}$` each.")
                     
-                    # Execute Dual Trades (1 Tick duration)
                     for c_type, barrier in [("DIGITOVER", "5"), ("DIGITUNDER", "4")]:
                         ws.send(json.dumps({
                             "buy": "1", "price": stake,
@@ -82,32 +76,27 @@ def trade_engine(chat_id):
                                 "symbol": "R_100", "currency": "USD"
                             }
                         }))
-                    
-                    # Start 8-second timer to fetch combined results
+                    # فحص النتيجة بعد 8 ثوانٍ
                     threading.Timer(8, lambda: check_combined_results(chat_id, token)).start()
 
         def on_open(ws):
             ws.send(json.dumps({"authorize": token}))
             ws.send(json.dumps({"ticks": "R_100", "subscribe": 1}))
 
-        ws = websocket.WebSocketApp("wss://blue.derivws.com/websockets/v3?app_id=16929", 
-                                    on_open=on_open, on_message=on_message)
+        ws = websocket.WebSocketApp("wss://blue.derivws.com/websockets/v3?app_id=16929", on_open=on_open, on_message=on_message)
         ws.run_forever()
         time.sleep(1)
 
 def check_combined_results(chat_id, token):
-    # Fetch the last 2 transactions to calculate group profit
     def on_message(ws, message):
         data = json.loads(message)
         if "authorize" in data:
             ws.send(json.dumps({"statement": 1, "description": 1, "limit": 2}))
-        
         if "statement" in data:
             trades = data["statement"]["transactions"]
             if len(trades) >= 2:
                 process_group_result(chat_id, token, trades[:2])
                 ws.close()
-
     def on_open(ws): ws.send(json.dumps({"authorize": token}))
     ws = websocket.WebSocketApp("wss://blue.derivws.com/websockets/v3?app_id=16929", on_open=on_open, on_message=on_message)
     ws.run_forever()
@@ -119,24 +108,23 @@ def process_group_result(chat_id, token, trades):
         return
 
     acc = session['accounts_data'].get(token)
-    
-    # Calculate combined net profit
-    group_profit = sum(float(t.get("amount", 0)) for t in trades)
-    is_win = group_profit > 0
+    # حساب صافي الربح (يخصم الخسارة تلقائياً إذا كان المبلغ سالباً)
+    group_net_profit = sum(float(t.get("amount", 0)) for t in trades)
+    is_win = group_net_profit > 0
     
     if is_win:
         new_stake = session["initial_stake"]
         new_streak = 0
         status = "✅ *GROUP WIN*"
     else:
-        # Multiplier x5
-        new_stake = round(acc["current_stake"] * 5, 2)
+        # المضاعفة ×6
+        new_stake = round(acc["current_stake"] * 6, 2)
         new_streak = acc.get("consecutive_losses", 0) + 1
         status = "❌ *GROUP LOSS*"
         
     new_wins = acc.get("win_count", 0) + (1 if is_win else 0)
     new_losses = acc.get("loss_count", 0) + (1 if not is_win else 0)
-    new_total_net = acc.get("total_profit", 0) + group_profit
+    new_total_net = acc.get("total_profit", 0) + group_net_profit
     
     active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {
         f"accounts_data.{token}.current_stake": new_stake, 
@@ -146,17 +134,15 @@ def process_group_result(chat_id, token, trades):
         f"accounts_data.{token}.loss_count": new_losses
     }})
     
-    msg = (f"{status}\n💰 Net: `{group_profit:.2f}$` | Total: `{new_total_net:.2f}$`\n"
+    msg = (f"{status}\n💰 This Trade: `{group_net_profit:.2f}$` | Total: `{new_total_net:.2f}$`\n"
            f"🟢 Wins: `{new_wins}` | 🔴 Losses: `{new_losses}`\n"
-           f"⚠️ Streak: `{new_streak}/3` | Next Stake: `{new_stake}$`")
+           f"⚠️ Streak: `{new_streak}/3` | Next Stake: `{new_stake}$` each")
     safe_send(chat_id, msg)
     
-    # Release Lock to allow the next trade
     trading_lock[chat_id] = False
-
     if new_total_net >= session.get("target_profit", 10) or new_streak >= 3:
         active_sessions_col.delete_one({"chat_id": chat_id})
-        safe_send(chat_id, "🛑 *Session Finished (Target or StopLoss reached).*")
+        safe_send(chat_id, "🛑 *Session Finished & Data Cleared.*")
 
 # --- HTML ADMIN PANEL ---
 HTML_ADMIN = """
@@ -223,7 +209,7 @@ def run_bot(m):
     if sess:
         accs = {sess["tokens"][0]: {"current_stake": sess["initial_stake"], "total_profit": 0.0, "consecutive_losses": 0, "win_count": 0, "loss_count": 0}}
         active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": True, "accounts_data": accs}})
-        bot.send_message(m.chat.id, "🚀 *Bot Started (1 Tick / x5)*", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
+        bot.send_message(m.chat.id, "🚀 *Bot Active (Digit 0 / x6)*", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
         threading.Thread(target=trade_engine, args=(m.chat.id,), daemon=True).start()
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
