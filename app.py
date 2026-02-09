@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-BOT_TOKEN = "8433565422:AAEkuSxoH6W9Fq12fXij7YAPxvHur2PHrnQ"
+BOT_TOKEN = "8433565422:AAH4JvxP1WGGVWBP9INsnnboKYOe6jaANE8"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True, num_threads=100)
@@ -44,8 +44,8 @@ def analyze_rebound_strategy(ticks):
     c2_up = segment2[-1] > segment2[0]
     c2_down = segment2[-1] < segment2[0]
     
-    if c1_down and c2_up: return {"signal": "CALL", "barrier": -0.6}
-    if c1_up and c2_down: return {"signal": "PUT", "barrier": 0.6}
+    if c1_down and c2_up: return {"signal": "PUT", "barrier": +1}
+    if c1_up and c2_down: return {"signal": "CALL", "barrier": -1}
     return {"signal": "NEUTRAL", "barrier": 0}
 
 # --- TRADING ENGINE (On-Demand Connection) ---
@@ -125,7 +125,7 @@ def process_result(chat_id, token, res):
         new_streak = 0
         status = "✅ *WIN*"
     else:
-        new_stake = float("{:.2f}".format(acc["current_stake"] * 14))
+        new_stake = float("{:.2f}".format(acc["current_stake"] * 24))
         new_streak = acc.get("consecutive_losses", 0) + 1
         status = "❌ *LOSS*"
         
