@@ -8,7 +8,8 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-BOT_TOKEN = "8433565422:AAF9DsLCMDMDhl8eDaqvw-4ZEaceJYqHfZk"
+# التوكن الجديد والمحدث
+BOT_TOKEN = "8433565422:AAEHPcVxb5GmsHSgMP_FYDwFIHHO7VaUh5c"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True, num_threads=100)
@@ -49,10 +50,12 @@ def trade_engine(chat_id):
             if trading_lock.get(chat_id): return
 
             if "tick" in data:
+                # معالجة الرقم الأخير (ضمان وجود رقمين بعد الفاصلة)
                 raw_price = data["tick"]["quote"]
                 formatted_price = "{:.2f}".format(raw_price) 
                 last_digit = int(formatted_price[-1])
                 
+                # الدخول فقط عند الرقم 0
                 if last_digit == 0:
                     trading_lock[chat_id] = True
                     current_sess = active_sessions_col.find_one({"chat_id": chat_id})
@@ -61,8 +64,9 @@ def trade_engine(chat_id):
                     acc = current_sess["accounts_data"][token]
                     stake = acc["current_stake"]
                     
-                    safe_send(chat_id, f"🎯 Found Digit 0 ({formatted_price})! Entering: `{stake}$` x2")
+                    safe_send(chat_id, f"🎯 Found Digit 0 ({formatted_price})!\n🚀 Entering: `{stake}$` Over 5 & `{stake}$` Under 4")
                     
+                    # تنفيذ الصفقتين معاً (مدة 1 تيك)
                     for c_type, barrier in [("DIGITOVER", "5"), ("DIGITUNDER", "4")]:
                         ws.send(json.dumps({
                             "buy": "1", "price": stake,
@@ -73,6 +77,7 @@ def trade_engine(chat_id):
                                 "symbol": "R_100", "currency": "USD"
                             }
                         }))
+                    # انتظار 8 ثوانٍ للحصول على النتيجة النهائية
                     threading.Timer(8, lambda: check_combined_results(chat_id, token)).start()
 
         def on_open(ws):
@@ -104,17 +109,14 @@ def process_group_result(chat_id, token, trades):
         return
 
     acc = session['accounts_data'].get(token)
-    stake_used = acc["current_stake"]
+    stake_used_per_side = acc["current_stake"]
+    total_staked_this_round = stake_used_per_side * 2 # مجموع ما تم دفعه في الصفقتين
     
-    # حساب الربح الصافي الحقيقي
-    # المبلغ في الـ statement يمثل (الرصيد العائد)
-    # الربح الصافي = (مجموع المبالغ العائدة) - (مجموع مبالغ الدخول)
+    # حساب الصافي: (إجمالي المبلغ العائد) - (إجمالي المبلغ المدفوع)
     total_returned = sum(float(t.get("amount", 0)) for t in trades)
-    total_staked = stake_used * 2
+    current_round_net = round(total_returned - total_staked_this_round, 2)
     
-    # النتيجة الصافية لهذه الجولة
-    current_round_net = round(total_returned, 2)
-    
+    # الجولة رابحة فقط إذا كان الصافي أكبر من 0
     is_win = current_round_net > 0
     
     if is_win:
@@ -122,14 +124,15 @@ def process_group_result(chat_id, token, trades):
         new_streak = 0
         status = "✅ *GROUP WIN*"
     else:
-        new_stake = round(acc["current_stake"] * 6, 2)
+        # في حال الخسارة (صافي سالب أو 0): مضاعفة x6 لكل طرف
+        new_stake = round(stake_used_per_side * 6, 2)
         new_streak = acc.get("consecutive_losses", 0) + 1
         status = "❌ *GROUP LOSS*"
         
     new_wins = acc.get("win_count", 0) + (1 if is_win else 0)
     new_losses = acc.get("loss_count", 0) + (1 if not is_win else 0)
     
-    # تحديث إجمالي الأرباح في المحفظة (الجمع الجبري يطرح الخسارة تلقائياً)
+    # تحديث إجمالي المحفظة التراكمي (يقل عند الخسارة ويزيد عند الربح)
     new_total_net = round(acc.get("total_profit", 0) + current_round_net, 2)
     
     active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {
@@ -140,16 +143,19 @@ def process_group_result(chat_id, token, trades):
         f"accounts_data.{token}.loss_count": new_losses
     }})
     
-    msg = (f"{status}\n💰 Round Net: `{current_round_net:.2f}$`\n"
-           f"📊 Total Profit: `{new_total_net:.2f}$`\n"
+    msg = (f"{status}\n"
+           f"💰 Round Net: `{current_round_net:.2f}$` (Real Profit)\n"
+           f"📊 Total Session Profit: `{new_total_net:.2f}$` \n"
            f"🟢 Wins: `{new_wins}` | 🔴 Losses: `{new_losses}`\n"
-           f"⚠️ Streak: `{new_streak}/3` | Next: `{new_stake}$` x2")
+           f"⚠️ Streak: `{new_streak}/4` | Next Stake: `{new_stake}$` x2")
     safe_send(chat_id, msg)
     
     trading_lock[chat_id] = False
-    if new_total_net >= session.get("target_profit", 10) or new_streak >= 3:
+    
+    # التوقف عند الهدف أو خسارة 4 مرات متتالية (كما في تعليماتك)
+    if new_total_net >= session.get("target_profit", 10) or new_streak >= 4:
         active_sessions_col.delete_one({"chat_id": chat_id})
-        safe_send(chat_id, "🛑 *Session Finished.*")
+        safe_send(chat_id, "🛑 *Session Finished. Target reached or Stop Loss hit.*")
 
 # --- HTML ADMIN PANEL ---
 HTML_ADMIN = """
@@ -198,7 +204,7 @@ def auth(m):
 
 def save_token(m):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"tokens": [m.text.strip()], "is_running": False}}, upsert=True)
-    bot.send_message(m.chat.id, "Initial Stake (per trade):")
+    bot.send_message(m.chat.id, "Initial Stake (per side, e.g., 0.5):")
     bot.register_next_step_handler(m, save_stake)
 
 def save_stake(m):
@@ -216,14 +222,14 @@ def run_bot(m):
     if sess:
         accs = {sess["tokens"][0]: {"current_stake": sess["initial_stake"], "total_profit": 0.0, "consecutive_losses": 0, "win_count": 0, "loss_count": 0}}
         active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {"is_running": True, "accounts_data": accs}})
-        bot.send_message(m.chat.id, "🚀 *Bot Active (Profit Fix Applied)*", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
+        bot.send_message(m.chat.id, "🚀 *Bot Started! Waiting for Digit 0...*", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
         threading.Thread(target=trade_engine, args=(m.chat.id,), daemon=True).start()
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
 def stop_bot(m):
     active_sessions_col.delete_one({"chat_id": m.chat.id})
     trading_lock[m.chat.id] = False
-    bot.send_message(m.chat.id, "🛑 Stopped.", reply_markup=types.ReplyKeyboardRemove())
+    bot.send_message(m.chat.id, "🛑 Bot Stopped and Logic Reset.", reply_markup=types.ReplyKeyboardRemove())
     time.sleep(1)
     cmd_start(m)
 
