@@ -9,7 +9,7 @@ app = Flask(__name__)
 
 # --- CONFIGURATION ---
 # Updated with your new token
-BOT_TOKEN = "8433565422:AAEgKMgk5H2cVzwKlsLU44GgtHaobogwHfo"
+BOT_TOKEN = "8433565422:AAFp-hUbSaeQOxiEltLEBmYhRnYMqQRdenE"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True, num_threads=100)
