@@ -9,7 +9,7 @@ app = Flask(__name__)
 
 # --- CONFIGURATION ---
 # التوكن الجديد والمحدث بناءً على طلبك
-BOT_TOKEN = "8433565422:AAFpy-YZZUUngUQmdtMUEG9ZvI1dnNayAMY"
+BOT_TOKEN = "8433565422:AAGzRyt1niO2-f4UlKsE4d7HJPYX65W_2dE"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True, num_threads=100)
@@ -63,7 +63,7 @@ def trade_engine(chat_id):
                 previous_digit = tick_history.get(chat_id)
                 tick_history[chat_id] = current_digit
 
-                if previous_digit is not None and previous_digit == current_digit and current_digit in [4, 5]:
+                if previous_digit is not None and previous_digit == current_digit and current_digit in [9, 0]:
                     trading_lock[chat_id] = True
                     current_sess = active_sessions_col.find_one({"chat_id": chat_id})
                     if not current_sess: return
