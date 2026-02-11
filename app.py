@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-BOT_TOKEN = "8433565422:AAHv-oud_7tuHO8gl0OdX31ApfpfZf3AwD4"
+BOT_TOKEN = "8433565422:AAEAunegnmWbCaR9aSdChKFyIXqY6RKr0lo"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
@@ -122,7 +122,7 @@ def update_account_stats(chat_id, token, profit):
     wins = acc.get("wins_count", 0) + (1 if is_win else 0)
     losses = acc.get("losses_count", 0) + (0 if is_win else 1)
     
-    new_stake = session["initial_stake"] if is_win else round(acc["current_stake"] * 11, 2)
+    new_stake = session["initial_stake"] if is_win else round(acc["current_stake"] * 19, 2)
     new_streak = 0 if is_win else acc.get("streak", 0) + 1
     new_total = round(acc["total_profit"] + profit, 2)
 
