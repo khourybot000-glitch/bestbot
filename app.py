@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-BOT_TOKEN = "8433565422:AAFlU_nZ0qwIJS8-Lrd66pPSxkczEmVAwEQ"
+BOT_TOKEN = "8433565422:AAHBDL5D2irrrzBts0mOB-4JhWKgzHN1iWI"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
@@ -50,8 +50,8 @@ def run_analysis_cycle(chat_id, token):
 
         contract_type = None
         barrier = ""
-        if up1 and down2: contract_type, barrier = "PUT", "+1"
-        elif down1 and up2: contract_type, barrier = "CALL", "-1"
+        if up1 and down2: contract_type, barrier = "PUT", "+1.5"
+        elif down1 and up2: contract_type, barrier = "CALL", "-1.5"
 
         if contract_type:
             session = active_sessions_col.find_one({"chat_id": chat_id})
@@ -128,7 +128,7 @@ def update_account_stats(chat_id, token, profit):
     bot.send_message(chat_id, f"{'✅ WIN' if is_win else '❌ LOSS'}\nProfit: `{profit}$` | Total: `{new_total}$` | Streak: `{new_streak}/2`")
     
     if new_total >= session["target_profit"]: stop_bot(chat_id, "Target Profit Reached!")
-    elif new_streak >= 2: stop_bot(chat_id, "Stop Loss (2 Consecutive Losses)!")
+    elif new_streak >= 1: stop_bot(chat_id, "Stop Loss (2 Consecutive Losses)!")
 
 def stop_bot(chat_id, reason):
     active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {"is_running": False}})
