@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-BOT_TOKEN = "8433565422:AAGcmX-f6oDlsnvSVk8FqnQ0y-_bt4TYc7s"
+BOT_TOKEN = "8433565422:AAHAY4HNtkYReqqMb314RaTyaYP7QWeK_8Y"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
@@ -56,8 +56,8 @@ def run_digit_cycle(chat_id, token):
             ws.send(json.dumps({
                 "buy": "1", "price": stake,
                 "parameters": {
-                    "amount": stake, "basis": "stake", "contract_type": "DIGITOVER",
-                    "barrier": 3, "duration": 1, "duration_unit": "t",
+                    "amount": stake, "basis": "stake", "contract_type": "DIGITUNDER",
+                    "barrier": 8, "duration": 1, "duration_unit": "t",
                     "symbol": "R_10", "currency": currency
                 }
             }))
@@ -103,7 +103,7 @@ def update_stats(chat_id, token, profit):
     acc = session["accounts_data"][token]
     is_win = profit > 0
     
-    new_stake = session["initial_stake"] if is_win else round(acc["current_stake"] * 2.5, 2)
+    new_stake = session["initial_stake"] if is_win else round(acc["current_stake"] * 10, 2)
     new_streak = 0 if is_win else acc.get("streak", 0) + 1
     new_total = round(acc["total_profit"] + profit, 2)
     wins = acc.get("wins_count", 0) + (1 if is_win else 0)
@@ -124,7 +124,7 @@ def update_stats(chat_id, token, profit):
     )
     
     if new_total >= session["target_profit"]: stop_bot(chat_id, "Target Reached!")
-    elif new_streak >= 4: stop_bot(chat_id, "Stop Loss: 4 Losses!")
+    elif new_streak >= 2: stop_bot(chat_id, "Stop Loss: 4 Losses!")
 
 def stop_bot(chat_id, reason):
     active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {"is_running": False}})
