@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-BOT_TOKEN = "8433565422:AAEAunegnmWbCaR9aSdChKFyIXqY6RKr0lo"
+BOT_TOKEN = "8433565422:AAEYJSwj1jIEeX8XQEPzyplTpyAonVazWU0"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
@@ -56,10 +56,10 @@ def run_analysis_cycle(chat_id, token):
         
         # Pattern: Up -> Down -> Up => CALL
         if up1 and down2 and up3:
-            contract_type, barrier = "CALL", "-0.9"
+            contract_type, barrier = "PUT", "+0.9"
         # Pattern: Down -> Up -> Down => PUT
         elif down1 and up2 and down3:
-            contract_type, barrier = "PUT", "+0.9"
+            contract_type, barrier = "CALL", "-0.9"
 
         if contract_type:
             session = active_sessions_col.find_one({"chat_id": chat_id})
