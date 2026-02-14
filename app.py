@@ -8,12 +8,12 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-BOT_TOKEN = "8433565422:AAGMb_gLs3pBnO3c5Blhsbh1Rc2YSxjX-EM"
+BOT_TOKEN = "8433565422:AAHJh9E7VtJ-vyPSuZTQv24z6oFuH85ak0A"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
 db_client = MongoClient(MONGO_URI)
-db = db_client['Trading_System_V32_ResetLogic']
+db = db_client['Trading_System_V34_NewToken']
 users_col = db['Authorized_Users']
 active_sessions_col = db['Active_Sessions']
 
@@ -63,19 +63,25 @@ def run_analysis_and_trade(chat_id, token):
         acc_data = session["accounts_data"][token]
         stake = acc_data["current_stake"]
 
-        ws.send(json.dumps({"ticks_history": "R_10", "count": 30, "end": "latest", "style": "ticks"}))
+        # Analysis: 90 Ticks (3 segments of 30)
+        ws.send(json.dumps({"ticks_history": "R_10", "count": 90, "end": "latest", "style": "ticks"}))
         res = json.loads(ws.recv())
         
         target = None
         barrier = None
         if "history" in res:
             p = res["history"]["prices"]
-            if p[-1] > p[0]:
+            # Logic: UP-DOWN-UP for CALL | DOWN-UP-DOWN for PUT
+            c1 = "UP" if p[29] > p[0] else "DOWN"
+            c2 = "UP" if p[59] > p[29] else "DOWN"
+            c3 = "UP" if p[89] > p[59] else "DOWN"
+            
+            if c1 == "UP" and c2 == "DOWN" and c3 == "UP":
+                target = "CALL"
+                barrier = "-0.6"
+            elif c1 == "DOWN" and c2 == "UP" and c3 == "DOWN":
                 target = "PUT"
                 barrier = "+0.6"
-            else:
-                target = "call"
-                barrier = "-0.6"
 
         if target:
             ws.send(json.dumps({
@@ -93,7 +99,9 @@ def run_analysis_and_trade(chat_id, token):
                 time.sleep(18) 
                 monitor_result(chat_id, token, contract_id)
             else: trade_locks[chat_id] = False
-        else: trade_locks[chat_id] = False
+        else:
+            trade_locks[chat_id] = False # No pattern found
+            
         if ws: ws.close()
     except: trade_locks[chat_id] = False
 
@@ -151,20 +159,17 @@ def stop_session(chat_id, reason):
     trade_locks[chat_id] = False
     bot.send_message(chat_id, f"🛑 **Bot Stopped**\n{reason}", reply_markup=main_keyboard())
 
-# --- TELEGRAM HANDLERS ---
+# --- HANDLERS ---
 
 @bot.message_handler(commands=['start'])
 def reset_and_start(m):
-    # This function handles /start command AND the START 🚀 button
     trade_locks[m.chat.id] = False
-    # Clear all data immediately
     active_sessions_col.delete_one({"chat_id": m.chat.id})
-    bot.send_message(m.chat.id, "🔄 **System Reset.**\nPlease enter your registered Email to log in:", reply_markup=main_keyboard())
+    bot.send_message(m.chat.id, "🔄 **System Reset.**\nEnter Email:", reply_markup=main_keyboard())
     bot.register_next_step_handler(m, auth)
 
 @bot.message_handler(func=lambda m: m.text == 'START 🚀')
 def b_start_button(m):
-    # Redirect to the reset function
     reset_and_start(m)
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
@@ -172,14 +177,12 @@ def b_stop(m):
     stop_session(m.chat.id, "Manual Stop.")
 
 def auth(m):
-    # If user clicks START 🚀 during this step, it will break the sequence and reset
     if m.text == 'START 🚀':
         reset_and_start(m)
         return
-    
     u = users_col.find_one({"email": m.text.strip().lower()})
     if u and datetime.strptime(u['expiry'], "%Y-%m-%d") > datetime.now():
-        bot.send_message(m.chat.id, "Access Granted. Enter API Token:")
+        bot.send_message(m.chat.id, "Authenticated. Enter API Token:")
         bot.register_next_step_handler(m, lambda msg: setup_stake(msg, msg.text.strip()))
     else: bot.send_message(m.chat.id, "🚫 Access Denied.")
 
@@ -202,17 +205,17 @@ def start_engine(m, token, stake, target):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {
         "is_running": True, "tokens": [token], "initial_stake": stake, "target_profit": target, "accounts_data": acc_data
     }}, upsert=True)
-    bot.send_message(m.chat.id, "🛰️ Sniper V32 Initialized.")
+    bot.send_message(m.chat.id, "🛰️ Sniper Initialized.")
     threading.Thread(target=user_trading_loop, args=(m.chat.id, token), daemon=True).start()
 
-# --- ADMIN PANEL HTML ---
+# --- ADMIN PANEL ---
 @app.route('/')
 def admin():
     users = list(users_col.find())
     return render_template_string("""
     <body style="background:#0f172a; color:#f8fafc; font-family:sans-serif; text-align:center; padding:50px;">
         <div style="background:#1e293b; padding:20px; border-radius:12px; display:inline-block; width:85%;">
-            <h2>Sniper Admin v32</h2>
+            <h2>Sniper Admin v34</h2>
             <form action="/add" method="POST">
                 <input name="email" placeholder="Email" required style="padding:10px;">
                 <select name="days" style="padding:10px;">
