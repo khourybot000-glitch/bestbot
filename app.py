@@ -8,13 +8,12 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-# Updated Token
-BOT_TOKEN = "8433565422:AAGy_2hf0E8MBs5pPFaCA1QfSk_uIuvTHkE"
+BOT_TOKEN = "8433565422:AAHjhx16fBNjjBgXg-OhF4PwZ1UdNj1qj8o"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
 db_client = MongoClient(MONGO_URI)
-db = db_client['Trading_System_V29_Final_Stats']
+db = db_client['Trading_System_V32_ResetLogic']
 users_col = db['Authorized_Users']
 active_sessions_col = db['Active_Sessions']
 
@@ -41,10 +40,11 @@ def get_safe_connection(token):
 def user_trading_loop(chat_id, token):
     while True:
         session = active_sessions_col.find_one({"chat_id": chat_id, "is_running": True})
-        if not session: break
+        if not session: 
+            trade_locks[chat_id] = False
+            break
 
         now = datetime.now()
-        # Trigger at Second 0
         if now.second == 0 and not trade_locks.get(chat_id, False):
             threading.Thread(target=run_analysis_and_trade, args=(chat_id, token)).start()
             time.sleep(50) 
@@ -63,7 +63,6 @@ def run_analysis_and_trade(chat_id, token):
         acc_data = session["accounts_data"][token]
         stake = acc_data["current_stake"]
 
-        # Analysis: 30 Ticks on R_10
         ws.send(json.dumps({"ticks_history": "R_10", "count": 30, "end": "latest", "style": "ticks"}))
         res = json.loads(ws.recv())
         
@@ -90,17 +89,13 @@ def run_analysis_and_trade(chat_id, token):
             buy_res = json.loads(ws.recv())
             if "buy" in buy_res:
                 contract_id = buy_res["buy"]["contract_id"]
-                bot.send_message(chat_id, f"🛰️ **R_10 Trade Placed**\nType: `{target}` | Barrier: `{barrier}`\nStake: `${stake}`")
-                
-                time.sleep(18) # Result waiting time
+                bot.send_message(chat_id, "Trade Entered 🛰️")
+                time.sleep(18) 
                 monitor_result(chat_id, token, contract_id)
-            else: 
-                trade_locks[chat_id] = False
+            else: trade_locks[chat_id] = False
         else: trade_locks[chat_id] = False
-        
         if ws: ws.close()
-    except:
-        trade_locks[chat_id] = False
+    except: trade_locks[chat_id] = False
 
 def monitor_result(chat_id, token, contract_id):
     while True:
@@ -121,45 +116,94 @@ def monitor_result(chat_id, token, contract_id):
 
 def handle_outcome(chat_id, token, profit):
     session = active_sessions_col.find_one({"chat_id": chat_id})
+    if not session: return
+    
     acc = session["accounts_data"][token]
     is_win = profit > 0
-    
     new_wins = acc.get("wins", 0) + (1 if is_win else 0)
     new_losses = acc.get("losses", 0) + (0 if is_win else 1)
     new_streak = 0 if is_win else acc.get("streak", 0) + 1
-    new_stake = session["initial_stake"] if is_win else round(acc["current_stake"] * 2.2, 2)
     new_total_profit = round(acc["total_profit"] + profit, 2)
     
     active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {
-        f"accounts_data.{token}.current_stake": new_stake,
-        f"accounts_data.{token}.streak": new_streak,
         f"accounts_data.{token}.total_profit": new_total_profit,
         f"accounts_data.{token}.wins": new_wins,
-        f"accounts_data.{token}.losses": new_losses
+        f"accounts_data.{token}.losses": new_losses,
+        f"accounts_data.{token}.streak": new_streak
     }})
 
-    # Result Message with Stats
     status = "✅ WIN" if is_win else "❌ LOSS"
     stats_msg = (f"**{status}** (${profit})\n"
                  f"--------------------------\n"
-                 f"💰 Total Profit: `${new_total_profit}`\n"
-                 f"📈 Total Wins: `{new_wins}`\n"
-                 f"📉 Total Losses: `{new_losses}`\n"
-                 f"⚠️ Streak: `{new_streak}/5`")
-    
+                 f"Total Profit: `${new_total_profit}`\n"
+                 f"Wins: `{new_wins}` | Losses: `{new_losses}`")
     bot.send_message(chat_id, stats_msg)
 
-    if new_streak >= 5:
-        stop_session(chat_id, "Stop Loss Triggered (5 Losses).")
+    if new_streak >= 1:
+        stop_session(chat_id, "Stopped after 1 Loss.")
     elif new_total_profit >= session["target_profit"]:
-        stop_session(chat_id, "Target Profit Reached! 🎯")
+        stop_session(chat_id, "Target Reached.")
     else:
         trade_locks[chat_id] = False
 
 def stop_session(chat_id, reason):
-    active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {"is_running": False}})
+    active_sessions_col.delete_one({"chat_id": chat_id})
     trade_locks[chat_id] = False
-    bot.send_message(chat_id, f"🛑 **Bot Stopped**\nReason: {reason}", reply_markup=main_keyboard())
+    bot.send_message(chat_id, f"🛑 **Bot Stopped**\n{reason}", reply_markup=main_keyboard())
+
+# --- TELEGRAM HANDLERS ---
+
+@bot.message_handler(commands=['start'])
+def reset_and_start(m):
+    # This function handles /start command AND the START 🚀 button
+    trade_locks[m.chat.id] = False
+    # Clear all data immediately
+    active_sessions_col.delete_one({"chat_id": m.chat.id})
+    bot.send_message(m.chat.id, "🔄 **System Reset.**\nPlease enter your registered Email to log in:", reply_markup=main_keyboard())
+    bot.register_next_step_handler(m, auth)
+
+@bot.message_handler(func=lambda m: m.text == 'START 🚀')
+def b_start_button(m):
+    # Redirect to the reset function
+    reset_and_start(m)
+
+@bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
+def b_stop(m):
+    stop_session(m.chat.id, "Manual Stop.")
+
+def auth(m):
+    # If user clicks START 🚀 during this step, it will break the sequence and reset
+    if m.text == 'START 🚀':
+        reset_and_start(m)
+        return
+    
+    u = users_col.find_one({"email": m.text.strip().lower()})
+    if u and datetime.strptime(u['expiry'], "%Y-%m-%d") > datetime.now():
+        bot.send_message(m.chat.id, "Access Granted. Enter API Token:")
+        bot.register_next_step_handler(m, lambda msg: setup_stake(msg, msg.text.strip()))
+    else: bot.send_message(m.chat.id, "🚫 Access Denied.")
+
+def setup_stake(m, token):
+    if m.text == 'START 🚀':
+        reset_and_start(m)
+        return
+    bot.send_message(m.chat.id, "Stake ($):")
+    bot.register_next_step_handler(m, lambda msg: setup_target(msg, token, float(msg.text)))
+
+def setup_target(m, token, stake):
+    if m.text == 'START 🚀':
+        reset_and_start(m)
+        return
+    bot.send_message(m.chat.id, "Target ($):")
+    bot.register_next_step_handler(m, lambda msg: start_engine(msg, token, stake, float(msg.text)))
+
+def start_engine(m, token, stake, target):
+    acc_data = {token: {"current_stake": stake, "total_profit": 0, "streak": 0, "wins": 0, "losses": 0}}
+    active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {
+        "is_running": True, "tokens": [token], "initial_stake": stake, "target_profit": target, "accounts_data": acc_data
+    }}, upsert=True)
+    bot.send_message(m.chat.id, "🛰️ Sniper V32 Initialized.")
+    threading.Thread(target=user_trading_loop, args=(m.chat.id, token), daemon=True).start()
 
 # --- ADMIN PANEL HTML ---
 @app.route('/')
@@ -168,7 +212,7 @@ def admin():
     return render_template_string("""
     <body style="background:#0f172a; color:#f8fafc; font-family:sans-serif; text-align:center; padding:50px;">
         <div style="background:#1e293b; padding:20px; border-radius:12px; display:inline-block; width:85%;">
-            <h2>Sniper Admin Panel v29</h2>
+            <h2>Sniper Admin v32</h2>
             <form action="/add" method="POST">
                 <input name="email" placeholder="Email" required style="padding:10px;">
                 <select name="days" style="padding:10px;">
@@ -182,9 +226,9 @@ def admin():
                 <tr style="border-bottom:2px solid #334155;"><th>Email</th><th>Expiry</th><th>Action</th></tr>
                 {% for u in users %}
                 <tr>
-                    <td style="padding:10px; border-bottom:1px solid #334155;">{{u.email}}</td>
-                    <td style="padding:10px; border-bottom:1px solid #334155;">{{u.expiry}}</td>
-                    <td style="padding:10px; border-bottom:1px solid #334155;"><a href="/delete/{{u.email}}" style="color:#f43f5e;">Delete</a></td>
+                    <td style="padding:10px;">{{u.email}}</td>
+                    <td style="padding:10px;">{{u.expiry}}</td>
+                    <td style="padding:10px;"><a href="/delete/{{u.email}}" style="color:#f43f5e;">Delete</a></td>
                 </tr>
                 {% endfor %}
             </table>
@@ -201,37 +245,6 @@ def add():
 def delete(email):
     users_col.delete_one({"email": email})
     return redirect('/')
-
-# --- TELEGRAM HANDLERS ---
-@bot.message_handler(commands=['start'])
-def welcome(m):
-    trade_locks[m.chat.id] = False
-    active_sessions_col.delete_one({"chat_id": m.chat.id})
-    bot.send_message(m.chat.id, "Welcome. Please enter your registered Email:", reply_markup=main_keyboard())
-    bot.register_next_step_handler(m, auth)
-
-def auth(m):
-    u = users_col.find_one({"email": m.text.strip().lower()})
-    if u and datetime.strptime(u['expiry'], "%Y-%m-%d") > datetime.now():
-        bot.send_message(m.chat.id, "Access Granted. Enter your API Token:")
-        bot.register_next_step_handler(m, lambda msg: setup_stake(msg, msg.text.strip()))
-    else: bot.send_message(m.chat.id, "🚫 Access Denied.")
-
-def setup_stake(m, token):
-    bot.send_message(m.chat.id, "Initial Stake ($):")
-    bot.register_next_step_handler(m, lambda msg: setup_target(msg, token, float(msg.text)))
-
-def setup_target(m, token, stake):
-    bot.send_message(m.chat.id, "Target Profit ($):")
-    bot.register_next_step_handler(m, lambda msg: start_engine(msg, token, stake, float(msg.text)))
-
-def start_engine(m, token, stake, target):
-    acc_data = {token: {"current_stake": stake, "total_profit": 0, "streak": 0, "wins": 0, "losses": 0}}
-    active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {
-        "is_running": True, "tokens": [token], "initial_stake": stake, "target_profit": target, "accounts_data": acc_data
-    }}, upsert=True)
-    bot.send_message(m.chat.id, "🛰️ Sniper V29 Active.\nPair: R_10 | Ticks: 5 | Barrier: 0.6")
-    threading.Thread(target=user_trading_loop, args=(m.chat.id, token), daemon=True).start()
 
 if __name__ == '__main__':
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000), daemon=True).start()
