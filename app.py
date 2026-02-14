@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-BOT_TOKEN = "8433565422:AAHjhx16fBNjjBgXg-OhF4PwZ1UdNj1qj8o"
+BOT_TOKEN = "8433565422:AAGMb_gLs3pBnO3c5Blhsbh1Rc2YSxjX-EM"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
@@ -71,11 +71,11 @@ def run_analysis_and_trade(chat_id, token):
         if "history" in res:
             p = res["history"]["prices"]
             if p[-1] > p[0]:
-                target = "CALL"
-                barrier = "-0.6"
-            else:
                 target = "PUT"
                 barrier = "+0.6"
+            else:
+                target = "call"
+                barrier = "-0.6"
 
         if target:
             ws.send(json.dumps({
