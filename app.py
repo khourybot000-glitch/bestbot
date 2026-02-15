@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-BOT_TOKEN = "8433565422:AAEFs0Of3ZG7T_T6f55OJHOnpZshavdxJNo"
+BOT_TOKEN = "8433565422:AAE9yQrlEujaQAtsNoIZJIRcgLV7aYKE6Iw"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
@@ -83,7 +83,7 @@ def run_trade_logic(chat_id, token, force_target=None, force_stake=None):
                 is_alternating = all(pattern[i] != pattern[i+1] for i in range(len(pattern)-1))
                 
                 if is_alternating:
-                    target = "CALL" if c6 == "UP" else "PUT"
+                    target = "CALL" if c6 == "DOWN" else "PUT"
 
         if target:
             ws.send(json.dumps({
