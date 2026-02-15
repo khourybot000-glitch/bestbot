@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-BOT_TOKEN = "8433565422:AAEjQEssLIW07i2pbOMsKtbM9rl_Ml448gc"
+BOT_TOKEN = "8433565422:AAHjJSC4LVH3GX_ny_dkhmKMjoGDaDTGLtY"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
@@ -43,21 +43,14 @@ def user_trading_loop(chat_id, token):
         if not session: break
 
         now = datetime.now()
+        # التحليل الجديد فقط عند الثانية 0
         if now.second == 0 and not trade_locks.get(chat_id, False):
             acc_data = session["accounts_data"][token]
-            
-            # في حال الخسارة: مضاعفة عكسية فوراً
-            if acc_data.get("streak", 0) > 0:
-                last_type = acc_data.get("last_type")
-                # عكس الإشارة: إذا كانت السابقة CALL تصبح PUT
-                next_type = "PUT" if last_type == "CALL" else "CALL"
-                new_stake = acc_data["current_stake"]
-                threading.Thread(target=run_trade_logic, args=(chat_id, token, next_type, new_stake)).start()
-            else:
-                # تحليل جديد (30 تيك)
+            # إذا لم نكن في وضع مضاعفة، ابدأ تحليل جديد
+            if acc_data.get("streak", 0) == 0:
                 threading.Thread(target=run_trade_logic, args=(chat_id, token)).start()
-            
-            time.sleep(50) 
+                time.sleep(50) 
+        
         time.sleep(0.5)
 
 def run_trade_logic(chat_id, token, force_target=None, force_stake=None):
@@ -73,13 +66,12 @@ def run_trade_logic(chat_id, token, force_target=None, force_stake=None):
         target = force_target
         stake = force_stake if force_stake else session["accounts_data"][token]["current_stake"]
 
-        # تحليل 30 تيك مقسمة لـ 6 شموع (كل شمعة 5 تيكات)
+        # تحليل 30 تيك (6 شموع)
         if not target:
             ws.send(json.dumps({"ticks_history": "R_100", "count": 30, "end": "latest", "style": "ticks"}))
             res = json.loads(ws.recv())
             if "history" in res:
                 p = res["history"]["prices"]
-                # تحديد اتجاه 6 شموع (كل شمعة 5 تيكات)
                 c1 = "UP" if p[4] > p[0] else "DOWN"
                 c2 = "UP" if p[9] > p[5] else "DOWN"
                 c3 = "UP" if p[14] > p[10] else "DOWN"
@@ -87,12 +79,10 @@ def run_trade_logic(chat_id, token, force_target=None, force_stake=None):
                 c5 = "UP" if p[24] > p[20] else "DOWN"
                 c6 = "UP" if p[29] > p[25] else "DOWN"
                 
-                # التحقق: هل كل شمعة عكس التي قبلها؟
                 pattern = [c1, c2, c3, c4, c5, c6]
                 is_alternating = all(pattern[i] != pattern[i+1] for i in range(len(pattern)-1))
                 
                 if is_alternating:
-                    # الدخول في نفس اتجاه الشمعة السادسة
                     target = "CALL" if c6 == "UP" else "PUT"
 
         if target:
@@ -107,7 +97,7 @@ def run_trade_logic(chat_id, token, force_target=None, force_stake=None):
             if "buy" in buy_res:
                 contract_id = buy_res["buy"]["contract_id"]
                 bot.send_message(chat_id, "Trade Entered")
-                time.sleep(8) # انتظار النتيجة بعد 8 ثواني
+                time.sleep(8) # انتظار النتيجة
                 monitor_result(chat_id, token, contract_id, target)
             else: trade_locks[chat_id] = False
         else:
@@ -131,7 +121,7 @@ def monitor_result(chat_id, token, contract_id, last_type):
                     handle_outcome(chat_id, token, profit, last_type)
                     break
             ws.close()
-            time.sleep(1)
+            time.sleep(0.5)
         except: time.sleep(1)
 
 def handle_outcome(chat_id, token, profit, last_type):
@@ -141,7 +131,6 @@ def handle_outcome(chat_id, token, profit, last_type):
     acc = session["accounts_data"][token]
     is_win = profit > 0
     new_streak = 0 if is_win else acc.get("streak", 0) + 1
-    # المضاعفة 2.2
     new_stake = session["initial_stake"] if is_win else round(acc["current_stake"] * 2.2, 2)
     new_total_profit = round(acc["total_profit"] + profit, 2)
     wins = acc.get("wins", 0) + (1 if is_win else 0)
@@ -158,24 +147,29 @@ def handle_outcome(chat_id, token, profit, last_type):
 
     bot.send_message(chat_id, f"{'✅ WIN' if is_win else '❌ LOSS'}\nProfit: {new_total_profit}\nWins: {wins} | Losses: {losses}")
 
-    # التوقف بعد 5 خسارات متتالية أو الوصول للهدف ومسح البيانات
+    # التوقف النهائي
     if new_streak >= 5 or new_total_profit >= session["target_profit"]:
         active_sessions_col.delete_one({"chat_id": chat_id})
         trade_locks[chat_id] = False
-        bot.send_message(chat_id, "🛑 Session Finished. All Data Deleted.", reply_markup=main_keyboard())
+        bot.send_message(chat_id, "🛑 Session Finished. Data Deleted.", reply_markup=main_keyboard())
     else:
-        trade_locks[chat_id] = False
+        # إذا كانت خسارة، ادخل المضاعفة "فوراً" بعكس الاتجاه
+        if not is_win:
+            next_type = "PUT" if last_type == "CALL" else "CALL"
+            threading.Thread(target=run_trade_logic, args=(chat_id, token, next_type, new_stake)).start()
+        else:
+            trade_locks[chat_id] = False
 
-# --- RESET HANDLERS ---
+# --- UI HANDLERS ---
 @bot.message_handler(commands=['start'])
-def welcome(m):
+def welcome_msg(m):
     active_sessions_col.delete_one({"chat_id": m.chat.id})
     trade_locks[m.chat.id] = False
     bot.send_message(m.chat.id, "♻️ System Reset. Enter Email:", reply_markup=main_keyboard())
     bot.register_next_step_handler(m, auth)
 
 @bot.message_handler(func=lambda m: m.text in ['STOP 🛑', 'START 🚀'])
-def handle_btns(m):
+def ui_buttons(m):
     active_sessions_col.delete_one({"chat_id": m.chat.id})
     trade_locks[m.chat.id] = False
     if m.text == 'STOP 🛑':
@@ -189,7 +183,7 @@ def auth(m):
     if u and datetime.strptime(u['expiry'], "%Y-%m-%d") > datetime.now():
         bot.send_message(m.chat.id, "API Token:")
         bot.register_next_step_handler(m, lambda msg: setup_stake(msg, msg.text.strip()))
-    else: bot.send_message(m.chat.id, "🚫 Access Denied.", reply_markup=main_keyboard())
+    else: bot.send_message(m.chat.id, "🚫 Denied.", reply_markup=main_keyboard())
 
 def setup_stake(m, token):
     bot.send_message(m.chat.id, "Initial Stake:")
@@ -214,20 +208,18 @@ def admin():
     return render_template_string("""
     <body style="background:#0f172a; color:#f8fafc; font-family:sans-serif; text-align:center; padding:50px;">
         <div style="background:#1e293b; padding:20px; border-radius:12px; display:inline-block; width:90%; max-width:500px;">
-            <h3>Sniper Admin</h3>
+            <h3>Admin Panel</h3>
             <form action="/add" method="POST">
                 <input name="email" placeholder="Email" required style="padding:10px;">
                 <select name="days" style="padding:10px;">
-                    <option value="1">1 Day</option>
-                    <option value="7">7 Days</option>
-                    <option value="30">30 Days</option>
-                    <option value="36500">LifeTime</option>
+                    <option value="1">1 Day</option><option value="7">7 Days</option>
+                    <option value="30">30 Days</option><option value="36500">LifeTime</option>
                 </select>
                 <button type="submit" style="padding:10px; background:#38bdf8; border:none; cursor:pointer;">Activate</button>
             </form>
             <table style="width:100%; margin-top:20px; text-align:left;">
                 {% for u in users %}
-                <tr><td style="padding:5px;">{{u.email}}</td><td>{{u.expiry}}</td><td><a href="/delete/{{u.email}}" style="color:red;">Delete</a></td></tr>
+                <tr><td>{{u.email}}</td><td>{{u.expiry}}</td><td><a href="/delete/{{u.email}}" style="color:red;">Delete</a></td></tr>
                 {% endfor %}
             </table>
         </div>
