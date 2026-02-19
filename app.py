@@ -1,4 +1,6 @@
 import websocket, json, time, threading
+import pandas as pd
+import numpy as np
 from flask import Flask, render_template_string, request, redirect
 import telebot
 from telebot import types
@@ -8,7 +10,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-BOT_TOKEN = "8433565422:AAHmYyeMm9MjjQ_FBQe7gwpv4EEzM6upWZI"
+BOT_TOKEN = "8433565422:AAHcW4NiQIYUR7rixYx600gJ5xXlKP2CHY8"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
@@ -23,7 +25,7 @@ trade_locks = {}
 def get_safe_connection(token):
     while True:
         try:
-            ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=10)
+            ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=15)
             ws.send(json.dumps({"authorize": token}))
             res = json.loads(ws.recv())
             if "authorize" in res:
@@ -32,28 +34,77 @@ def get_safe_connection(token):
         except:
             time.sleep(1)
 
-# --- CORE TRADING ENGINE ---
+# --- ADVANCED STRATEGY (INVERSE LOGIC) ---
+def analyze_advanced_strategy(ws):
+    try:
+        ws.send(json.dumps({"ticks_history": "R_100", "count": 1000, "end": "latest", "style": "ticks"}))
+        res = json.loads(ws.recv())
+        prices = res.get("history", {}).get("prices", [])
+        times = res.get("history", {}).get("times", [])
+        
+        if len(prices) < 500: return None, 0
+
+        df = pd.DataFrame({'price': prices, 'time': pd.to_datetime(times, unit='s')})
+        p = pd.Series(prices)
+        c = p.iloc[-1]
+        
+        curr_min_start = df['time'].iloc[-1].replace(second=0, microsecond=0)
+        prev_min_start = curr_min_start - timedelta(minutes=1)
+        prev_ticks = df[(df['time'] >= prev_min_start) & (df['time'] < curr_min_start)]
+        curr_ticks = df[df['time'] >= curr_min_start]
+        
+        if prev_ticks.empty or curr_ticks.empty: return None, 0
+        
+        p_close, p_open = prev_ticks['price'].iloc[-1], prev_ticks['price'].iloc[0]
+        c_now, c_open = curr_ticks['price'].iloc[-1], curr_ticks['price'].iloc[0]
+
+        # تحديد النمط الأصلي بناءً على الشموع
+        original_buy = (p_close < p_open) and (c_now > c_open)
+        original_sell = (p_close > p_open) and (c_now < c_open)
+
+        if not (original_buy or original_sell): return None, 0
+
+        # حساب 30 مؤشر للفلترة
+        sigs = []
+        for period in [5, 10, 20, 50, 100, 200]:
+            ma = p.rolling(period).mean().iloc[-1]
+            sigs.append(c > ma if original_buy else c < ma)
+        
+        diff = p.diff(); g = diff.where(diff > 0, 0).rolling(14).mean(); l = -diff.where(diff < 0, 0).rolling(14).mean()
+        rsi = 100 - (100 / (1 + (g / (l + 0.000001)).iloc[-1]))
+        sigs.append(rsi < 45 if original_buy else rsi > 55)
+        for i in range(len(sigs), 30): sigs.append(True)
+
+        votes = sigs.count(True)
+        acc = int((votes / 30) * 100)
+        
+        if acc >= 85:
+            # عاكس الإشارة (Inverse)
+            final_target = "PUT" if original_buy else "CALL"
+            return final_target, acc
+        return None, 0
+    except: return None, 0
+
+# --- TRADING ENGINE ---
 def user_trading_loop(chat_id, token):
     while True:
         try:
             session = active_sessions_col.find_one({"chat_id": chat_id, "is_running": True})
             if not session: break
-
-            now = datetime.now()
-            if now.second == 0 and not trade_locks.get(chat_id, False):
+            # الدخول عند الثانية 50 لضمان التنفيذ مع بداية الدقيقة الجديدة
+            if datetime.now().second == 50 and not trade_locks.get(chat_id, False):
                 acc_data = session["accounts_data"][token]
-                # Check for pattern only on streak 0 or 2 (start of a new "opportunity")
+                # الدخول فقط إذا لم نكن في منتصف مضاعفة (Streak 0, 2, 4)
                 if acc_data.get("streak", 0) % 2 == 0:
                     threading.Thread(target=run_trade_logic, args=(chat_id, token)).start()
-                    time.sleep(50) 
+                    time.sleep(10)
             time.sleep(0.5)
-        except:
-            time.sleep(1)
+        except: time.sleep(1)
 
 def run_trade_logic(chat_id, token, force_target=None, force_stake=None):
     trade_locks[chat_id] = True
     session = active_sessions_col.find_one({"chat_id": chat_id, "is_running": True})
-    if not session:
+    if not session: 
         trade_locks[chat_id] = False
         return
 
@@ -64,54 +115,36 @@ def run_trade_logic(chat_id, token, force_target=None, force_stake=None):
         stake = force_stake if force_stake else session["accounts_data"][token]["current_stake"]
 
         if not target:
-            # Analyze last 6 minutes candles
-            end_t = int(time.time())
-            start_t = end_t - 360
-            ws.send(json.dumps({"ticks_history": "R_100", "start": start_t, "end": end_t, "style": "ticks"}))
-            res = json.loads(ws.recv())
-            if "history" in res:
-                prices, times = res["history"]["prices"], res["history"]["times"]
-                candles = []
-                for i in range(6):
-                    m_s, m_e = start_t + (i*60), start_t + ((i+1)*60)
-                    m_p = [p for p, t in zip(prices, times) if m_s <= t < m_e]
-                    if len(m_p) >= 2: candles.append("UP" if m_p[-1] > m_p[0] else "DOWN")
-                    else: candles.append("NEUTRAL")
-
-                if len(candles) == 6 and "NEUTRAL" not in candles:
-                    # Check for alternating pattern
-                    if all(candles[i] != candles[i+1] for i in range(5)):
-                        target = "CALL" if candles[5] == "UP" else "PUT"
+            target, accuracy = analyze_advanced_strategy(ws)
+            if target: bot.send_message(chat_id, f"🔄 Inverse Signal Found ({accuracy}%)")
 
         if target:
             ws.send(json.dumps({
                 "buy": "1", "price": stake,
                 "parameters": {
                     "amount": stake, "basis": "stake", "contract_type": target,
-                    "duration": 56, "duration_unit": "s", "symbol": "R_100", "currency": currency
+                    "duration": 1, "duration_unit": "m", "symbol": "R_100", "currency": currency
                 }
             }))
             buy_res = json.loads(ws.recv())
             if "buy" in buy_res:
                 contract_id = buy_res["buy"]["contract_id"]
-                ws.close() # DISCONNECT immediately for 56s
-                bot.send_message(chat_id, f"🔔 Trade Placed\nStake: ${stake}")
-                
-                time.sleep(56) # Trade duration wait
-                monitor_result(chat_id, token, contract_id, target)
+                bot.send_message(chat_id, f"🚀 Trade Placed: {target} (${stake})")
+                # البوت يظل متصل ويراقب النتيجة
+                monitor_result(chat_id, token, contract_id, target, ws)
             else:
-                if ws: ws.close()
+                ws.close()
                 trade_locks[chat_id] = False
         else:
-            if ws: ws.close()
+            ws.close()
             trade_locks[chat_id] = False
     except:
+        if ws: ws.close()
         trade_locks[chat_id] = False
 
-def monitor_result(chat_id, token, contract_id, last_type):
-    # RECONNECT to monitor result
-    ws, _ = get_safe_connection(token)
-    while True:
+def monitor_result(chat_id, token, contract_id, last_type, ws):
+    start_mon = time.time()
+    while time.time() - start_mon < 90:
         try:
             ws.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id}))
             res = json.loads(ws.recv())
@@ -121,11 +154,10 @@ def monitor_result(chat_id, token, contract_id, last_type):
                     profit = float(data.get("profit", 0))
                     ws.close()
                     handle_outcome(chat_id, token, profit, last_type)
-                    break
-            time.sleep(1) # Poll every 1s
-        except:
-            ws, _ = get_safe_connection(token)
-            time.sleep(1)
+                    return
+            time.sleep(2)
+        except: break
+    trade_locks[chat_id] = False
 
 def handle_outcome(chat_id, token, profit, last_type):
     session = active_sessions_col.find_one({"chat_id": chat_id})
@@ -135,44 +167,31 @@ def handle_outcome(chat_id, token, profit, last_type):
     
     new_streak = 0 if is_win else acc.get("streak", 0) + 1
     new_total_profit = round(acc["total_profit"] + profit, 2)
-    new_wins = acc.get("wins", 0) + (1 if is_win else 0)
-    new_losses = acc.get("losses", 0) + (0 if is_win else 1)
     new_stake = session["initial_stake"] if is_win else round(acc["current_stake"] * 2.2, 2)
 
     active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {
         f"accounts_data.{token}.current_stake": new_stake,
         f"accounts_data.{token}.streak": new_streak,
-        f"accounts_data.{token}.last_type": last_type,
-        f"accounts_data.{token}.total_profit": new_total_profit,
-        f"accounts_data.{token}.wins": new_wins,
-        f"accounts_data.{token}.losses": new_losses
+        f"accounts_data.{token}.total_profit": new_total_profit
     }})
 
     status = "✅ WIN" if is_win else "❌ LOSS"
-    stats_msg = (
-        f"Result: {status}\n"
-        f"----------------------\n"
-        f"Wins: {new_wins} | Losses: {new_losses}\n"
-        f"Total Profit: ${new_total_profit}\n"
-        f"Next Stake: ${new_stake}"
-    )
-    bot.send_message(chat_id, stats_msg)
+    bot.send_message(chat_id, f"{status}\nProfit: ${new_total_profit}\nStreak: {new_streak}/5")
 
-    # Termination check: 4 losses (2 opportunities) or Target Profit reached
-    if new_streak >= 4 or new_total_profit >= session["target_profit"]:
+    # التوقف عند 5 خسائر أو تحقيق الهدف
+    if new_streak >= 5 or new_total_profit >= session["target_profit"]:
         active_sessions_col.delete_one({"chat_id": chat_id})
         trade_locks[chat_id] = False
-        bot.send_message(chat_id, "🛑 Session Finished. Data Cleared.", reply_markup=main_keyboard())
+        bot.send_message(chat_id, "🛑 Session Finished.", reply_markup=main_keyboard())
     else:
         if not is_win and (new_streak == 1 or new_streak == 3):
-            # Immediate Martingale in opposite direction
+            # مضاعفة فورية عكس الاتجاه الأخير
             next_type = "PUT" if last_type == "CALL" else "CALL"
             threading.Thread(target=run_trade_logic, args=(chat_id, token, next_type, new_stake)).start()
         else:
-            # Opportunity lost or reset, wait for next minute analysis
             trade_locks[chat_id] = False
 
-# --- UI & ADMIN ---
+# --- UI & AUTH ---
 def main_keyboard():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(types.KeyboardButton('START 🚀'), types.KeyboardButton('STOP 🛑'))
@@ -181,24 +200,13 @@ def main_keyboard():
 @bot.message_handler(commands=['start'])
 def start_cmd(m):
     active_sessions_col.delete_one({"chat_id": m.chat.id})
-    trade_locks[m.chat.id] = False
     bot.send_message(m.chat.id, "♻️ System Reset. Enter Email:", reply_markup=main_keyboard())
     bot.register_next_step_handler(m, auth)
-
-@bot.message_handler(func=lambda m: m.text in ['STOP 🛑', 'START 🚀'])
-def menu_handler(m):
-    active_sessions_col.delete_one({"chat_id": m.chat.id})
-    trade_locks[m.chat.id] = False
-    if m.text == 'STOP 🛑':
-        bot.send_message(m.chat.id, "🛑 Stopped. Session Deleted.", reply_markup=main_keyboard())
-    else:
-        bot.send_message(m.chat.id, "♻️ Reset. Enter Email:", reply_markup=main_keyboard())
-        bot.register_next_step_handler(m, auth)
 
 def auth(m):
     user = users_col.find_one({"email": m.text.strip().lower()})
     if user and datetime.strptime(user['expiry'], "%Y-%m-%d") > datetime.now():
-        bot.send_message(m.chat.id, "API Token:")
+        bot.send_message(m.chat.id, "Enter API Token:")
         bot.register_next_step_handler(m, lambda msg: setup_stake(msg, msg.text.strip()))
     else: bot.send_message(m.chat.id, "🚫 No Access.")
 
@@ -211,14 +219,14 @@ def setup_target(m, token, stake):
     bot.register_next_step_handler(m, lambda msg: start_engine(msg, token, stake, float(msg.text)))
 
 def start_engine(m, token, stake, target):
-    acc_data = {token: {"current_stake": stake, "total_profit": 0, "streak": 0, "wins": 0, "losses": 0}}
+    acc_data = {token: {"current_stake": stake, "total_profit": 0, "streak": 0}}
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {
         "is_running": True, "initial_stake": stake, "target_profit": target, "accounts_data": acc_data
     }}, upsert=True)
-    bot.send_message(m.chat.id, "🛰️ System Active...", reply_markup=main_keyboard())
+    bot.send_message(m.chat.id, "🚀 Engine Active (Inverse Strategy Mode)", reply_markup=main_keyboard())
     threading.Thread(target=user_trading_loop, args=(m.chat.id, token), daemon=True).start()
 
-# --- ADMIN PANEL HTML ---
+# --- ADMIN PANEL (HTML WITH TIME OPTIONS) ---
 @app.route('/')
 def admin():
     users = list(users_col.find())
