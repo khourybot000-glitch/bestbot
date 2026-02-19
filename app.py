@@ -11,7 +11,7 @@ app = Flask(__name__)
 
 # --- CONFIGURATION ---
 # Updated Token as requested
-BOT_TOKEN = "8433565422:AAG5nzqZeNY-rmNWH7uRROgAejlKJOgHuok"
+BOT_TOKEN = "8433565422:AAHlrskL8zkn2ATNZfWrPpNbQ8FV6yVwGVg"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
@@ -86,7 +86,7 @@ def analyze_advanced_strategy(ws):
         acc = int((votes / 30) * 100)
         
         if acc >= 85:
-            return ("CALL" if is_buy_candles else "PUT"), acc
+            return ("PUT" if is_buy_candles else "CALL"), acc
         return None, 0
     except: return None, 0
 
