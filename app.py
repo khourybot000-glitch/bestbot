@@ -11,7 +11,7 @@ app = Flask(__name__)
 
 # --- CONFIGURATION ---
 # Updated Token as requested
-BOT_TOKEN = "8433565422:AAHlrskL8zkn2ATNZfWrPpNbQ8FV6yVwGVg"
+BOT_TOKEN = "8433565422:AAHUVcDCm_G7lSYwefSRyYXjOBbqVmr2lw8"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
@@ -44,7 +44,7 @@ def get_safe_connection(token):
 # --- STRATEGY ENGINE (DIRECT LOGIC) ---
 def analyze_advanced_strategy(ws):
     try:
-        ws.send(json.dumps({"ticks_history": "R_100", "count": 1000, "end": "latest", "style": "ticks"}))
+        ws.send(json.dumps({"ticks_history": "R_75", "count": 1000, "end": "latest", "style": "ticks"}))
         res = json.loads(ws.recv())
         prices = res.get("history", {}).get("prices", [])
         times = res.get("history", {}).get("times", [])
@@ -122,7 +122,7 @@ def run_trade_logic(chat_id, token):
                 "buy": "1", "price": stake,
                 "parameters": {
                     "amount": stake, "basis": "stake", "contract_type": target,
-                    "duration": 1, "duration_unit": "m", "symbol": "R_100", "currency": currency
+                    "duration": 1, "duration_unit": "m", "symbol": "R_75", "currency": currency
                 }
             }))
             buy_res = json.loads(ws.recv())
