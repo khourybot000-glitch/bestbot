@@ -9,15 +9,13 @@ import threading
 from flask import Flask
 import os
 
-# --- Flask Server for Render & Uptime Robot ---
+# --- Flask Server for Render ---
 app = Flask(__name__)
-
 @app.route('/')
 def health_check():
     return "Bot is Active and Monitoring!", 200
 
 def run_flask():
-    # Render uses the PORT environment variable
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
@@ -31,7 +29,6 @@ WS_URL = f"wss://blue.derivws.com/websockets/v3?app_id={APP_ID}"
 
 def send_telegram_msg(direction):
     now_beirut = datetime.now(BEIRUT_TZ)
-    # Calculate entry time for the NEXT minute
     entry_time = (now_beirut + timedelta(minutes=1)).strftime('%H:%M')
     
     message_text = (
@@ -43,13 +40,10 @@ def send_telegram_msg(direction):
     )
     
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message_text}
-    
     try:
-        requests.post(url, json=payload, timeout=10)
-        print(f"✅ {direction} signal sent to Telegram.")
+        requests.post(url, json={"chat_id": CHAT_ID, "text": message_text}, timeout=10)
     except Exception as e:
-        print(f"❌ Telegram send error: {e}")
+        print(f"❌ Telegram error: {e}")
 
 def on_message(ws, message):
     data = json.loads(message)
@@ -57,74 +51,58 @@ def on_message(ws, message):
         prices = data['history']['prices']
         df = pd.DataFrame(prices, columns=['price'])
         
-        # Convert 6000 ticks into 100 candles (1 candle per 60 ticks)
         candles = []
         for i in range(0, len(df), 60):
             chunk = df.iloc[i:i+60]
             if len(chunk) == 60:
                 candles.append({
-                    'open': chunk['price'].iloc[0],
-                    'high': chunk['price'].max(),
-                    'low': chunk['price'].min(),
-                    'close': chunk['price'].iloc[-1],
+                    'open': chunk['price'].iloc[0], 'high': chunk['price'].max(),
+                    'low': chunk['price'].min(), 'close': chunk['price'].iloc[-1],
                     'color': 'green' if chunk['price'].iloc[-1] > chunk['price'].iloc[0] else 'red'
                 })
         
-        # Role Reversal Analysis
         if len(candles) >= 20:
-            # S/R levels based on previous 98 candles
             history = candles[:-2]
-            resistance = max([c['high'] for c in history])
-            support = min([c['low'] for c in history])
+            res = max([c['high'] for c in history])
+            sup = min([c['low'] for c in history])
+            c_brk, c_ret = candles[-2], candles[-1]
             
-            c_break = candles[-2]  # The breakout candle
-            c_retest = candles[-1] # The correction candle
-            
-            # CALL Logic: Resistance broken by Green, Retested by Red staying ABOVE resistance
-            if c_break['close'] > resistance and c_break['color'] == 'green':
-                if c_retest['color'] == 'red' and c_retest['close'] > resistance:
-                    send_telegram_msg("CALL (BUY)")
-            
-            # PUT Logic: Support broken by Red, Retested by Green staying BELOW support
-            elif c_break['close'] < support and c_break['color'] == 'red':
-                if c_retest['color'] == 'green' and c_retest['close'] < support:
-                    send_telegram_msg("PUT (SELL)")
+            if c_brk['close'] > res and c_brk['color'] == 'green' and c_ret['color'] == 'red' and c_ret['close'] > res:
+                send_telegram_msg("CALL (BUY)")
+            elif c_brk['close'] < sup and c_brk['color'] == 'red' and c_ret['color'] == 'green' and c_ret['close'] < sup:
+                send_telegram_msg("PUT (SELL)")
         
-        # Close connection immediately after analysis to save resources
-        print("Done. Disconnecting...")
         ws.close()
 
 def on_open(ws):
-    # Send history request as soon as connection is established
-    request = {
-        "ticks_history": SYMBOL_CODE,
-        "count": 6000,
-        "end": "latest",
-        "style": "ticks"
-    }
+    request = {"ticks_history": SYMBOL_CODE, "count": 6000, "end": "latest", "style": "ticks"}
     ws.send(json.dumps(request))
 
 def start_scheduler():
     while True:
-        # Precision sync to Second 00
-        now = datetime.now()
-        seconds_to_wait = 60 - now.second
-        time.sleep(seconds_to_wait)
+        now_beirut = datetime.now(BEIRUT_TZ)
         
-        print(f"⏰ Connecting for analysis at: {datetime.now().strftime('%H:%M:%S')}")
-        
-        # Open connection on demand
-        ws = websocket.WebSocketApp(
-            WS_URL,
-            on_open=on_open,
-            on_message=on_message
-        )
-        # Timeout safety: If no response in 15s, kill attempt to be ready for next minute
-        ws.run_forever(ping_timeout=15)
+        # 1. Check if it's a weekday (0=Monday, 4=Friday)
+        is_weekday = now_beirut.weekday() <= 4 
+        # 2. Check if the time is between 09:00 and 21:00
+        is_working_hours = 9 <= now_beirut.hour < 21
+
+        if is_weekday and is_working_hours:
+            # Sync to Second 00
+            seconds_to_wait = 60 - now_beirut.second
+            time.sleep(seconds_to_wait)
+            
+            print(f"⏰ Analyzing Market at: {datetime.now(BEIRUT_TZ).strftime('%H:%M:%S')}")
+            ws = websocket.WebSocketApp(WS_URL, on_open=on_open, on_message=on_message)
+            ws.run_forever(ping_timeout=15)
+        else:
+            # If outside hours, sleep for 1 minute and check again
+            if not is_weekday:
+                print("💤 Weekend: Bot is resting...")
+            else:
+                print("🌙 Outside working hours: Bot is sleeping...")
+            time.sleep(60)
 
 if __name__ == "__main__":
-    # Start Flask for Render/UptimeRobot in background thread
     threading.Thread(target=run_flask, daemon=True).start()
-    
-    # Start the On-Demand Scheduler
     start_scheduler()
