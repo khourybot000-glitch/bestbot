@@ -12,7 +12,7 @@ import os
 # --- Flask Server ---
 app = Flask(__name__)
 @app.route('/')
-def health_check(): return "Bot Active: 30s Analysis - Next Min Entry", 200
+def health_check(): return "Bot Running", 200
 
 # --- Configuration ---
 TOKEN = '8511172742:AAFxZIj8N07FB-tFnJ_l3rv13loyRMmsRYU'
@@ -41,14 +41,11 @@ def analyze_strategy(history):
     })
     
     now = datetime.now(BEIRUT_TZ)
-    t_ref = now.replace(second=0, microsecond=0) # بداية الدقيقة الحالية (مثلاً 12:06:00)
+    t_ref = now.replace(second=0, microsecond=0) 
     
-    # تقسيم الفترات (30 ثانية لكل فترة)
-    # الفترة C: من 12:06:00 إلى 12:06:30
+    # التقسيم (30 ثانية لكل فترة)
     c_start, c_end = t_ref, t_ref + timedelta(seconds=30)
-    # الفترة B: من 12:05:30 إلى 12:06:00
     b_start, b_end = t_ref - timedelta(seconds=30), t_ref
-    # الفترة A: من 12:05:00 إلى 12:05:30
     a_start, a_end = t_ref - timedelta(seconds=60), t_ref - timedelta(seconds=30)
 
     def get_dir(start, end):
@@ -62,40 +59,37 @@ def analyze_strategy(history):
 
     if not all([dir_a, dir_b, dir_c]): return
 
-    # الشرط: تعاكس في الاتجاه (ليست كلها في نفس الاتجاه)
-    if not (dir_a == dir_b == dir_c):
+    # التحقق من نمط الزجزاج (بدون إظهار التفاصيل)
+    is_up_down_up = (dir_a == "UP" and dir_b == "DOWN" and dir_c == "UP")
+    is_down_up_down = (dir_a == "DOWN" and dir_b == "UP" and dir_c == "DOWN")
+
+    if is_up_down_up or is_down_up_down:
         trade_type = "CALL (BUY)" if dir_c == "UP" else "PUT (SELL)"
         
-        # وقت الدخول: بداية الدقيقة التالية (مثلاً 12:07:00)
         trade_entry_time = t_ref + timedelta(minutes=1)
-        # وقت النهاية: بعد دقيقة واحدة من الدخول (مثلاً 12:08:00)
         target_result_time = trade_entry_time + timedelta(minutes=1)
         pending_direction = trade_type
         
-        msg = (f"🕒 **NEXT-MINUTE SCALP**\n"
-               f"📊 30s Intervals: {dir_a} | {dir_b} | {dir_c}\n"
+        # رسالة مشفرة ومختصرة جداً
+        msg = (f"🔔 **NEW SIGNAL: {SYMBOL.replace('frx','')}**\n"
+               f"----------------------------\n"
                f"🎯 Action: *{trade_type}*\n"
-               f"🕐 **Entry Time: {trade_entry_time.strftime('%H:%M:00')}**\n"
-               f"⏱ Duration: 1 Minute\n"
-               f"📢 (Prepare to enter next minute)")
+               f"🕐 Entry: {trade_entry_time.strftime('%H:%M:00')}\n"
+               f"⏱ Duration: 1 Minute")
+        
         send_telegram_msg(msg)
         is_waiting_for_result = True
-    else:
-        print(f"[{now.strftime('%H:%M:%S')}] Trend is consistent ({dir_c}), no trade.")
 
 def check_result(history):
     global is_waiting_for_result
     df = pd.DataFrame({'price': history['prices'], 'time': [datetime.fromtimestamp(t, tz=pytz.utc).astimezone(BEIRUT_TZ) for t in history['times']]})
-    
-    # فحص الصفقة في دقيقتها المحددة
     trade_data = df[(df['time'] >= trade_entry_time) & (df['time'] < target_result_time)]
-    if trade_data.empty: return
-
-    entry_p, exit_p = trade_data['price'].iloc[0], trade_data['price'].iloc[-1]
-    won = (exit_p > entry_p) if pending_direction == "CALL (BUY)" else (exit_p < entry_p)
     
-    status = "✅ WIN" if won else "❌ LOSS"
-    send_telegram_msg(f"{status} (EURGBP)\nQuick Scalp Result")
+    if not trade_data.empty:
+        entry_p, exit_p = trade_data['price'].iloc[0], trade_data['price'].iloc[-1]
+        won = (exit_p > entry_p) if pending_direction == "CALL (BUY)" else (exit_p < entry_p)
+        send_telegram_msg(f"{'✅ SUCCESS' if won else '❌ FAILED'}")
+    
     is_waiting_for_result = False
 
 def on_message(ws, message):
@@ -114,8 +108,6 @@ def on_open(ws):
 def start_engine():
     while True:
         now = datetime.now(BEIRUT_TZ)
-        
-        # فحص النتيجة بعد انتهاء دقيقة الصفقة
         if is_waiting_for_result and now >= target_result_time and now.second <= 2:
             time.sleep(1)
             ws = websocket.WebSocketApp(WS_URL, on_open=on_open, on_message=on_message)
@@ -123,7 +115,6 @@ def start_engine():
             time.sleep(2)
             continue
             
-        # التحليل عند الثانية 30 من كل دقيقة
         if now.second == 30 and not is_waiting_for_result:
             ws = websocket.WebSocketApp(WS_URL, on_open=on_open, on_message=on_message)
             ws.run_forever(ping_timeout=15)
