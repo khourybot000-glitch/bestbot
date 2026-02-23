@@ -9,10 +9,10 @@ import threading
 from flask import Flask
 import os
 
-# --- Flask Server ---
+# --- Flask Server for Deployment ---
 app = Flask(__name__)
 @app.route('/')
-def health_check(): return "Bot Status: Active - Every Minute Analysis", 200
+def health_check(): return "EURGBP Bot: Final Strategy Active", 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -24,119 +24,140 @@ CHAT_ID = '-1003731752986'
 BEIRUT_TZ = pytz.timezone('Asia/Beirut')
 WS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 
-SYMBOLS = [
-    "frxEURGBP", "frxEURUSD", "frxGBPUSD", "frxUSDJPY", "frxAUDUSD",
-    "frxUSDCAD", "frxUSDCHF", "frxEURJPY", "frxGBPJPY", "frxEURAUD",
-    "frxEURCAD", "frxAUDJPY", "frxGBPCAD", "frxNZDUSD", "frxGBPAUD",
-    "frxAUDCAD", "frxEURNZD", "frxAUDNZD", "frxGBPNZD", "frxCADJPY"
-]
+SYMBOL = "frxEURGBP"
 
 is_waiting_for_result = False
-pending_trade_direction = None
-pending_trade_symbol = None
 trade_entry_time = None
 target_result_time = None
+pending_direction = None
 
 def send_telegram_msg(text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     try:
         requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}, timeout=10)
-    except: pass
+    except:
+        pass
 
-def analyze_strategy(history, symbol):
-    global is_waiting_for_result, pending_trade_direction, target_result_time, pending_trade_symbol, trade_entry_time
+def analyze_strategy(history):
+    global is_waiting_for_result, trade_entry_time, target_result_time, pending_direction
     
+    # تحويل التيكات إلى DataFrame
     df = pd.DataFrame({
         'price': history['prices'],
         'time': [datetime.fromtimestamp(t, tz=pytz.utc).astimezone(BEIRUT_TZ) for t in history['times']]
     })
     
     now = datetime.now(BEIRUT_TZ)
+    # تصفير الثواني للدقيقة التي نحن فيها الآن (مثلاً 14:04:00)
     t_anchor = now.replace(second=0, microsecond=0)
     
-    candle_dirs = []
-    # فحص آخر 4 دقائق كاملة
+    candle_results = [] # 1 للخصراء، -1 للحمراء
+
+    # فحص آخر 4 شموع دقيقة أغلقت قبل هذه الدقيقة
+    # إذا نحن في 14:04، سنفحص شموع: 14:00، 14:01، 14:02، 14:03
     for i in range(1, 5):
         start_range = t_anchor - timedelta(minutes=i)
         end_range = t_anchor - timedelta(minutes=i-1)
         
         minute_data = df[(df['time'] >= start_range) & (df['time'] < end_range)]
-        if not minute_data.empty:
-            direction = "UP" if minute_data['price'].iloc[-1] > minute_data['price'].iloc[0] else "DOWN"
-            candle_dirs.append(direction)
-
-    if len(candle_dirs) < 4: return
-
-    trade_type = None
-    if all(d == "UP" for d in candle_dirs):
-        trade_type = "CALL (BUY)"
-    elif all(d == "DOWN" for d in candle_dirs):
-        trade_type = "PUT (SELL)"
-
-    if trade_type:
-        trade_entry_time = t_anchor 
-        target_result_time = trade_entry_time + timedelta(minutes=5)
         
-        msg = (f"🚀 **EVERY-MINUTE SCANNER**\n"
-               f"🏆 Asset: {symbol.replace('frx','')}\n"
-               f"🕯 Pattern: 4 Consecutive Candles\n"
-               f"🎯 Action: *{trade_type}*\n"
-               f"🕐 Entry: {trade_entry_time.strftime('%H:%M')}\n"
+        if len(minute_data) < 2:
+            candle_results.append(0)
+            continue
+            
+        open_p = minute_data['price'].iloc[0]
+        close_p = minute_data['price'].iloc[-1]
+        
+        if close_p > open_p:
+            candle_results.append(1)
+        elif close_p < open_p:
+            candle_results.append(-1)
+        else:
+            candle_results.append(0)
+
+    # تحديد الإشارة
+    direction = None
+    if all(r == 1 for r in candle_results):
+        direction = "CALL (BUY)"
+    elif all(r == -1 for r in candle_results):
+        direction = "PUT (SELL)"
+
+    if direction:
+        # وقت الدخول: الدقيقة القادمة (مثلاً 14:05:00)
+        trade_entry_time = t_anchor + timedelta(minutes=1)
+        # وقت النتيجة: بعد 5 دقائق من الدخول (مثلاً 14:10:00)
+        target_result_time = trade_entry_time + timedelta(minutes=5)
+        pending_direction = direction
+        
+        msg = (f"🔮 **EURGBP NEXT-MIN SIGNAL**\n"
+               f"📊 Analysis Period: Last 4 Mins\n"
+               f"🕯 Candles: {'🟢' if direction == 'CALL (BUY)' else '🔴'} x 4\n"
+               f"🎯 Action: *{direction}*\n"
+               f"🕐 **Entry At: {trade_entry_time.strftime('%H:%M:00')}**\n"
                f"⏱ Duration: 5 Minutes")
         send_telegram_msg(msg)
-        
         is_waiting_for_result = True
-        pending_trade_direction, pending_trade_symbol = trade_type, symbol
+    else:
+        # لوج داخلي للمراقبة في سيرفر Render
+        print(f"Time: {now.strftime('%H:%M:%S')} - Pattern not found. Results: {candle_results}")
 
-def check_trade_result(history, symbol):
-    global is_waiting_for_result, pending_trade_direction, target_result_time, pending_trade_symbol, trade_entry_time
+def check_result(history):
+    global is_waiting_for_result
     df = pd.DataFrame({
         'price': history['prices'],
         'time': [datetime.fromtimestamp(t, tz=pytz.utc).astimezone(BEIRUT_TZ) for t in history['times']]
     })
+    
+    # فحص النطاق السعري للصفقة الفعلية
     trade_window = df[(df['time'] >= trade_entry_time) & (df['time'] < target_result_time)]
+    
     if trade_window.empty: return
 
-    entry_p, exit_p = trade_window['price'].iloc[0], trade_window['price'].iloc[-1]
-    won = (exit_p > entry_p) if pending_trade_direction == "CALL (BUY)" else (exit_p < entry_p)
+    entry_p = trade_window['price'].iloc[0]
+    exit_p = trade_window['price'].iloc[-1]
+    
+    won = (exit_p > entry_p) if pending_direction == "CALL (BUY)" else (exit_p < entry_p)
     status = "✅ WIN" if won else "❌ LOSS"
     
-    send_telegram_msg(f"{status} ({symbol.replace('frx','')})\nResult after 5m analysis.")
+    send_telegram_msg(f"{status} (EURGBP)\nEntry: {entry_p}\nExit: {exit_p}\nDuration: 5m")
     is_waiting_for_result = False
-    pending_trade_symbol = target_result_time = trade_entry_time = None
 
 def on_message(ws, message):
     data = json.loads(message)
     if 'history' in data:
-        symbol = data.get('echo_req', {}).get('ticks_history')
-        if is_waiting_for_result and symbol == pending_trade_symbol:
-            check_trade_result(data['history'], symbol)
-        elif not is_waiting_for_result:
-            analyze_strategy(data['history'], symbol)
+        if is_waiting_for_result:
+            # نتأكد أن الوقت الحالي تجاوز وقت النتيجة
+            if datetime.now(BEIRUT_TZ) >= target_result_time:
+                check_result(data['history'])
+        else:
+            analyze_strategy(data['history'])
     ws.close()
 
 def on_open(ws):
-    if is_waiting_for_result:
-        ws.send(json.dumps({"ticks_history": pending_trade_symbol, "count": 1000, "end": "latest", "style": "ticks"}))
-    else:
-        for s in SYMBOLS:
-            ws.send(json.dumps({"ticks_history": s, "count": 1000, "end": "latest", "style": "ticks"}))
-            time.sleep(0.05)
+    # جلب بيانات كافية للتحليل أو لفحص النتيجة
+    ws.send(json.dumps({"ticks_history": SYMBOL, "count": 1500, "end": "latest", "style": "ticks"}))
 
 def start_engine():
     while True:
         now = datetime.now(BEIRUT_TZ)
-        if is_waiting_for_result and now >= target_result_time and now.second <= 2:
-            time.sleep(1); ws = websocket.WebSocketApp(WS_URL, on_open=on_open, on_message=on_message); ws.run_forever(); time.sleep(5); continue
         
-        # التحليل عند الثانية 0 من كل دقيقة تمر
-        if now.second == 0 and not is_waiting_for_result:
+        # 1. فحص النتيجة (بعد 5 دقائق من وقت الدخول المخطط له)
+        if is_waiting_for_result and now >= target_result_time and now.second <= 2:
+            time.sleep(1)
+            ws = websocket.WebSocketApp(WS_URL, on_open=on_open, on_message=on_message)
+            ws.run_forever()
+            time.sleep(5)
+            continue
+            
+        # 2. التحليل عند الثانية 01 من كل دقيقة
+        if now.second == 1 and not is_waiting_for_result:
             ws = websocket.WebSocketApp(WS_URL, on_open=on_open, on_message=on_message)
             ws.run_forever(ping_timeout=15)
             time.sleep(1)
-        else:
-            time.sleep(0.5)
+        
+        time.sleep(0.5)
 
 if __name__ == "__main__":
+    # تشغيل السيرفر لضمان عدم توقف البوت على Render
     threading.Thread(target=run_flask, daemon=True).start()
     start_engine()
