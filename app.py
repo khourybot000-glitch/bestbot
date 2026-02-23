@@ -9,14 +9,10 @@ import threading
 from flask import Flask
 import os
 
-# --- Flask Server for Deployment ---
+# --- Flask Server ---
 app = Flask(__name__)
 @app.route('/')
-def health_check(): return "EURGBP Bot: Final Strategy Active", 200
-
-def run_flask():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+def health_check(): return "Bot Active: 30s Analysis - Next Min Entry", 200
 
 # --- Configuration ---
 TOKEN = '8511172742:AAFxZIj8N07FB-tFnJ_l3rv13loyRMmsRYU'
@@ -33,100 +29,79 @@ pending_direction = None
 
 def send_telegram_msg(text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    try:
-        requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}, timeout=10)
-    except:
-        pass
+    try: requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}, timeout=10)
+    except: pass
 
 def analyze_strategy(history):
     global is_waiting_for_result, trade_entry_time, target_result_time, pending_direction
     
-    # تحويل التيكات إلى DataFrame
     df = pd.DataFrame({
         'price': history['prices'],
         'time': [datetime.fromtimestamp(t, tz=pytz.utc).astimezone(BEIRUT_TZ) for t in history['times']]
     })
     
     now = datetime.now(BEIRUT_TZ)
-    # تصفير الثواني للدقيقة التي نحن فيها الآن (مثلاً 14:04:00)
-    t_anchor = now.replace(second=0, microsecond=0)
+    t_ref = now.replace(second=0, microsecond=0) # بداية الدقيقة الحالية (مثلاً 12:06:00)
     
-    candle_results = [] # 1 للخصراء، -1 للحمراء
+    # تقسيم الفترات (30 ثانية لكل فترة)
+    # الفترة C: من 12:06:00 إلى 12:06:30
+    c_start, c_end = t_ref, t_ref + timedelta(seconds=30)
+    # الفترة B: من 12:05:30 إلى 12:06:00
+    b_start, b_end = t_ref - timedelta(seconds=30), t_ref
+    # الفترة A: من 12:05:00 إلى 12:05:30
+    a_start, a_end = t_ref - timedelta(seconds=60), t_ref - timedelta(seconds=30)
 
-    # فحص آخر 4 شموع دقيقة أغلقت قبل هذه الدقيقة
-    # إذا نحن في 14:04، سنفحص شموع: 14:00، 14:01، 14:02، 14:03
-    for i in range(1, 5):
-        start_range = t_anchor - timedelta(minutes=i)
-        end_range = t_anchor - timedelta(minutes=i-1)
-        
-        minute_data = df[(df['time'] >= start_range) & (df['time'] < end_range)]
-        
-        if len(minute_data) < 2:
-            candle_results.append(0)
-            continue
-            
-        open_p = minute_data['price'].iloc[0]
-        close_p = minute_data['price'].iloc[-1]
-        
-        if close_p > open_p:
-            candle_results.append(1)
-        elif close_p < open_p:
-            candle_results.append(-1)
-        else:
-            candle_results.append(0)
+    def get_dir(start, end):
+        data = df[(df['time'] >= start) & (df['time'] < end)]
+        if len(data) < 2: return None
+        return "UP" if data['price'].iloc[-1] > data['price'].iloc[0] else "DOWN"
 
-    # تحديد الإشارة
-    direction = None
-    if all(r == 1 for r in candle_results):
-        direction = "CALL (BUY)"
-    elif all(r == -1 for r in candle_results):
-        direction = "PUT (SELL)"
+    dir_a = get_dir(a_start, a_end)
+    dir_b = get_dir(b_start, b_end)
+    dir_c = get_dir(c_start, c_end)
 
-    if direction:
-        # وقت الدخول: الدقيقة القادمة (مثلاً 14:05:00)
-        trade_entry_time = t_anchor + timedelta(minutes=1)
-        # وقت النتيجة: بعد 5 دقائق من الدخول (مثلاً 14:10:00)
-        target_result_time = trade_entry_time + timedelta(minutes=5)
-        pending_direction = direction
+    if not all([dir_a, dir_b, dir_c]): return
+
+    # الشرط: تعاكس في الاتجاه (ليست كلها في نفس الاتجاه)
+    if not (dir_a == dir_b == dir_c):
+        trade_type = "CALL (BUY)" if dir_c == "UP" else "PUT (SELL)"
         
-        msg = (f"🔮 **EURGBP NEXT-MIN SIGNAL**\n"
-               f"📊 Analysis Period: Last 4 Mins\n"
-               f"🕯 Candles: {'🟢' if direction == 'CALL (BUY)' else '🔴'} x 4\n"
-               f"🎯 Action: *{direction}*\n"
-               f"🕐 **Entry At: {trade_entry_time.strftime('%H:%M:00')}**\n"
-               f"⏱ Duration: 5 Minutes")
+        # وقت الدخول: بداية الدقيقة التالية (مثلاً 12:07:00)
+        trade_entry_time = t_ref + timedelta(minutes=1)
+        # وقت النهاية: بعد دقيقة واحدة من الدخول (مثلاً 12:08:00)
+        target_result_time = trade_entry_time + timedelta(minutes=1)
+        pending_direction = trade_type
+        
+        msg = (f"🕒 **NEXT-MINUTE SCALP**\n"
+               f"📊 30s Intervals: {dir_a} | {dir_b} | {dir_c}\n"
+               f"🎯 Action: *{trade_type}*\n"
+               f"🕐 **Entry Time: {trade_entry_time.strftime('%H:%M:00')}**\n"
+               f"⏱ Duration: 1 Minute\n"
+               f"📢 (Prepare to enter next minute)")
         send_telegram_msg(msg)
         is_waiting_for_result = True
     else:
-        # لوج داخلي للمراقبة في سيرفر Render
-        print(f"Time: {now.strftime('%H:%M:%S')} - Pattern not found. Results: {candle_results}")
+        print(f"[{now.strftime('%H:%M:%S')}] Trend is consistent ({dir_c}), no trade.")
 
 def check_result(history):
     global is_waiting_for_result
-    df = pd.DataFrame({
-        'price': history['prices'],
-        'time': [datetime.fromtimestamp(t, tz=pytz.utc).astimezone(BEIRUT_TZ) for t in history['times']]
-    })
+    df = pd.DataFrame({'price': history['prices'], 'time': [datetime.fromtimestamp(t, tz=pytz.utc).astimezone(BEIRUT_TZ) for t in history['times']]})
     
-    # فحص النطاق السعري للصفقة الفعلية
-    trade_window = df[(df['time'] >= trade_entry_time) & (df['time'] < target_result_time)]
-    
-    if trade_window.empty: return
+    # فحص الصفقة في دقيقتها المحددة
+    trade_data = df[(df['time'] >= trade_entry_time) & (df['time'] < target_result_time)]
+    if trade_data.empty: return
 
-    entry_p = trade_window['price'].iloc[0]
-    exit_p = trade_window['price'].iloc[-1]
-    
+    entry_p, exit_p = trade_data['price'].iloc[0], trade_data['price'].iloc[-1]
     won = (exit_p > entry_p) if pending_direction == "CALL (BUY)" else (exit_p < entry_p)
-    status = "✅ WIN" if won else "❌ LOSS"
     
-    send_telegram_msg(f"{status} (EURGBP)\nEntry: {entry_p}\nExit: {exit_p}\nDuration: 5m")
+    status = "✅ WIN" if won else "❌ LOSS"
+    send_telegram_msg(f"{status} (EURGBP)\nQuick Scalp Result")
     is_waiting_for_result = False
 
 def on_message(ws, message):
     data = json.loads(message)
     if 'history' in data:
         if is_waiting_for_result:
-            # نتأكد أن الوقت الحالي تجاوز وقت النتيجة
             if datetime.now(BEIRUT_TZ) >= target_result_time:
                 check_result(data['history'])
         else:
@@ -134,23 +109,22 @@ def on_message(ws, message):
     ws.close()
 
 def on_open(ws):
-    # جلب بيانات كافية للتحليل أو لفحص النتيجة
-    ws.send(json.dumps({"ticks_history": SYMBOL, "count": 1500, "end": "latest", "style": "ticks"}))
+    ws.send(json.dumps({"ticks_history": SYMBOL, "count": 600, "end": "latest", "style": "ticks"}))
 
 def start_engine():
     while True:
         now = datetime.now(BEIRUT_TZ)
         
-        # 1. فحص النتيجة (بعد 5 دقائق من وقت الدخول المخطط له)
+        # فحص النتيجة بعد انتهاء دقيقة الصفقة
         if is_waiting_for_result and now >= target_result_time and now.second <= 2:
             time.sleep(1)
             ws = websocket.WebSocketApp(WS_URL, on_open=on_open, on_message=on_message)
             ws.run_forever()
-            time.sleep(5)
+            time.sleep(2)
             continue
             
-        # 2. التحليل عند الثانية 01 من كل دقيقة
-        if now.second == 1 and not is_waiting_for_result:
+        # التحليل عند الثانية 30 من كل دقيقة
+        if now.second == 30 and not is_waiting_for_result:
             ws = websocket.WebSocketApp(WS_URL, on_open=on_open, on_message=on_message)
             ws.run_forever(ping_timeout=15)
             time.sleep(1)
@@ -158,6 +132,5 @@ def start_engine():
         time.sleep(0.5)
 
 if __name__ == "__main__":
-    # تشغيل السيرفر لضمان عدم توقف البوت على Render
-    threading.Thread(target=run_flask, daemon=True).start()
+    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000))), daemon=True).start()
     start_engine()
