@@ -12,7 +12,7 @@ import os
 # --- Flask Server ---
 app = Flask(__name__)
 @app.route('/')
-def health_check(): return "Bot Active: 150 Ticks Strategy", 200
+def health_check(): return "Bot Active: 150 Ticks Logic", 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -35,7 +35,7 @@ is_waiting_for_result = False
 is_martingale_step = False
 pending_trade_direction = None
 pending_trade_symbol = None
-target_result_time = None # سيحتوي على الدقيقة والساعة
+target_result_time = None
 
 def send_telegram_msg(text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
@@ -43,17 +43,14 @@ def send_telegram_msg(text):
         requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}, timeout=10)
     except: pass
 
-def check_trade_result(ticks, symbol):
+def check_trade_result(candles, symbol):
     global is_waiting_for_result, is_martingale_step, pending_trade_direction, target_result_time, pending_trade_symbol
-    if not ticks or len(ticks) < 30: return
+    if not candles: return
     
-    # الفحص عند الثانية 30 يعني نحتاج أول 30 تيك من الدقيقة الجديدة
-    open_p = ticks[0]
-    close_p = ticks[29] if len(ticks) >= 30 else ticks[-1]
+    last_candle = candles[-1]
+    won = (last_candle['close'] > last_candle['open']) if pending_trade_direction == "CALL (BUY)" else (last_candle['close'] < last_candle['open'])
     
-    won = (close_p > open_p) if pending_trade_direction == "CALL (BUY)" else (close_p < open_p)
     symbol_name = symbol.replace("frx","")
-
     if won:
         send_telegram_msg(f"✅ **{'WIN' if not is_martingale_step else 'MTG WIN'} ({symbol_name})**")
         is_waiting_for_result = is_martingale_step = False
@@ -62,8 +59,8 @@ def check_trade_result(ticks, symbol):
         if not is_martingale_step:
             is_martingale_step = True
             now = datetime.now(BEIRUT_TZ)
-            # المضاعفة تنتهي بعد 30 ثانية أخرى
-            target_result_time = (now + timedelta(seconds=60)).strftime('%H:%M:%S')
+            # النتيجة القادمة بعد دقيقة (شمعة المضاعفة)
+            target_result_time = (now + timedelta(minutes=1)).strftime('%H:%M')
         else:
             send_telegram_msg(f"❌ **MTG LOSS ({symbol_name})**")
             is_waiting_for_result = is_martingale_step = False
@@ -73,28 +70,24 @@ def analyze_strategy(ticks, symbol):
     global is_waiting_for_result, pending_trade_direction, target_result_time, pending_trade_symbol
     if is_waiting_for_result or len(ticks) < 150: return
     
-    # تقسيم 150 تيك: 60 (ش1), 60 (ش2), 30 (ش3)
-    c1_ticks = ticks[0:60]
-    c2_ticks = ticks[60:120]
-    c3_ticks = ticks[120:150]
+    # تقسيم: 60 تيك، 60 تيك، 30 تيك
+    c1 = ticks[0:60]
+    c2 = ticks[60:120]
+    c3 = ticks[120:150]
     
-    # تحديد اتجاه كل شمعة (Open vs Close)
-    c1_dir = 1 if c1_ticks[-1] > c1_ticks[0] else -1 # 1 صاعدة، -1 هابطة
-    c2_dir = 1 if c2_ticks[-1] > c2_ticks[0] else -1
-    c3_dir = 1 if c3_ticks[-1] > c3_ticks[0] else -1
+    # الاتجاهات
+    d1 = 1 if c1[-1] > c1[0] else -1
+    d2 = 1 if c2[-1] > c2[0] else -1
+    d3 = 1 if c3[-1] > c3[0] else -1
     
-    # الشرط: كل شمعة عكس الثانية (1, -1, 1) أو (-1, 1, -1)
-    if c1_dir != c2_dir and c2_dir != c3_dir:
-        direction = "CALL (BUY)" if c3_dir == 1 else "PUT (SELL)"
-        
+    # شرط: عكس بعض (مثال: صاعد-هابط-صاعد)
+    if d1 != d2 and d2 != d3:
+        direction = "CALL (BUY)" if d3 == 1 else "PUT (SELL)"
         now = datetime.now(BEIRUT_TZ)
-        entry_time = (now + timedelta(seconds=0)).strftime('%H:%M:%S')
-        # الفحص عند الثانية 30 من الدقيقة القادمة
-        res_dt = now + timedelta(minutes=1)
-        target_result_time = res_dt.replace(second=30).strftime('%H:%M:%S')
+        entry_time = (now + timedelta(seconds=30)).strftime('%H:%M')
+        target_result_time = (now + timedelta(seconds=90)).strftime('%H:%M')
         
-        asset_name = symbol.replace("frx", "")
-        msg = (f"🚀 **150-TICKS SIGNAL**\n🏆 Asset: {asset_name}\n🎯 Direction: *{direction}*\n🕐 Entry: {entry_time}\n⏱ Result at: Second :30")
+        msg = (f"🚀 **150-TICKS SIGNAL**\n🏆 Asset: {symbol.replace('frx','')}\n🎯 Direction: *{direction}*\n🕐 Entry: {entry_time}\n⏱ Duration: 1 Min")
         send_telegram_msg(msg)
         
         is_waiting_for_result = True
@@ -105,18 +98,19 @@ def on_message(ws, message):
     data = json.loads(message)
     if 'history' in data:
         symbol = data.get('echo_req', {}).get('ticks_history')
-        ticks = data['history']['prices']
+        prices = data['history']['prices']
         
         if is_waiting_for_result and symbol == pending_trade_symbol:
-            check_trade_result(ticks, symbol)
+            # تحويل التيكات لشمعة للفحص
+            candles = [{'open': prices[0], 'close': prices[-1]}]
+            check_trade_result(candles, symbol)
         elif not is_waiting_for_result:
-            analyze_strategy(ticks, symbol)
+            analyze_strategy(prices, symbol)
     ws.close()
 
 def on_open(ws):
     if is_waiting_for_result:
-        # نحتاج 30 تيك للفحص
-        ws.send(json.dumps({"ticks_history": pending_trade_symbol, "count": 30, "end": "latest", "style": "ticks"}))
+        ws.send(json.dumps({"ticks_history": pending_trade_symbol, "count": 60, "end": "latest", "style": "ticks"}))
     else:
         for s in SYMBOLS:
             ws.send(json.dumps({"ticks_history": s, "count": 150, "end": "latest", "style": "ticks"}))
@@ -126,18 +120,19 @@ def start_engine():
     global is_waiting_for_result, target_result_time
     while True:
         now = datetime.now(BEIRUT_TZ)
-        current_full_time = now.strftime('%H:%M:%S')
+        current_hm = now.strftime('%H:%M')
         
-        # فحص النتيجة عند الثانية 30 المحددة
-        if is_waiting_for_result and current_full_time == target_result_time:
+        # فحص النتيجة عند الثانية 00 من الدقيقة المستهدفة
+        if is_waiting_for_result and current_hm == target_result_time and now.second == 0:
+            time.sleep(0.5)
             ws = websocket.WebSocketApp(WS_URL, on_open=on_open, on_message=on_message)
             ws.run_forever()
             time.sleep(2)
             continue
 
-        # البحث عن فرص عند بداية كل دقيقة (الثانية 00)
+        # التحليل عند الثانية 30 من كل دقيقة
         if 9 <= now.hour < 21 and now.weekday() <= 4:
-            if now.second == 0 and not is_waiting_for_result:
+            if now.second == 30 and not is_waiting_for_result:
                 ws = websocket.WebSocketApp(WS_URL, on_open=on_open, on_message=on_message)
                 ws.run_forever(ping_timeout=15)
                 time.sleep(1)
