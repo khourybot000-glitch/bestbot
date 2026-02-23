@@ -9,10 +9,10 @@ import threading
 from flask import Flask
 import os
 
-# --- Flask Health Check for Deployment ---
+# --- Flask Server for Render Health Check ---
 app = Flask(__name__)
 @app.route('/')
-def health_check(): return "Bot Active: 5m Time-Based Strategy", 200
+def health_check(): return "Bot Status: Active - 5m Time-Based Strategy", 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -46,57 +46,56 @@ def send_telegram_msg(text):
 def analyze_strategy(history, symbol):
     global is_waiting_for_result, pending_trade_direction, target_result_time, pending_trade_symbol, trade_entry_time
     
-    # Create DataFrame from Ticks
+    # تحويل التيكات إلى DataFrame
     df = pd.DataFrame({
         'price': history['prices'],
         'time': [datetime.fromtimestamp(t, tz=pytz.utc).astimezone(BEIRUT_TZ) for t in history['times']]
     })
     
-    # 1. Calculate General Trend (First vs Last of 6000 ticks)
-    general_trend = "UP" if df['price'].iloc[-1] > df['price'].iloc[0] else "DOWN"
-    
-    # 2. Time-Based Candle Splitting (Last 4 Minutes)
     now = datetime.now(BEIRUT_TZ)
-    t0 = now.replace(second=0, microsecond=0)
+    # تصفير الثواني للحصول على بداية الدقيقة الحالية (الدقيقة 4، 9، 14...)
+    t_anchor = now.replace(second=0, microsecond=0)
     
     candle_dirs = []
+    # فحص آخر 4 دقائق بناءً على توقيت الساعة الحقيقي
     for i in range(1, 5):
-        start_range = t0 - timedelta(minutes=i)
-        end_range = t0 - timedelta(minutes=i-1)
+        start_range = t_anchor - timedelta(minutes=i)
+        end_range = t_anchor - timedelta(minutes=i-1)
         
-        # Filter ticks for this specific minute
+        # فلترة التيكات لكل دقيقة على حدة
         minute_data = df[(df['time'] >= start_range) & (df['time'] < end_range)]
         if not minute_data.empty:
+            # إذا سعر الإغلاق (آخر تيك في الدقيقة) أكبر من الافتتاح (أول تيك)
             direction = "UP" if minute_data['price'].iloc[-1] > minute_data['price'].iloc[0] else "DOWN"
             candle_dirs.append(direction)
 
+    # يجب أن يكون لدينا تحليل لـ 4 شموع كاملة
     if len(candle_dirs) < 4: return
 
-    # 3. Entry Conditions
-    signal_direction = None
-    # If Trend is UP and last 4 1m-candles are UP -> CALL
-    if general_trend == "UP" and all(d == "UP" for d in candle_dirs):
-        signal_direction = "CALL (BUY)"
-    # If Trend is DOWN and last 4 1m-candles are DOWN -> PUT
-    elif general_trend == "DOWN" and all(d == "DOWN" for d in candle_dirs):
-        signal_direction = "PUT (SELL)"
+    # منطق الإشارة: 4 شموع متتالية بنفس الاتجاه
+    trade_type = None
+    if all(d == "UP" for d in candle_dirs):
+        trade_type = "CALL (BUY)"
+    elif all(d == "DOWN" for d in candle_dirs):
+        trade_type = "PUT (SELL)"
 
-    if signal_direction:
-        trade_entry_time = t0  # Current minute 00:00
+    if trade_type:
+        # الدخول يكون مع بداية الدقيقة الخامسة (التي تبدأ الآن)
+        trade_entry_time = t_anchor 
+        # النتيجة بعد 5 دقائق بالضبط
         target_result_time = trade_entry_time + timedelta(minutes=5)
         
-        msg = (f"🎯 **NEW SIGNAL**\n"
+        msg = (f"🎯 **TIME-ALIGNED SIGNAL**\n"
                f"🏆 Asset: {symbol.replace('frx','')}\n"
-               f"📈 Trend: {general_trend}\n"
-               f"🕯 Pattern: 4 Same-Color Candles\n"
-               f"🎯 Action: *{signal_direction}*\n"
+               f"🕯 Pattern: 4 Consecutive Candles\n"
+               f"🎯 Action: *{trade_type}*\n"
                f"🕐 Entry: {trade_entry_time.strftime('%H:%M')}\n"
                f"⏱ Duration: 5 Minutes\n"
                f"🚫 No Martingale")
         send_telegram_msg(msg)
         
         is_waiting_for_result = True
-        pending_trade_direction = signal_direction
+        pending_trade_direction = trade_type
         pending_trade_symbol = symbol
 
 def check_trade_result(history, symbol):
@@ -107,21 +106,20 @@ def check_trade_result(history, symbol):
         'time': [datetime.fromtimestamp(t, tz=pytz.utc).astimezone(BEIRUT_TZ) for t in history['times']]
     })
     
-    # Filter Ticks strictly within the 5-minute trade window
+    # فحص النطاق السعري للصفقة (من بداية الدقيقة 0 إلى نهاية الدقيقة 5)
     trade_window = df[(df['time'] >= trade_entry_time) & (df['time'] < target_result_time)]
     
     if trade_window.empty: return
 
-    entry_price = trade_window['price'].iloc[0]
-    exit_price = trade_window['price'].iloc[-1]
+    entry_p = trade_window['price'].iloc[0]
+    exit_p = trade_window['price'].iloc[-1]
     
-    won = (exit_price > entry_price) if pending_trade_direction == "CALL (BUY)" else (exit_price < entry_price)
-    asset_name = symbol.replace("frx","")
-
+    won = (exit_p > entry_p) if pending_trade_direction == "CALL (BUY)" else (exit_p < entry_p)
     status = "✅ WIN" if won else "❌ LOSS"
-    send_telegram_msg(f"{status} ({asset_name})\nCalculation: Time-Based (5m)")
     
-    # Reset lock to analyze 20 pairs again
+    send_telegram_msg(f"{status} ({symbol.replace('frx','')})\nExit Price: {exit_p}\nTime: {target_result_time.strftime('%H:%M')}")
+    
+    # فتح القفل للبحث عن صفقات جديدة
     is_waiting_for_result = False
     pending_trade_symbol = target_result_time = trade_entry_time = None
 
@@ -137,19 +135,19 @@ def on_message(ws, message):
 
 def on_open(ws):
     if is_waiting_for_result:
-        # Fetch 600 ticks to ensure coverage of the 5-minute result window
-        ws.send(json.dumps({"ticks_history": pending_trade_symbol, "count": 600, "end": "latest", "style": "ticks"}))
+        # جلب تيكات كافية لتغطية الـ 5 دقائق الماضية
+        ws.send(json.dumps({"ticks_history": pending_trade_symbol, "count": 1000, "end": "latest", "style": "ticks"}))
     else:
+        # جلب تيكات لـ 20 زوجاً (آخر 10 دقائق للتحليل)
         for s in SYMBOLS:
-            # Fetch 6000 ticks for trend and 4-minute candle analysis
-            ws.send(json.dumps({"ticks_history": s, "count": 6000, "end": "latest", "style": "ticks"}))
+            ws.send(json.dumps({"ticks_history": s, "count": 1000, "end": "latest", "style": "ticks"}))
             time.sleep(0.05)
 
 def start_engine():
     while True:
         now = datetime.now(BEIRUT_TZ)
         
-        # 1. Result Check: 5 minutes after Entry
+        # 1. فحص النتيجة (بعد 5 دقائق من الدخول)
         if is_waiting_for_result and now >= target_result_time and now.second <= 2:
             time.sleep(1)
             ws = websocket.WebSocketApp(WS_URL, on_open=on_open, on_message=on_message)
@@ -157,9 +155,10 @@ def start_engine():
             time.sleep(5)
             continue
         
-        # 2. Analysis Trigger: At minute 4, 9, 14, 19... etc. (End of the 4th candle)
-        # This triggers right at second 00 of the 5th candle start.
-        if now.minute % 5 == 0 and now.second == 0 and not is_waiting_for_result:
+        # 2. لحظة التحليل (الدقيقة الرابعة من كل دورة 5 دقائق)
+        # 04, 09, 14, 19, 24, 29, 34, 39, 44, 49, 54, 59
+        if (now.minute + 1) % 5 == 0 and now.second == 0 and not is_waiting_for_result:
+            print(f"Triggering analysis for all pairs at {now.strftime('%H:%M:%S')}")
             ws = websocket.WebSocketApp(WS_URL, on_open=on_open, on_message=on_message)
             ws.run_forever(ping_timeout=15)
             time.sleep(1)
@@ -167,5 +166,6 @@ def start_engine():
             time.sleep(0.5)
 
 if __name__ == "__main__":
+    # تشغيل سيرفر Flask في الخلفية لضمان بقاء Render نشطاً
     threading.Thread(target=run_flask, daemon=True).start()
     start_engine()
