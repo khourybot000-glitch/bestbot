@@ -13,140 +13,130 @@ import os
 # --- Flask Server ---
 app = Flask(__name__)
 @app.route('/')
-def health_check(): return "Bot Active: 4m 50s Timer Logic", 200
+def health_check(): return "Tick-to-Candle Bot Active", 200
 
 # --- Configuration ---
 TOKEN = '8511172742:AAFxZIj8N07FB-tFnJ_l3rv13loyRMmsRYU'
 CHAT_ID = '-1003731752986'
 BEIRUT_TZ = pytz.timezone('Asia/Beirut')
 WS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
-
-SYMBOLS = ["frxEURGBP", "frxEURUSD", "frxEURJPY"]
-RSI_PERIOD = 14
-RSI_ALERT_LOW = 30
-RSI_ALERT_HIGH = 70
+SYMBOL = "frxEURGBP"
 
 is_bot_busy = False
-pending_observation = {} 
+active_trade = {}
 
 def send_telegram_msg(text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     try: requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}, timeout=10)
     except: pass
 
-def calculate_rsi(prices, period=14):
-    if len(prices) < period + 1: return np.array([50] * len(prices))
-    deltas = np.diff(prices)
-    seed = deltas[:period+1]
-    up = seed[seed >= 0].sum()/period
-    down = -seed[seed < 0].sum()/period
-    if down == 0: return np.array([100] * len(prices))
-    rs = up/down
-    rsi = np.zeros_like(prices)
-    rsi[:period] = 100. - 100./(1. + rs)
-    for i in range(period, len(prices)):
-        delta = deltas[i-1]
-        upval = delta if delta > 0 else 0.
-        downval = -delta if delta < 0 else 0.
-        up = (up * (period - 1) + upval) / period
-        down = (down * (period - 1) + downval) / period
-        if down == 0: rsi[i] = 100
-        else:
-            rs = up / down
-            rsi[i] = 100. - 100. / (1. + rs)
-    return rsi
-
-def start_watching_trend():
-    global pending_observation, is_bot_busy
-    if is_bot_busy or pending_observation: return
-
-    for symbol in SYMBOLS:
-        try:
-            ws = websocket.create_connection(WS_URL)
-            ws.send(json.dumps({"ticks_history": symbol, "count": 500, "end": "latest", "style": "ticks"}))
-            res = json.loads(ws.recv()); ws.close()
-            
-            prices = res['history']['prices']
-            rsi_val = calculate_rsi(prices, RSI_PERIOD)[-1]
-
-            # تفعيل المراقبة عند لمس التشبع
-            if rsi_val <= RSI_ALERT_LOW or rsi_val >= RSI_ALERT_HIGH:
-                pending_observation = {
-                    "symbol": symbol,
-                    "start_price": prices[-1],
-                    # المؤقت لـ 4 دقائق و 50 ثانية
-                    "obs_end_time": datetime.now(BEIRUT_TZ) + timedelta(minutes=4, seconds=50)
-                }
-                print(f"Monitoring {symbol} for 4m 50s...")
-                break
-        except: pass
-
-def analyze_and_send_signal():
-    global pending_observation, is_bot_busy, active_trade_data
-    if not pending_observation: return
-    
-    now = datetime.now(BEIRUT_TZ)
-    # التأكد من مرور الـ 4:50 دقيقة والوصول للثانية 40 المطلوبة
-    if now < pending_observation['obs_end_time'] or now.second < 40: return
-
-    symbol = pending_observation['symbol']
+def get_ticks_and_build_candle(symbol, minutes_back):
+    """يجلب التيكات ويحولها إلى شمعة (Open, Close) بناءً على الوقت"""
     try:
         ws = websocket.create_connection(WS_URL)
-        ws.send(json.dumps({"ticks_history": symbol, "count": 5, "style": "ticks"}))
-        res = json.loads(ws.recv()); ws.close()
-        current_price = res['history']['prices'][-1]
-        start_price = pending_observation['start_price']
-        
-        direction = "CALL (BUY)" if current_price > start_price else "PUT (SELL)"
+        # نطلب تيكات تكفي للفترة المطلوبة (تقريباً تيك كل ثانية)
+        count = (minutes_back * 60) + 100 
+        ws.send(json.dumps({"ticks_history": symbol, "count": count, "end": "latest", "style": "ticks"}))
+        res = json.loads(ws.recv())
+        ws.close()
 
-        is_bot_busy = True
-        entry_time = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
-        active_trade_data = {
-            "symbol": symbol,
-            "entry_time": entry_time,
-            "exit_time": entry_time + timedelta(minutes=5),
-            "direction": "CALL" if "CALL" in direction else "PUT"
-        }
-        send_telegram_msg(f"🎯 **SIGNAL CONFIRMED**\n🌍 Pair: {symbol.replace('frx','')}\n📈 Direction: *{direction}*\n🕐 Entry: {entry_time.strftime('%H:%M:00')}\n⏱ Duration: 5m")
+        prices = res['history']['prices']
+        times = res['history']['times']
         
-        pending_observation = {} 
-    except: pending_observation = {}
+        df = pd.DataFrame({
+            'price': prices,
+            'time': [datetime.fromtimestamp(t, tz=pytz.utc).astimezone(BEIRUT_TZ) for t in times]
+        })
+
+        # تحديد بداية الفترة المطلوبة
+        start_time = datetime.now(BEIRUT_TZ).replace(second=0, microsecond=0) - timedelta(minutes=minutes_back)
+        period_ticks = df[df['time'] >= start_time]
+
+        if period_ticks.empty: return None
+        
+        return {
+            'open': period_ticks['price'].iloc[0],
+            'close': period_ticks['price'].iloc[-1]
+        }
+    except Exception as e:
+        print(f"Tick Error: {e}")
+        return None
+
+def analyze_reversal():
+    global is_bot_busy, active_trade
+    now = datetime.now(BEIRUT_TZ)
+    
+    if (now.minute + 1) % 15 != 0: return
+
+    try:
+        # بناء شمعة الـ 15 دقيقة من التيكات
+        c15 = get_ticks_and_build_candle(SYMBOL, 15)
+        # بناء شمعة الدقيقة الماضية (الدقيقة 13) من التيكات
+        c1 = get_ticks_and_build_candle(SYMBOL, 1)
+
+        if not c15 or not c1: return
+
+        direction = None
+        if c15['close'] > c15['open'] and c1['close'] > c1['open']:
+            direction = "PUT"
+        elif c15['close'] < c15['open'] and c1['close'] < c1['open']:
+            direction = "CALL"
+
+        if direction:
+            is_bot_busy = True
+            entry_time = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
+            active_trade = {
+                "symbol": SYMBOL,
+                "direction": direction,
+                "entry_time": entry_time,
+                "exit_time": entry_time + timedelta(minutes=1),
+                "is_martingale": False
+            }
+            send_telegram_msg(f"🚨 **TICK-BASED SIGNAL**\n🌍 Pair: EURGBP\n🎯 Action: *{direction}*\n🕐 Entry: {entry_time.strftime('%H:%M:00')}\n⏱ Duration: 1m")
+            
+    except Exception as e: print(f"Analysis Error: {e}")
 
 def check_result():
-    global is_bot_busy, active_trade_data
+    global is_bot_busy, active_trade
     now = datetime.now(BEIRUT_TZ)
-    if not is_bot_busy or now < active_trade_data['exit_time']: return
+    if not is_bot_busy or now < active_trade['exit_time']: return
 
     try:
-        ws = websocket.create_connection(WS_URL)
-        ws.send(json.dumps({"ticks_history": active_trade_data['symbol'], "count": 500, "style": "ticks"}))
-        res = json.loads(ws.recv()); ws.close()
-        prices = res['history']['prices']
-        
-        # مقارنة بسيطة للنتيجة بناءً على آخر تيك متاح
-        win = (prices[-1] > prices[0]) if active_trade_data['direction'] == "CALL" else (prices[-1] < prices[0])
-        send_telegram_msg(f"{'✅ WIN' if win else '❌ LOSS'} ({active_trade_data['symbol'].replace('frx','')})")
-        
-        is_bot_busy = False
-    except: is_bot_busy = False
+        # فحص نتيجة الدقيقة التي انتهت بناءً على التيكات
+        c_result = get_ticks_and_build_candle(SYMBOL, 1)
+        if not c_result: return
+
+        win = (c_result['close'] > c_result['open']) if active_trade['direction'] == "CALL" else (c_result['close'] < c_result['open'])
+
+        if win:
+            msg = "✅ **WIN**" if not active_trade['is_martingale'] else "✅ **MTG WIN**"
+            send_telegram_msg(f"{msg} (EURGBP)")
+            is_bot_busy = False
+        else:
+            if not active_trade['is_martingale']:
+                # دخول المضاعفة
+                new_entry = active_trade['exit_time']
+                active_trade.update({
+                    "entry_time": new_entry,
+                    "exit_time": new_entry + timedelta(minutes=1),
+                    "is_martingale": True
+                })
+            else:
+                send_telegram_msg(f"❌ **MTG LOSS** (EURGBP)")
+                is_bot_busy = False
+    except Exception as e: print(f"Check Error: {e}")
 
 def start_engine():
+    print("Bot is building candles from raw ticks...")
     while True:
         now = datetime.now(BEIRUT_TZ)
-        # الرصد عند الثانية 50
-        if now.second == 50 and not pending_observation and not is_bot_busy:
-            threading.Thread(target=start_watching_trend).start()
-        
-        # إرسال الإشارة بعد انتهاء المؤقت وعند الثانية 40
-        if pending_observation:
-            analyze_and_send_signal()
-        
-        # فحص النتيجة
-        if is_bot_busy and now >= active_trade_data['exit_time'] and now.second == 5:
+        if now.second == 0 and not is_bot_busy:
+            analyze_reversal()
+            time.sleep(1)
+        if is_bot_busy and now >= active_trade['exit_time'] and now.second == 2:
             check_result()
-            
-        time.sleep(1)
+        time.sleep(0.5)
 
 if __name__ == "__main__":
-    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000))), daemon=True).start()
+    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000), daemon=True).start()
     start_engine()
