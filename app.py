@@ -1,6 +1,7 @@
 import websocket
 import json
 import pandas as pd
+import numpy as np
 import time
 import requests
 from datetime import datetime, timedelta
@@ -12,7 +13,7 @@ import os
 # --- Flask Server ---
 app = Flask(__name__)
 @app.route('/')
-def health_check(): return "Bot Running", 200
+def health_check(): return "RSI Reversal Bot Active", 200
 
 # --- Configuration ---
 TOKEN = '8511172742:AAFxZIj8N07FB-tFnJ_l3rv13loyRMmsRYU'
@@ -21,6 +22,9 @@ BEIRUT_TZ = pytz.timezone('Asia/Beirut')
 WS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 
 SYMBOL = "frxEURGBP"
+RSI_PERIOD = 14
+RSI_OVERBOUGHT = 70
+RSI_OVERSOLD = 30
 
 is_waiting_for_result = False
 trade_entry_time = None
@@ -32,6 +36,29 @@ def send_telegram_msg(text):
     try: requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}, timeout=10)
     except: pass
 
+def calculate_rsi(prices, period=14):
+    if len(prices) < period + 1: return 50
+    deltas = np.diff(prices)
+    seed = deltas[:period+1]
+    up = seed[seed >= 0].sum()/period
+    down = -seed[seed < 0].sum()/period
+    if down == 0: return 100
+    rs = up/down
+    rsi = np.zeros_like(prices)
+    rsi[:period] = 100. - 100./(1. + rs)
+
+    for i in range(period, len(prices)):
+        delta = deltas[i-1]
+        upval = delta if delta > 0 else 0.
+        downval = -delta if delta < 0 else 0.
+        up = (up * (period - 1) + upval) / period
+        down = (down * (period - 1) + downval) / period
+        if down == 0: rsi[i] = 100
+        else:
+            rs = up / down
+            rsi[i] = 100. - 100. / (1. + rs)
+    return rsi[-1]
+
 def analyze_strategy(history):
     global is_waiting_for_result, trade_entry_time, target_result_time, pending_direction
     
@@ -41,42 +68,43 @@ def analyze_strategy(history):
     })
     
     now = datetime.now(BEIRUT_TZ)
-    t_ref = now.replace(second=0, microsecond=0) 
+    t_anchor = now.replace(second=0, microsecond=0)
     
-    # التقسيم (30 ثانية لكل فترة)
-    c_start, c_end = t_ref, t_ref + timedelta(seconds=30)
-    b_start, b_end = t_ref - timedelta(seconds=30), t_ref
-    a_start, a_end = t_ref - timedelta(seconds=60), t_ref - timedelta(seconds=30)
+    # 1. حساب RSI للحظة الحالية (قبل إغلاق الشمعة الأخيرة)
+    current_rsi = calculate_rsi(df['price'].values, RSI_PERIOD)
+    
+    # 2. تحليل اتجاه الشمعة التي أغلقت لتوها (الدقيقة الماضية)
+    # من (now - 1 min) إلى (now)
+    last_min_start = t_anchor - timedelta(minutes=1)
+    last_min_data = df[(df['time'] >= last_min_start) & (df['time'] < t_anchor)]
+    
+    if last_min_data.empty: return
+    
+    open_p = last_min_data['price'].iloc[0]
+    close_p = last_min_data['price'].iloc[-1]
+    is_green = close_p > open_p
+    is_red = close_p < open_p
 
-    def get_dir(start, end):
-        data = df[(df['time'] >= start) & (df['time'] < end)]
-        if len(data) < 2: return None
-        return "UP" if data['price'].iloc[-1] > data['price'].iloc[0] else "DOWN"
+    trade_type = None
 
-    dir_a = get_dir(a_start, a_end)
-    dir_b = get_dir(b_start, b_end)
-    dir_c = get_dir(c_start, c_end)
+    # شرط الصعود: تشبع بيعي + شمعة تأكيد خضراء
+    if current_rsi <= RSI_OVERSOLD and is_green:
+        trade_type = "CALL (BUY)"
+    # شرط الهبوط: تشبع شرائي + شمعة تأكيد حمراء
+    elif current_rsi >= RSI_OVERBOUGHT and is_red:
+        trade_type = "PUT (SELL)"
 
-    if not all([dir_a, dir_b, dir_c]): return
-
-    # التحقق من نمط الزجزاج (بدون إظهار التفاصيل)
-    is_up_down_up = (dir_a == "UP" and dir_b == "DOWN" and dir_c == "UP")
-    is_down_up_down = (dir_a == "DOWN" and dir_b == "UP" and dir_c == "DOWN")
-
-    if is_up_down_up or is_down_up_down:
-        trade_type = "CALL (BUY)" if dir_c == "UP" else "PUT (SELL)"
-        
-        trade_entry_time = t_ref + timedelta(minutes=1)
-        target_result_time = trade_entry_time + timedelta(minutes=1)
+    if trade_type:
+        # الدخول مع بداية الدقيقة التالية
+        trade_entry_time = t_anchor
+        target_result_time = trade_entry_time + timedelta(minutes=5)
         pending_direction = trade_type
         
-        # رسالة مشفرة ومختصرة جداً
-        msg = (f"🔔 **NEW SIGNAL: {SYMBOL.replace('frx','')}**\n"
+        msg = (f"🔔 **RSI REVERSAL: {SYMBOL.replace('frx','')}**\n"
                f"----------------------------\n"
                f"🎯 Action: *{trade_type}*\n"
                f"🕐 Entry: {trade_entry_time.strftime('%H:%M:00')}\n"
-               f"⏱ Duration: 1 Minute")
-        
+               f"⏱ Duration: 5 Minutes")
         send_telegram_msg(msg)
         is_waiting_for_result = True
 
@@ -103,7 +131,7 @@ def on_message(ws, message):
     ws.close()
 
 def on_open(ws):
-    ws.send(json.dumps({"ticks_history": SYMBOL, "count": 600, "end": "latest", "style": "ticks"}))
+    ws.send(json.dumps({"ticks_history": SYMBOL, "count": 1000, "end": "latest", "style": "ticks"}))
 
 def start_engine():
     while True:
@@ -112,10 +140,11 @@ def start_engine():
             time.sleep(1)
             ws = websocket.WebSocketApp(WS_URL, on_open=on_open, on_message=on_message)
             ws.run_forever()
-            time.sleep(2)
+            time.sleep(5)
             continue
             
-        if now.second == 30 and not is_waiting_for_result:
+        # التحليل عند بداية كل دقيقة (الثانية 1) للتأكد من إغلاق الشمعة السابقة
+        if now.second == 1 and not is_waiting_for_result:
             ws = websocket.WebSocketApp(WS_URL, on_open=on_open, on_message=on_message)
             ws.run_forever(ping_timeout=15)
             time.sleep(1)
