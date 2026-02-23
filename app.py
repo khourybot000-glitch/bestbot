@@ -21,7 +21,7 @@ CHAT_ID = '-1003731752986'
 BEIRUT_TZ = pytz.timezone('Asia/Beirut')
 WS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 
-SYMBOLS = ["frxEURGBP"]
+SYMBOLS = ["frxEURGBP", "frxEURUSD", "frxEURJPY"]
 RSI_PERIOD = 14
 RSI_ALERT_LOW = 30
 RSI_ALERT_HIGH = 70
