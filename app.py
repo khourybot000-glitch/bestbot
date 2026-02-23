@@ -12,7 +12,7 @@ import os
 # --- Flask Server ---
 app = Flask(__name__)
 @app.route('/')
-def health_check(): return "Bot Active", 200
+def health_check(): return "Bot Active: 20 Pairs Mode", 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -22,13 +22,21 @@ def run_flask():
 TOKEN = '8511172742:AAFxZIj8N07FB-tFnJ_l3rv13loyRMmsRYU'
 CHAT_ID = '-1003731752986'
 BEIRUT_TZ = pytz.timezone('Asia/Beirut')
-SYMBOL = "frxEURGBP"
 WS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 
-# Status Tracking
+# قائمة الـ 20 زوجاً (Forex)
+SYMBOLS = [
+    "frxEURGBP", "frxEURUSD", "frxGBPUSD", "frxUSDJPY", "frxAUDUSD",
+    "frxUSDCAD", "frxUSDCHF", "frxEURJPY", "frxGBPJPY", "frxEURAUD",
+    "frxEURCAD", "frxAUDJPY", "frxGBPCAD", "frxNZDUSD", "frxGBPAUD",
+    "frxAUDCAD", "frxEURNZD", "frxAUDNZD", "frxGBPNZD", "frxCADJPY"
+]
+
+# Variables for status tracking
 is_waiting_for_result = False
 is_martingale_step = False
 pending_trade_direction = None
+pending_trade_symbol = None
 target_result_time = None
 
 def send_telegram_msg(text):
@@ -37,41 +45,42 @@ def send_telegram_msg(text):
         requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}, timeout=10)
     except: pass
 
-def check_trade_result(candles):
-    global is_waiting_for_result, is_martingale_step, pending_trade_direction, target_result_time
+def check_trade_result(candles, symbol):
+    global is_waiting_for_result, is_martingale_step, pending_trade_direction, target_result_time, pending_trade_symbol
     if not candles: return
     
     last_candle = candles[-1]
-    # تحديد إذا ربحت الشمعة بناءً على اتجاهها
     if pending_trade_direction == "CALL (BUY)":
         won = last_candle['close'] > last_candle['open']
     else:
         won = last_candle['close'] < last_candle['open']
     
     if won:
-        msg = "✅ **WIN**" if not is_martingale_step else "✅ **MTG WIN**"
+        msg = f"✅ **WIN ({symbol.replace('frx','')})**" if not is_martingale_step else f"✅ **MTG WIN ({symbol.replace('frx','')})**"
         send_telegram_msg(msg)
         is_waiting_for_result = False
         is_martingale_step = False
+        pending_trade_symbol = None
     else:
         if not is_martingale_step:
-            # لم يربح من الدقيقة الأولى -> تفعيل وضع المضاعفة بصمت
             is_martingale_step = True
             now = datetime.now(BEIRUT_TZ)
             target_result_time = (now + timedelta(minutes=1)).strftime('%H:%M')
-            print(f"Martingale started. Waiting for result at {target_result_time}")
         else:
-            # خسر في المضاعفة أيضاً
-            send_telegram_msg("❌ **MTG LOSS**")
+            send_telegram_msg(f"❌ **MTG LOSS ({symbol.replace('frx','')})**")
             is_waiting_for_result = False
             is_martingale_step = False
+            pending_trade_symbol = None
 
-def analyze_strategy(candles):
-    global is_waiting_for_result, pending_trade_direction, target_result_time
+def analyze_strategy(candles, symbol):
+    global is_waiting_for_result, pending_trade_direction, target_result_time, pending_trade_symbol
+    
+    # إذا وجدنا صفقة بالفعل في زوج آخر، نتوقف
+    if is_waiting_for_result: return
+
     if len(candles) < 30: return
     
     swing_highs, swing_lows = [], []
-    # البحث عن مناطق الارتداد (3 صاعد / 3 هابط)
     for i in range(0, len(candles) - 8):
         if all(candles[j]['close'] > candles[j]['open'] for j in range(i, i+3)) and \
            all(candles[j]['close'] < candles[j]['open'] for j in range(i+3, i+6)):
@@ -94,45 +103,58 @@ def analyze_strategy(candles):
         direction = "PUT (SELL)"
         level = active_sup
 
-    # --- إرسال رسالة الإشارة ---
-    if direction:
+    if direction and not is_waiting_for_result:
         now_beirut = datetime.now(BEIRUT_TZ)
         entry_time = (now_beirut + timedelta(minutes=1)).strftime('%H:%M')
         target_result_time = (now_beirut + timedelta(minutes=2)).strftime('%H:%M')
         
+        asset_name = symbol.replace("frx", "")
         signal_msg = (
             f"🚀 **NEW SIGNAL FOUND**\n\n"
-            f"🏆 Asset: EUR/GBP\n"
+            f"🏆 Asset: {asset_name}\n"
             f"🎯 Direction: *{direction}*\n"
             f"📍 Entry Level: `{level:.5f}`\n"
             f"🕐 Entry Time: {entry_time}\n"
-            f"⚠️ Duration: 1 Min (+1 MTG if needed)"
+            f"⚠️ Duration: 1 Min (+1 MTG)"
         )
         send_telegram_msg(signal_msg)
         
         is_waiting_for_result = True
         pending_trade_direction = direction
+        pending_trade_symbol = symbol
 
 def on_message(ws, message):
     data = json.loads(message)
+    
+    # معالجة بيانات تاريخ الأسعار
     if 'history' in data:
+        symbol = data.get('echo_req', {}).get('ticks_history')
         prices = data['history']['prices']
         df = pd.DataFrame(prices, columns=['price'])
         candles = []
         for i in range(0, len(df), 60):
             chunk = df.iloc[i:i+60]
             if len(chunk) == 60:
-                candles.append({'open': chunk['price'].iloc[0], 'close': chunk['price'].iloc[-1]})
+                candles.append({'open': chunk['price'].iloc[0], 'close': chunk['price'].iloc[-1], 
+                                'high': chunk['price'].max(), 'low': chunk['price'].min()})
         
-        if is_waiting_for_result:
-            check_trade_result(candles)
-        else:
-            analyze_strategy(candles)
-    ws.close()
+        if is_waiting_for_result and symbol == pending_trade_symbol:
+            check_trade_result(candles, symbol)
+        elif not is_waiting_for_result:
+            analyze_strategy(candles, symbol)
 
 def on_open(ws):
-    count = 60 if is_waiting_for_result else 6000
-    ws.send(json.dumps({"ticks_history": SYMBOL, "count": count, "end": "latest", "style": "ticks"}))
+    global is_waiting_for_result, pending_trade_symbol
+    if is_waiting_for_result:
+        # إذا ننتظر نتيجة، نطلب بيانات الزوج المفتوح فقط
+        req = {"ticks_history": pending_trade_symbol, "count": 60, "end": "latest", "style": "ticks"}
+        ws.send(json.dumps(req))
+    else:
+        # إذا نبحث عن فرص، نطلب بيانات الـ 20 زوجاً
+        for symbol in SYMBOLS:
+            req = {"ticks_history": symbol, "count": 6000, "end": "latest", "style": "ticks"}
+            ws.send(json.dumps(req))
+            time.sleep(0.1) # تأخير بسيط لتجنب ضغط الطلبات
 
 def start_engine():
     global is_waiting_for_result, target_result_time
@@ -140,19 +162,18 @@ def start_engine():
         now = datetime.now(BEIRUT_TZ)
         current_time_str = now.strftime('%H:%M')
         
-        # فحص النتيجة عند الثانية 00 بالضبط
         if is_waiting_for_result and current_time_str == target_result_time:
             ws = websocket.WebSocketApp(WS_URL, on_open=on_open, on_message=on_message)
             ws.run_forever()
-            time.sleep(1) # منع التكرار في نفس الدقيقة
+            time.sleep(1)
             continue
 
-        # العمل في الأوقات المحددة
         if 9 <= now.hour < 21 and now.weekday() <= 4:
             wait = 60 - now.second
             time.sleep(wait)
-            ws = websocket.WebSocketApp(WS_URL, on_open=on_open, on_message=on_message)
-            ws.run_forever(ping_timeout=15)
+            if not is_waiting_for_result:
+                ws = websocket.WebSocketApp(WS_URL, on_open=on_open, on_message=on_message)
+                ws.run_forever(ping_timeout=15)
         else:
             time.sleep(30)
 
