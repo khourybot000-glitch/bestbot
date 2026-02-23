@@ -12,7 +12,7 @@ import os
 # --- Flask Server ---
 app = Flask(__name__)
 @app.route('/')
-def health_check(): return "Bot Active: Breakout-Correction Mode", 200
+def health_check(): return "Bot Active: 150 Ticks Strategy", 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -35,7 +35,7 @@ is_waiting_for_result = False
 is_martingale_step = False
 pending_trade_direction = None
 pending_trade_symbol = None
-target_result_time = None
+target_result_time = None # سيحتوي على الدقيقة والساعة
 
 def send_telegram_msg(text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
@@ -43,12 +43,13 @@ def send_telegram_msg(text):
         requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}, timeout=10)
     except: pass
 
-def check_trade_result(candles, symbol):
+def check_trade_result(ticks, symbol):
     global is_waiting_for_result, is_martingale_step, pending_trade_direction, target_result_time, pending_trade_symbol
-    if not candles: return
+    if not ticks or len(ticks) < 30: return
     
-    last_candle = candles[-1]
-    open_p, close_p = last_candle['open'], last_candle['close']
+    # الفحص عند الثانية 30 يعني نحتاج أول 30 تيك من الدقيقة الجديدة
+    open_p = ticks[0]
+    close_p = ticks[29] if len(ticks) >= 30 else ticks[-1]
     
     won = (close_p > open_p) if pending_trade_direction == "CALL (BUY)" else (close_p < open_p)
     symbol_name = symbol.replace("frx","")
@@ -61,97 +62,87 @@ def check_trade_result(candles, symbol):
         if not is_martingale_step:
             is_martingale_step = True
             now = datetime.now(BEIRUT_TZ)
-            target_result_time = (now + timedelta(minutes=1)).strftime('%H:%M')
+            # المضاعفة تنتهي بعد 30 ثانية أخرى
+            target_result_time = (now + timedelta(seconds=60)).strftime('%H:%M:%S')
         else:
             send_telegram_msg(f"❌ **MTG LOSS ({symbol_name})**")
             is_waiting_for_result = is_martingale_step = False
             pending_trade_symbol = target_result_time = None
 
-def analyze_strategy(candles, symbol):
+def analyze_strategy(ticks, symbol):
     global is_waiting_for_result, pending_trade_direction, target_result_time, pending_trade_symbol
-    if is_waiting_for_result or len(candles) < 30: return
+    if is_waiting_for_result or len(ticks) < 150: return
     
-    # 1. تحديد مستويات الارتداد (3 صاعد / 3 هابط)
-    swing_highs, swing_lows = [], []
-    for i in range(0, len(candles) - 10):
-        if all(candles[j]['close'] > candles[j]['open'] for j in range(i, i+3)) and \
-           all(candles[j]['close'] < candles[j]['open'] for j in range(i+3, i+6)):
-            swing_highs.append(max(c['high'] for c in candles[i:i+6]))
-        if all(candles[j]['close'] < candles[j]['open'] for j in range(i, i+3)) and \
-           all(candles[j]['close'] > candles[j]['open'] for j in range(i+3, i+6)):
-            swing_lows.append(min(c['low'] for c in candles[i:i+6]))
-
-    if not swing_highs or not swing_lows: return
-    res, sup = swing_highs[-1], swing_lows[-1]
+    # تقسيم 150 تيك: 60 (ش1), 60 (ش2), 30 (ش3)
+    c1_ticks = ticks[0:60]
+    c2_ticks = ticks[60:120]
+    c3_ticks = ticks[120:150]
     
-    # 2. فحص الشموع الأخيرة (شمعة الاختراق وشمعة التصحيح)
-    c_break = candles[-2]  # شمعة الاختراق
-    c_corr = candles[-1]   # شمعة التصحيح
-
-    direction = None
+    # تحديد اتجاه كل شمعة (Open vs Close)
+    c1_dir = 1 if c1_ticks[-1] > c1_ticks[0] else -1 # 1 صاعدة، -1 هابطة
+    c2_dir = 1 if c2_ticks[-1] > c2_ticks[0] else -1
+    c3_dir = 1 if c3_ticks[-1] > c3_ticks[0] else -1
     
-    # منطق CALL: اختراق المقاومة للأعلى + شمعة حمراء تصحيحية أغلقت فوق المقاومة
-    if c_break['close'] > res and c_break['close'] > c_break['open']:
-        if c_corr['close'] < c_corr['open'] and c_corr['close'] > res:
-            direction = "CALL (BUY)"
-            level = res
-
-    # منطق PUT: كسر الدعم للأسفل + شمعة خضراء تصحيحية أغلقت تحت الدعم
-    elif c_break['close'] < sup and c_break['close'] < c_break['open']:
-        if c_corr['close'] > c_corr['open'] and c_corr['close'] < sup:
-            direction = "PUT (SELL)"
-            level = sup
-
-    if direction:
-        now = datetime.now(BEIRUT_TZ)
-        entry_time = (now + timedelta(minutes=1)).strftime('%H:%M')
-        target_result_time = (now + timedelta(minutes=2)).strftime('%H:%M')
+    # الشرط: كل شمعة عكس الثانية (1, -1, 1) أو (-1, 1, -1)
+    if c1_dir != c2_dir and c2_dir != c3_dir:
+        direction = "CALL (BUY)" if c3_dir == 1 else "PUT (SELL)"
         
-        msg = (f"🚀 **SIGNAL FOUND**\n🏆 Asset: {symbol.replace('frx','')}\n🎯 Direction: *{direction}*\n📍 Level: {level:.5f}\n🕐 Entry: {entry_time}")
+        now = datetime.now(BEIRUT_TZ)
+        entry_time = (now + timedelta(seconds=0)).strftime('%H:%M:%S')
+        # الفحص عند الثانية 30 من الدقيقة القادمة
+        res_dt = now + timedelta(minutes=1)
+        target_result_time = res_dt.replace(second=30).strftime('%H:%M:%S')
+        
+        asset_name = symbol.replace("frx", "")
+        msg = (f"🚀 **150-TICKS SIGNAL**\n🏆 Asset: {asset_name}\n🎯 Direction: *{direction}*\n🕐 Entry: {entry_time}\n⏱ Result at: Second :30")
         send_telegram_msg(msg)
-        is_waiting_for_result, pending_trade_direction, pending_trade_symbol = True, direction, symbol
+        
+        is_waiting_for_result = True
+        pending_trade_direction = direction
+        pending_trade_symbol = symbol
 
 def on_message(ws, message):
     data = json.loads(message)
     if 'history' in data:
         symbol = data.get('echo_req', {}).get('ticks_history')
-        prices = data['history']['prices']
-        df = pd.DataFrame(prices, columns=['price'])
-        candles = []
-        for i in range(0, len(df), 60):
-            chunk = df.iloc[i:i+60]
-            if len(chunk) == 60:
-                candles.append({'open': chunk['price'].iloc[0], 'close': chunk['price'].iloc[-1], 'high': chunk['price'].max(), 'low': chunk['price'].min()})
+        ticks = data['history']['prices']
         
         if is_waiting_for_result and symbol == pending_trade_symbol:
-            check_trade_result(candles, symbol)
+            check_trade_result(ticks, symbol)
         elif not is_waiting_for_result:
-            analyze_strategy(candles, symbol)
+            analyze_strategy(ticks, symbol)
     ws.close()
 
 def on_open(ws):
     if is_waiting_for_result:
-        ws.send(json.dumps({"ticks_history": pending_trade_symbol, "count": 60, "end": "latest", "style": "ticks"}))
+        # نحتاج 30 تيك للفحص
+        ws.send(json.dumps({"ticks_history": pending_trade_symbol, "count": 30, "end": "latest", "style": "ticks"}))
     else:
         for s in SYMBOLS:
-            ws.send(json.dumps({"ticks_history": s, "count": 6000, "end": "latest", "style": "ticks"}))
+            ws.send(json.dumps({"ticks_history": s, "count": 150, "end": "latest", "style": "ticks"}))
             time.sleep(0.05)
 
 def start_engine():
     global is_waiting_for_result, target_result_time
     while True:
         now = datetime.now(BEIRUT_TZ)
-        if is_waiting_for_result and now.strftime('%H:%M') == target_result_time:
-            time.sleep(0.5)
+        current_full_time = now.strftime('%H:%M:%S')
+        
+        # فحص النتيجة عند الثانية 30 المحددة
+        if is_waiting_for_result and current_full_time == target_result_time:
             ws = websocket.WebSocketApp(WS_URL, on_open=on_open, on_message=on_message)
             ws.run_forever()
             time.sleep(2)
             continue
+
+        # البحث عن فرص عند بداية كل دقيقة (الثانية 00)
         if 9 <= now.hour < 21 and now.weekday() <= 4:
-            time.sleep(60 - now.second)
-            if not is_waiting_for_result:
+            if now.second == 0 and not is_waiting_for_result:
                 ws = websocket.WebSocketApp(WS_URL, on_open=on_open, on_message=on_message)
                 ws.run_forever(ping_timeout=15)
+                time.sleep(1)
+            else:
+                time.sleep(0.5)
         else:
             time.sleep(30)
 
