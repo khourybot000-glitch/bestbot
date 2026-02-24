@@ -20,7 +20,7 @@ TOKEN = '8511172742:AAFxZIj8N07FB-tFnJ_l3rv13loyRMmsRYU'
 CHAT_ID = '-1003731752986'
 BEIRUT_TZ = pytz.timezone('Asia/Beirut')
 WS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
-SYMBOL = "frxEURGBP"
+SYMBOL = "frxEURJPY"
 
 # Control Variables
 last_signal_time = ""
