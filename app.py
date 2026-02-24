@@ -182,5 +182,7 @@ def start_engine():
         if active_trade: check_result_cycle()
         time.sleep(0.5)
 
-if __name__ == "__main__":
-    start_engine()
+‎if __name__ == "__main__":
+‎    port = int(os.environ.get("PORT", 10000))
+‎    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=port), daemon=True).start()
+‎    start_engine()
