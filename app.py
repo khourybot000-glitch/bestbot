@@ -169,7 +169,7 @@ def execute_signal_process():
             df_candles = resample_ticks_to_candles(res['history'])
             direction, accuracy = calculate_20_indicators(df_candles)
             
-            if accuracy >= 75:
+            if accuracy >= 51:
                 now = datetime.now(BEIRUT_TZ)
                 entry_time = (now + timedelta(seconds=30)).replace(second=0, microsecond=0)
                 active_trade = {
