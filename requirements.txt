@@ -4,3 +4,4 @@ requests
 pytz
 flask
 gunicorn
+pandas_ta
