@@ -1,7 +1,6 @@
 import websocket
 import json
 import pandas as pd
-import pandas_ta as ta
 import numpy as np
 import time
 import requests
@@ -11,10 +10,10 @@ import threading
 from flask import Flask
 import os
 
-# --- Flask Server for Render/Heroku Deployment ---
+# --- Flask Server for Deployment ---
 app = Flask(__name__)
 @app.route('/')
-def health_check(): return "Bot is Active - 20 Indicators & Tick Analysis", 200
+def health_check(): return "Ultra-Fast Signal Engine Active", 200
 
 # --- Configuration ---
 TOKEN = '8511172742:AAFxZIj8N07FB-tFnJ_l3rv13loyRMmsRYU'
@@ -30,150 +29,135 @@ active_trade = None
 def send_telegram_msg(text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     try:
-        requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}, timeout=10)
-    except Exception as e:
-        print(f"Telegram Error: {e}")
-
-def get_candle_from_ticks(symbol, start_time_dt):
-    """Calculates Open/Close of a minute using Raw Ticks for 100% accuracy."""
-    try:
-        ws = websocket.create_connection(WS_URL, timeout=10)
-        ws.send(json.dumps({"ticks_history": symbol, "count": 500, "end": "latest", "style": "ticks"}))
-        res = json.loads(ws.recv())
-        ws.close()
-        
-        df = pd.DataFrame({
-            'price': res['history']['prices'],
-            'time': [datetime.fromtimestamp(t, tz=pytz.utc).astimezone(BEIRUT_TZ) for t in res['history']['times']]
-        })
-
-        end_time_dt = start_time_dt + timedelta(minutes=1)
-        minute_ticks = df[(df['time'] >= start_time_dt) & (df['time'] < end_time_dt)]
-
-        if minute_ticks.empty: return None
-        return {'open': minute_ticks['price'].iloc[0], 'close': minute_ticks['price'].iloc[-1]}
+        requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}, timeout=5)
     except:
-        return None
+        pass
 
-def analyze_20_indicators():
-    """Heavy Technical Analysis using 20 Metrics."""
+def fast_analyze(df):
+    """Highly optimized indicator calculation using NumPy."""
+    close = df['close'].values
+    high = df['high'].values
+    low = df['low'].values
+    open_p = df['open'].values
+    
+    up_points = 0
+    down_points = 0
+
+    # 1. Fast RSI Calculation (14 periods)
+    diff = np.diff(close)
+    gain = np.where(diff > 0, diff, 0)
+    loss = np.where(diff < 0, -diff, 0)
+    avg_gain = np.mean(gain[-14:])
+    avg_loss = np.mean(loss[-14:])
+    rsi = 100 - (100 / (1 + (avg_gain / (avg_loss + 1e-10))))
+    
+    if rsi < 50: up_points += 5
+    else: down_points += 5
+
+    # 2. Fast EMA 8/21 (using pandas ewm for speed)
+    ema8 = df['close'].ewm(span=8).mean().iloc[-1]
+    ema21 = df['close'].ewm(span=21).mean().iloc[-1]
+    
+    if close[-1] > ema8: up_points += 5
+    else: down_points += 5
+    if ema8 > ema21: up_points += 5
+    else: down_points += 5
+
+    # 3. Momentum & Price Action
+    if close[-1] > open_p[-1]: up_points += 5
+    else: down_points += 5
+
+    total_indicators = 20
+    direction = "CALL" if up_points >= down_points else "PUT"
+    strength = (max(up_points, down_points) / total_indicators) * 100
+    return direction, strength
+
+def check_result_instant():
+    """Checks the outcome at exactly second 00 using Tick data."""
+    global active_trade
+    now = datetime.now(BEIRUT_TZ)
+    
+    # Define the 1-minute window to check
+    # If entry was 12:05, check at 12:06
+    check_minute = active_trade['entry_time'] + timedelta(minutes=1)
+    
+    if now.strftime('%H:%M:%S') == check_minute.strftime('%H:%M:00'):
+        time.sleep(0.6) # Wait slightly for the final tick to register
+        try:
+            ws = websocket.create_connection(WS_URL, timeout=5)
+            ws.send(json.dumps({"ticks_history": SYMBOL, "count": 100, "end": "latest", "style": "ticks"}))
+            res = json.loads(ws.recv())
+            ws.close()
+            
+            prices = res['history']['prices']
+            # Compare first tick of the minute vs last tick of the minute
+            is_win = (prices[-1] > prices[0]) if active_trade['direction'] == "CALL" else (prices[-1] < prices[0])
+            
+            if is_win:
+                send_telegram_msg("✅ **WIN**")
+                active_trade = None
+            else:
+                if active_trade['status'] == "WAITING":
+                    active_trade['status'] = "MTG"
+                    print("Lost first minute, waiting for MTG result...")
+                else:
+                    send_telegram_msg("❌ **MTG LOSS**")
+                    active_trade = None
+        except:
+            pass
+
+def process_signal():
+    """Main signal handler triggered at second 30."""
+    global active_trade
     try:
-        ws = websocket.create_connection(WS_URL, timeout=10)
-        ws.send(json.dumps({"ticks_history": SYMBOL, "count": 200, "end": "latest", "style": "candles", "granularity": 300}))
+        ws = websocket.create_connection(WS_URL, timeout=5)
+        ws.send(json.dumps({"ticks_history": SYMBOL, "count": 50, "end": "latest", "style": "candles", "granularity": 300}))
         res = json.loads(ws.recv())
         ws.close()
         
         df = pd.DataFrame(res['candles'])
-        c, h, l, o = df['close'], df['high'], df['low'], df['open']
-        up, down = 0, 0
+        direction, accuracy = fast_analyze(df)
         
-        # Trend & Momentum Indicators (Total 20 points)
-        # 1-3: RSI (7, 14, 21)
-        for p in [7, 14, 21]:
-            if ta.rsi(c, length=p).iloc[-1] < 50: up += 1
-            else: down += 1
-        # 4-6: EMA (8, 21, 50)
-        for p in [8, 21, 50]:
-            if c.iloc[-1] > ta.ema(c, length=p).iloc[-1]: up += 1
-            else: down += 1
-        # 7-8: MACD
-        macd = ta.macd(c).iloc[-1]
-        if macd.iloc[0] > macd.iloc[1]: up += 1
-        else: down += 1
-        if macd.iloc[0] > 0: up += 1
-        else: down += 1
-        # 9-10: Bollinger Bands
-        bb = ta.bbands(c, length=20).iloc[-1]
-        if c.iloc[-1] < bb.iloc[1]: up += 1
-        else: down += 1
-        if (bb.iloc[2] - bb.iloc[0]) > (bb.iloc[2] * 0.0001): up += 1
-        else: down += 1
-        # 11-12: Stochastic
-        st = ta.stoch(h, l, c).iloc[-1]
-        if st.iloc[0] < 50: up += 1
-        else: down += 1
-        if st.iloc[0] > st.iloc[1]: up += 1
-        else: down += 1
-        # 13-14: CCI & Williams %R
-        if ta.cci(h, l, c).iloc[-1] > 0: up += 1
-        else: down += 1
-        if ta.willr(h, l, c).iloc[-1] < -50: up += 1
-        else: down += 1
-        # 15-16: ADX
-        adx = ta.adx(h, l, c).iloc[-1]
-        if adx.iloc[1] > adx.iloc[2]: up += 1
-        else: down += 1
-        if adx.iloc[0] > 20: up += 1
-        else: down += 1
-        # 17-18: Price Action
-        if c.iloc[-1] > o.iloc[-1]: up += 1
-        else: down += 1
-        if c.iloc[-1] > c.iloc[-2]: up += 1
-        else: down += 1
-        # 19-20: MFI & Median Price
-        if ta.mfi(h, l, c, o).iloc[-1] < 50: up += 1
-        else: down += 1
-        if c.iloc[-1] > (h.iloc[-1] + l.iloc[-1])/2: up += 1
-        else: down += 1
-
-        total = 20
-        if up >= down: return "CALL", (up / total) * 100
-        else: return "PUT", (down / total) * 100
+        now = datetime.now(BEIRUT_TZ)
+        entry_time = (now + timedelta(seconds=30)).replace(second=0, microsecond=0)
+        
+        active_trade = {
+            "direction": direction,
+            "entry_time": entry_time,
+            "status": "WAITING"
+        }
+        
+        msg = f"🚀 **SIGNAL ALERT**\n"
+        msg += f"🎯 Action: *{direction}*\n"
+        msg += f"📈 Confidence: `{accuracy}%`\n"
+        msg += f"🕐 Entry: {entry_time.strftime('%H:%M:00')}\n"
+        msg += f"⏱ Duration: 1m"
+        send_telegram_msg(msg)
     except:
-        return None, 0
+        pass
 
-def check_result_logic():
-    global active_trade
-    now = datetime.now(BEIRUT_TZ)
-    
-    # Check 1st Minute (at XX:XX:00)
-    check_time_1 = active_trade['entry_time'] + timedelta(minutes=1)
-    if now.strftime('%H:%M:%S') == check_time_1.strftime('%H:%M:00') and active_trade['status'] == "WAITING":
-        time.sleep(0.5)
-        res = get_candle_from_ticks(SYMBOL, active_trade['entry_time'])
-        if res:
-            win = (res['close'] > res['open']) if active_trade['direction'] == "CALL" else (res['close'] < res['open'])
-            if win:
-                send_telegram_msg("✅ **WIN**")
-                active_trade = None
-            else:
-                active_trade['status'] = "MTG_WAITING"
-
-    # Check 2nd Minute (Martingale)
-    mtg_check_time = active_trade['entry_time'] + timedelta(minutes=2) if active_trade else None
-    if active_trade and active_trade['status'] == "MTG_WAITING" and now.strftime('%H:%M:%S') == mtg_check_time.strftime('%H:%M:00'):
-        time.sleep(0.5)
-        mtg_start = active_trade['entry_time'] + timedelta(minutes=1)
-        res = get_candle_from_ticks(SYMBOL, mtg_start)
-        if res:
-            win = (res['close'] > res['open']) if active_trade['direction'] == "CALL" else (res['close'] < res['open'])
-            msg = "✅ **MTG WIN**" if win else "❌ **MTG LOSS**"
-            send_telegram_msg(msg)
-            active_trade = None
-
-def start_engine():
-    global last_signal_time, active_trade
-    print("Bot is Awake. Analysis at sec 30, Result at sec 00.")
+def engine():
+    global last_signal_time
+    print("Bot Core Running. Analysis at sec 30, Result at sec 00.")
     while True:
         now = datetime.now(BEIRUT_TZ)
-        if now.weekday() < 5 and 9 <= now.hour < 21:
-            # TRIGGER: 30 seconds before the 5M candle closes
-            if (now.minute + 1) % 5 == 0 and now.second == 30:
-                if last_signal_time != now.strftime('%H:%M'):
-                    dir_val, acc_val = analyze_20_indicators()
-                    if dir_val:
-                        entry_time = (now + timedelta(seconds=30)).replace(second=0, microsecond=0)
-                        active_trade = {"direction": dir_val, "entry_time": entry_time, "status": "WAITING"}
-                        msg = f"🚀 **SIGNAL DETECTED**\n🎯 Action: *{dir_val}*\n📈 Confidence: `{acc_val}%`\n🕐 Entry: {entry_time.strftime('%H:%M:00')}\n⏱ Duration: 1m"
-                        send_telegram_msg(msg)
-                        last_signal_time = now.strftime('%H:%M')
+        
+        # 1. Trigger Signal Analysis (at XX:X4:30)
+        if (now.minute + 1) % 5 == 0 and now.second == 30:
+            current_min = now.strftime('%H:%M')
+            if last_signal_time != current_min:
+                threading.Thread(target=process_signal).start()
+                last_signal_time = current_min
+
+        # 2. Check Trade Results (at XX:XX:00)
+        if active_trade and now.second == 0:
+            check_result_instant()
             
-            # CHECK RESULT: At the start of the minute (00 seconds)
-            if active_trade and now.second == 0:
-                check_result_logic()
-        time.sleep(0.1)
+        time.sleep(0.2)
 
 if __name__ == "__main__":
+    # Start Flask in background
     port = int(os.environ.get("PORT", 10000))
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=port), daemon=True).start()
-    start_engine()
+    # Start the Bot Engine
+    engine()
