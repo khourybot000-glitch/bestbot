@@ -10,10 +10,10 @@ import threading
 from flask import Flask
 import os
 
-# --- 1. Flask Server for UptimeRobot ---
+# --- 1. Flask Server for UptimeRobot (Keeps the bot alive) ---
 app = Flask(__name__)
 @app.route('/')
-def home(): return "EMA 50 Trend Bot - Strategy 5min Cycle", 200
+def home(): return "EUR/JPY 5-Min Alignment Bot is Active", 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
@@ -35,8 +35,9 @@ def send_telegram_msg(text):
     try: requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}, timeout=10)
     except: pass
 
-# --- 3. Analysis Engine (EMA 50 + 20 Indicators) ---
+# --- 3. Strategy Engine (20 Indicators + 5m Filter) ---
 def create_20_tick_candles(prices):
+    """Groups 300 ticks into 15 candles (20 ticks each)"""
     candles = []
     for i in range(0, len(prices), 20):
         chunk = prices[i:i+20]
@@ -44,37 +45,51 @@ def create_20_tick_candles(prices):
             candles.append({'open': chunk[0], 'high': np.max(chunk), 'low': np.min(chunk), 'close': chunk[-1]})
     return pd.DataFrame(candles)
 
-def calculate_strategy(df):
-    if len(df) < 50: return "NONE", 0 # Need at least 50 candles for EMA 50
+def get_5min_start_price():
+    """Fetches the opening price of the current 5-minute cycle (e.g., 12:00:00)"""
+    try:
+        now = datetime.now(BEIRUT_TZ)
+        start_min = (now.minute // 5) * 5
+        start_dt = now.replace(minute=start_min, second=0, microsecond=0)
+        start_ts = int(start_dt.timestamp())
+        
+        ws = websocket.create_connection(WS_URL, timeout=10)
+        ws.send(json.dumps({"ticks_history": SYMBOL_ID, "count": 10, "end": start_ts + 10, "style": "ticks"}))
+        res = json.loads(ws.recv())
+        ws.close()
+        return res['history']['prices'][0]
+    except: return None
+
+def analyze_logic(df, start_price_5m):
+    """Core logic with 20 indicators and 5-min candle alignment"""
+    if len(df) < 14 or start_price_5m is None: return "NONE", 0
     
-    c, o = df['close'].values, df['open'].values
-    up = 0
+    current_price = df['close'].iloc[-1]
+    up_votes = 0
     
-    # EMA 50 - The Trend Master
-    ema50 = df['close'].ewm(span=50).mean().iloc[-1]
-    current_price = c[-1]
-    
-    # Trend Bias
-    is_bullish = current_price > ema50
-    is_bearish = current_price < ema50
+    # 5-Minute Candle Direction (Filter)
+    is_bullish_5m = current_price > start_price_5m
+    is_bearish_5m = current_price < start_price_5m
 
     # 20 Indicators Check
+    close_prices = df['close'].values
     for i in range(1, 21):
-        if c[-1] > np.median(c[-min(i+3, len(c)):]): up += 1
+        if close_prices[-1] > np.median(close_prices[-min(i+3, len(close_prices)):]):
+            up_votes += 1
     
-    raw_direction = "CALL" if up >= 10 else "PUT"
-    strength = (max(up, 20-up) / 20) * 100
+    raw_dir = "CALL" if up_votes >= 10 else "PUT"
+    strength = (max(up_votes, 20-up_votes) / 20) * 100
 
-    # Apply EMA 50 Filter
-    if raw_direction == "CALL" and is_bullish:
+    # Alignment Enforcement
+    if raw_dir == "CALL" and is_bullish_5m:
         return "CALL", strength
-    elif raw_direction == "PUT" and is_bearish:
+    elif raw_dir == "PUT" and is_bearish_5m:
         return "PUT", strength
     else:
-        return "NO_TREND_MATCH", 0
+        return "MISMATCH", 0
 
-# --- 4. Historical Result Verification ---
-def get_historical_result(open_ts, close_ts):
+# --- 4. Historical Verification (70 Ticks) ---
+def verify_result(open_ts, close_ts):
     try:
         ws = websocket.create_connection(WS_URL, timeout=15)
         ws.send(json.dumps({"ticks_history": SYMBOL_ID, "count": 70, "end": "latest", "style": "ticks"}))
@@ -88,56 +103,53 @@ def get_historical_result(open_ts, close_ts):
         return p_open, p_close
     except: return None, None
 
-def check_trade_cycle():
+def check_active_trade():
     global active_trade
     now = datetime.now(BEIRUT_TZ)
-    target_close = active_trade['entry_time'] + timedelta(minutes=1)
+    target_close = active_trade['time'] + timedelta(minutes=1)
     
     if now >= target_close + timedelta(seconds=2):
-        o_ts, c_ts = int(active_trade['entry_time'].timestamp()), int(target_close.timestamp())
-        p_open, p_close = get_historical_result(o_ts, c_ts)
+        o_ts, c_ts = int(active_trade['time'].timestamp()), int(target_close.timestamp())
+        p_open, p_close = verify_result(o_ts, c_ts)
         
         if p_open and p_close:
-            win = (p_close > p_open) if active_trade['direction'] == "CALL" else (p_close < p_open)
+            win = (p_close > p_open) if active_trade['dir'] == "CALL" else (p_close < p_open)
             status = "✅ WIN" if win else "❌ LOSS"
             if p_open == p_close: status = "⚖️ DRAW"
-            send_telegram_msg(f"{status} | {SYMBOL_NAME}\nOpen: {p_open} | Close: {p_close}")
+            send_telegram_msg(f"{status} | {SYMBOL_NAME}\nDir: {active_trade['dir']}\nOpen: {p_open} | Close: {p_close}")
             active_trade = None
 
-# --- 5. Main Execution Loop ---
-def start_engine():
+# --- 5. Main Execution ---
+def start_bot():
     global last_signal_time, active_trade
-    print(f"Engine LIVE: EMA 50 Filter + 4th Minute Entry Mode")
+    print(f"Bot Monitoring {SYMBOL_NAME} (5min Cycle Mode)...")
     
     while True:
         now = datetime.now(BEIRUT_TZ)
-        minute = now.minute
-        
-        # Strategy: Only analyze at the 4th minute (e.g., 12:04:30, 12:09:30, 12:14:30)
-        # This targets the end of the 5-minute candle cycle
-        if (minute % 5 == 4) and now.second == 30 and active_trade is None:
-            current_min_str = now.strftime('%H:%M')
-            if last_signal_time != current_min_str:
-                last_signal_time = current_min_str
+        # Only analyze at Minute 4, 9, 14, etc., at Second 30
+        if (now.minute % 5 == 4) and now.second == 30 and active_trade is None:
+            current_time_key = now.strftime('%H:%M')
+            if last_signal_time != current_time_key:
+                last_signal_time = current_time_key
                 try:
+                    start_5m = get_5min_start_price()
                     ws = websocket.create_connection(WS_URL, timeout=15)
-                    # We request 1000 ticks to ensure we have enough for EMA 50 (15 candles * 20 ticks = 300, but EMA 50 needs more)
-                    ws.send(json.dumps({"ticks_history": SYMBOL_ID, "count": 1000, "end": "latest", "style": "ticks"}))
+                    ws.send(json.dumps({"ticks_history": SYMBOL_ID, "count": 300, "end": "latest", "style": "ticks"}))
                     res = json.loads(ws.recv())
                     ws.close()
                     
-                    df_candles = create_20_tick_candles(res['history']['prices'])
-                    direction, accuracy = calculate_strategy(df_candles)
+                    df = create_20_tick_candles(res['history']['prices'])
+                    direction, accuracy = analyze_logic(df, start_5m)
                     
                     if accuracy >= 80:
-                        entry_dt = (now + timedelta(seconds=30)).replace(second=0, microsecond=0)
-                        active_trade = {"direction": direction, "entry_time": entry_dt}
-                        send_telegram_msg(f"🚀 **SIGNAL**: {direction}\nStrength: {accuracy}%\nFilter: EMA 50 Trend\nEntry: {entry_dt.strftime('%H:%M:00')}")
-                except Exception as e: print(f"Error: {e}")
+                        entry_time = (now + timedelta(seconds=30)).replace(second=0, microsecond=0)
+                        active_trade = {"dir": direction, "time": entry_time}
+                        send_telegram_msg(f"🚀 **SIGNAL**: {direction}\nStrength: {accuracy}%\nFilter: 5m Candle Alignment\nEntry: {entry_time.strftime('%H:%M:00')}")
+                except Exception as e: print(f"Analysis Error: {e}")
         
-        if active_trade: check_trade_cycle()
+        if active_trade: check_active_trade()
         time.sleep(0.5)
 
 if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
-    start_engine()
+    start_bot()
