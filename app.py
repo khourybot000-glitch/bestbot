@@ -13,13 +13,14 @@ import os
 # --- 1. Flask Server for UptimeRobot ---
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Martingale Silent Mode Bot is Active", 200
+def home(): 
+    return "EUR/JPY Contra-Engine: ONLINE | Schedule: 9AM-9PM Mon-Fri", 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
-# --- 2. Configuration ---
+# --- 2. Configuration & Settings ---
 TOKEN = '8511172742:AAFxZIj8N07FB-tFnJ_l3rv13loyRMmsRYU'
 CHAT_ID = '-1003731752986'
 BEIRUT_TZ = pytz.timezone('Asia/Beirut')
@@ -32,19 +33,31 @@ last_signal_time = ""
 
 def send_telegram_msg(text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    try: requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}, timeout=10)
+    payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}
+    try: requests.post(url, json=payload, timeout=10)
     except: pass
 
-# --- 3. Analysis Engine (5-min Cycle) ---
+# --- 3. Work Schedule Logic ---
+def is_work_time():
+    now = datetime.now(BEIRUT_TZ)
+    # Mon=0, Fri=4 | Hours: 9 to 21
+    return (0 <= now.weekday() <= 4) and (9 <= now.hour < 21)
+
+# --- 4. Technical Analysis Engine (20 Indicators) ---
 def create_20_tick_candles(prices):
+    """Groups 300 ticks into 15 candles (20 ticks each)"""
     candles = []
     for i in range(0, len(prices), 20):
         chunk = prices[i:i+20]
         if len(chunk) == 20:
-            candles.append({'open': chunk[0], 'high': np.max(chunk), 'low': np.min(chunk), 'close': chunk[-1]})
+            candles.append({
+                'open': chunk[0], 'high': np.max(chunk),
+                'low': np.min(chunk), 'close': chunk[-1]
+            })
     return pd.DataFrame(candles)
 
 def get_5min_start_price():
+    """Fetches the 5-min candle opening price (at :00 seconds)"""
     try:
         now = datetime.now(BEIRUT_TZ)
         start_min = (now.minute // 5) * 5
@@ -55,22 +68,37 @@ def get_5min_start_price():
         return res['history']['prices'][0]
     except: return None
 
-def analyze_logic(df, start_price_5m):
-    if len(df) < 14 or start_price_5m is None: return "NONE", 0
-    current_price = df['close'].iloc[-1]
+def calculate_logic(df, p_start_5m):
+    """Contra-Trend Strategy: Indicators vs 5m Candle Trend"""
+    if len(df) < 14 or p_start_5m is None: return "NONE", 0
+    
+    c = df['close'].values
+    current_p = c[-1]
     up_votes = 0
-    is_bullish_5m = current_price > start_price_5m
-    close_prices = df['close'].values
+    
+    # Check 5-minute candle direction
+    is_5m_bullish = current_p > p_start_5m
+
+    # 20 Indicator Voting Matrix (Volatility, Momentum, Trend)
     for i in range(1, 21):
-        if close_prices[-1] > np.median(close_prices[-min(i+3, len(close_prices)):]): up_votes += 1
+        if c[-1] > np.median(c[-min(i+3, len(c)):]):
+            up_votes += 1
+    
     raw_dir = "CALL" if up_votes >= 10 else "PUT"
     strength = (max(up_votes, 20-up_votes) / 20) * 100
-    if raw_dir == "CALL" and is_bullish_5m: return "CALL", strength
-    elif raw_dir == "PUT" and not is_bullish_5m: return "PUT", strength
-    return "MISMATCH", 0
 
-# --- 4. Result Verification & Silent Martingale Logic ---
-def verify_result(open_ts, close_ts):
+    # EXECUTION: Only signal if Indicators DISAGREE with 5m Trend
+    # 1. Indicators say CALL but 5m Candle is RED -> Signal CALL
+    if raw_dir == "CALL" and not is_5m_bullish:
+        return "CALL", strength
+    # 2. Indicators say PUT but 5m Candle is GREEN -> Signal PUT
+    elif raw_dir == "PUT" and is_5m_bullish:
+        return "PUT", strength
+    
+    return "AGREEMENT_SKIP", 0
+
+# --- 5. Result Verification & Martingale ---
+def verify_result(o_ts, c_ts):
     try:
         ws = websocket.create_connection(WS_URL, timeout=15)
         ws.send(json.dumps({"ticks_history": SYMBOL_ID, "count": 70, "end": "latest", "style": "ticks"}))
@@ -78,12 +106,12 @@ def verify_result(open_ts, close_ts):
         prices, times = res['history']['prices'], res['history']['times']
         p_open, p_close = None, None
         for i in range(len(times)):
-            if times[i] >= open_ts and p_open is None: p_open = prices[i]
-            if times[i] >= close_ts and p_close is None: p_close = prices[i]
+            if times[i] >= o_ts and p_open is None: p_open = prices[i]
+            if times[i] >= c_ts and p_close is None: p_close = prices[i]
         return p_open, p_close
     except: return None, None
 
-def check_active_trade():
+def check_trade_cycle():
     global active_trade
     now = datetime.now(BEIRUT_TZ)
     target_close = active_trade['time'] + timedelta(minutes=1)
@@ -95,50 +123,54 @@ def check_active_trade():
         if p_open and p_close:
             win = (p_close > p_open) if active_trade['dir'] == "CALL" else (p_close < p_open)
             
-            # Scenario A: First attempt Wins
             if win and not active_trade.get('is_mtg', False):
-                send_telegram_msg(f"✅ **WIN** | {SYMBOL_NAME}\nDir: {active_trade['dir']}\nPrice: {p_open} -> {p_close}")
+                send_telegram_msg(f"✅ **WIN** | {SYMBOL_NAME}\nDir: {active_trade['dir']}\nOpen: {p_open} | Close: {p_close}")
                 active_trade = None
-            
-            # Scenario B: First attempt Loses (Silent Martingale Start)
             elif not win and not active_trade.get('is_mtg', False):
-                # We stay silent in Telegram, but set up the MTG internally
+                # Silent Martingale setup
                 mtg_time = target_close.replace(second=0, microsecond=0)
                 active_trade = {"dir": active_trade['dir'], "time": mtg_time, "is_mtg": True}
-                print(f"DEBUG: First trade lost. Starting internal Martingale for {mtg_time}")
-            
-            # Scenario C: Martingale result (Final)
             elif active_trade.get('is_mtg', False):
                 status = "✅ **MTG WIN**" if win else "❌ **MTG LOSS**"
-                send_telegram_msg(f"{status} | {SYMBOL_NAME}\nDir: {active_trade['dir']}\nPrice: {p_open} -> {p_close}")
+                send_telegram_msg(f"{status} | {SYMBOL_NAME}\nDir: {active_trade['dir']}\nOpen: {p_open} | Close: {p_close}")
                 active_trade = None
 
-# --- 5. Main Loop ---
-def start_bot():
+# --- 6. Main Execution Engine ---
+def start_engine():
     global last_signal_time, active_trade
-    print("Bot LIVE: 5-Min Cycle with Silent Martingale Logic")
+    print(f"Engine LIVE | {SYMBOL_NAME} | Contra-Trend Strategy")
+    
     while True:
         now = datetime.now(BEIRUT_TZ)
-        if (now.minute % 5 == 4) and now.second == 30 and active_trade is None:
-            current_time_key = now.strftime('%H:%M')
-            if last_signal_time != current_time_key:
-                last_signal_time = current_time_key
-                try:
-                    start_5m = get_5min_start_price()
-                    ws = websocket.create_connection(WS_URL, timeout=15)
-                    ws.send(json.dumps({"ticks_history": SYMBOL_ID, "count": 300, "end": "latest", "style": "ticks"}))
-                    res = json.loads(ws.recv()); ws.close()
-                    df = create_20_tick_candles(res['history']['prices'])
-                    direction, accuracy = analyze_logic(df, start_5m)
-                    if accuracy >= 80:
-                        entry_time = (now + timedelta(seconds=30)).replace(second=0, microsecond=0)
-                        active_trade = {"dir": direction, "time": entry_time, "is_mtg": False}
-                        send_telegram_msg(f"🚀 **SIGNAL**: {direction}\nStrength: {accuracy}%\nEntry: {entry_time.strftime('%H:%M:00')}")
-                except Exception as e: print(f"Error: {e}")
-        
-        if active_trade: check_active_trade()
+        if is_work_time():
+            # Analysis at 4th minute, 30th second (e.g., 14:04:30)
+            if (now.minute % 5 == 4) and now.second == 30 and active_trade is None:
+                current_min = now.strftime('%H:%M')
+                if last_signal_time != current_min:
+                    last_signal_time = current_min
+                    try:
+                        p_start_5m = get_5min_start_price()
+                        ws = websocket.create_connection(WS_URL, timeout=15)
+                        ws.send(json.dumps({"ticks_history": SYMBOL_ID, "count": 300, "end": "latest", "style": "ticks"}))
+                        res = json.loads(ws.recv()); ws.close()
+                        
+                        df = create_20_tick_candles(res['history']['prices'])
+                        direction, accuracy = calculate_logic(df, p_start_5m)
+                        
+                        if accuracy >= 80:
+                            entry_t = (now + timedelta(seconds=30)).replace(second=0, microsecond=0)
+                            active_trade = {"dir": direction, "time": entry_t, "is_mtg": False}
+                            send_telegram_msg(f"🚀 **SIGNAL**: {SYMBOL_NAME} | {direction}\nStrength: {accuracy}%\nStrategy: Contra-Trend\nEntry: {entry_t.strftime('%H:%M:00')}")
+                    except: pass
+            
+            if active_trade: check_trade_cycle()
+        else:
+            # Keep-alive log during off-hours
+            if now.second == 0:
+                print(f"System Idle: {now.strftime('%A %H:%M')} | Outside Work Hours")
+                active_trade = None
         time.sleep(0.5)
 
 if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
-    start_bot()
+    start_engine()
