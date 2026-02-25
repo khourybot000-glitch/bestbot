@@ -10,17 +10,12 @@ import threading
 from flask import Flask
 import os
 
-# --- 1. Flask Server لفتح الـ Port ---
+# --- 1. Flask Server ---
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "EUR/JPY Engine: ACTIVE | Port 8080 Open", 200
-
-def run_flask():
-    # سيقوم بجلب الـ Port من إعدادات السيرفر أو استخدام 8080 كافتراضي
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
+    return "All-Level Fibonacci Engine: ACTIVE", 200
 
 # --- 2. الإعدادات ---
 TOKEN = '8511172742:AAFxZIj8N07FB-tFnJ_l3rv13loyRMmsRYU'
@@ -39,93 +34,115 @@ def send_telegram_msg(text):
     try: requests.post(url, json=payload, timeout=10)
     except: pass
 
-# --- 3. محرك الـ 20 مؤشر ---
-def calculate_logic(prices):
-    if len(prices) < 50: return "NONE", 0
-    df = pd.DataFrame(prices, columns=['close'])
-    up_votes = 0
-    c = df['close']
-
-    # تحليل الاتجاه والزخم (20 نقطة)
-    if c.iloc[-1] > c.rolling(10).mean().iloc[-1]: up_votes += 1
-    if c.iloc[-1] > c.rolling(20).mean().iloc[-1]: up_votes += 1
-    if c.rolling(5).mean().iloc[-1] > c.rolling(15).mean().iloc[-1]: up_votes += 1
-    if c.iloc[-1] > c.rolling(50).mean().iloc[-1]: up_votes += 1
+# --- 3. محرك المستويات المتعددة ---
+def calculate_all_fibs_logic(tick_prices, tick_times):
+    df_ticks = pd.DataFrame({'price': tick_prices, 'time': pd.to_datetime(tick_times, unit='s')})
+    df_ticks.set_index('time', inplace=True)
     
-    # RSI محاكي
-    diff = c.diff()
-    gain = diff.where(diff > 0, 0).rolling(14).mean()
-    loss = diff.where(diff < 0, 0).abs().rolling(14).mean()
-    rsi = 100 - (100 / (1 + (gain / loss)))
-    if rsi.iloc[-1] > 50: up_votes += 1
+    # تحويل لشموع دقيقة
+    df_candles = df_ticks['price'].resample('1Min').ohlc()
     
-    if (c.iloc[-1] - c.iloc[-10]) > 0: up_votes += 1
+    if len(df_candles) < 3: return "NONE", 0, 0
+
+    # حساب القمة والقاع لآخر 100 دقيقة
+    recent = df_candles.tail(100)
+    h, l = recent['high'].max(), recent['low'].min()
+    diff = h - l
+
+    # قائمة مستويات فيبوناتشي المطلوب مراقبتها
+    levels = {
+        "23.6%": h - (diff * 0.236),
+        "38.2%": h - (diff * 0.382),
+        "50.0%": h - (diff * 0.500),
+        "61.8%": h - (diff * 0.618),
+        "78.6%": h - (diff * 0.786)
+    }
+
+    prev_close = df_candles['close'].iloc[-2]
+    current_price = df_candles['close'].iloc[-1]
     
-    for p in range(5, 18): # تكملة الـ 20 تصويت
-        if c.iloc[-1] > c.rolling(p).mean().iloc[-1]: up_votes += 1
+    # فحص كل مستوى على حدة
+    for name, val in levels.items():
+        # حالة PUT: اختراق كاذب للأعلى (كان فوق وأصبح تحت)
+        if prev_close > val and current_price < val:
+            return "PUT", 92, name
+        
+        # حالة CALL: اختراق كاذب للأسفل (كان تحت وأصبح فوق)
+        if prev_close < val and current_price > val:
+            return "CALL", 92, name
 
-    accuracy = (max(up_votes, 20 - up_votes) / 20) * 100
-    direction = "CALL" if up_votes >= 10 else "PUT"
-    return direction, accuracy
+    return "NONE", 0, ""
 
-# --- 4. التحقق من النتيجة (12:05 -> 12:10) ---
-def verify_result(entry_time, exit_time):
+# --- 4. التحقق من النتيجة ---
+def verify_result(entry_ts, exit_ts):
     try:
         ws = websocket.create_connection(WS_URL, timeout=15)
-        ws.send(json.dumps({"ticks_history": SYMBOL_ID, "count": 320, "end": int(exit_time.timestamp()) + 2, "style": "ticks"}))
+        ws.send(json.dumps({"ticks_history": SYMBOL_ID, "count": 100, "end": exit_ts + 2, "style": "ticks"}))
         res = json.loads(ws.recv()); ws.close()
         
         prices, times = res['history']['prices'], res['history']['times']
         p_open, p_close = None, None
         
         for i in range(len(times)):
-            if times[i] >= int(entry_time.timestamp()) and p_open is None: p_open = prices[i]
-            if times[i] >= int(exit_time.timestamp()) and p_close is None: p_close = prices[i]
-        
+            if times[i] >= entry_ts and p_open is None: p_open = prices[i]
+            if times[i] >= exit_ts and p_close is None: p_close = prices[i]
+            
         return p_open, p_close
     except: return None, None
 
 # --- 5. المحرك الرئيسي ---
 def start_engine():
     global active_trade, last_signal_time
-    print(f"Engine LIVE | Port Open: 8080 | {SYMBOL_NAME}")
+    print(f"Multi-Fib Engine Running: {SYMBOL_NAME}")
     
     while True:
         now = datetime.now(BEIRUT_TZ)
         
-        # التحليل عند الثانية 30
-        if now.second == 30 and active_trade is None:
+        # التحليل عند الثانية 45
+        if now.second == 45 and active_trade is None:
             current_min = now.strftime('%H:%M')
             if last_signal_time != current_min:
                 last_signal_time = current_min
                 try:
                     ws = websocket.create_connection(WS_URL, timeout=10)
-                    ws.send(json.dumps({"ticks_history": SYMBOL_ID, "count": 100, "style": "ticks"}))
+                    ws.send(json.dumps({"ticks_history": SYMBOL_ID, "count": 6500, "style": "ticks"}))
                     res = json.loads(ws.recv()); ws.close()
                     
-                    direction, accuracy = calculate_logic(res['history']['prices'])
+                    direction, accuracy, level_name = calculate_all_fibs_logic(res['history']['prices'], res['history']['times'])
                     
-                    if accuracy >= 70:
-                        entry_t = (now + timedelta(seconds=30)).replace(second=0, microsecond=0)
-                        exit_t = entry_t + timedelta(minutes=5)
-                        active_trade = {"dir": direction, "entry": entry_t, "exit": exit_t}
+                    if direction != "NONE":
+                        entry_t = (now + timedelta(seconds=15)).replace(second=0, microsecond=0)
+                        exit_t = entry_t + timedelta(minutes=1)
                         
-                        send_telegram_msg(f"🚀 **SIGNAL**: {SYMBOL_NAME}\nDir: {direction}\nAcc: {accuracy}%\nEntry: {entry_t.strftime('%H:%M:00')}\nExit: {exit_t.strftime('%H:%M:00')}")
+                        active_trade = {
+                            "dir": direction, 
+                            "entry": entry_t, 
+                            "exit": exit_t,
+                            "entry_ts": int(entry_t.timestamp()),
+                            "exit_ts": int(exit_t.timestamp()),
+                            "level": level_name
+                        }
+                        
+                        send_telegram_msg(f"🔥 **MULTI-FIB SIGNAL**\n"
+                                          f"Asset: {SYMBOL_NAME}\n"
+                                          f"Level: `{level_name}`\n"
+                                          f"Action: *{direction}*\n"
+                                          f"Entry: {entry_t.strftime('%H:%M:00')}\n"
+                                          f"Exp: 1 min")
                 except: pass
 
-        # التحقق من النتيجة بعد 5 ثوانٍ من وقت الإغلاق
-        if active_trade and now >= active_trade['exit'] + timedelta(seconds=5):
-            p_open, p_close = verify_result(active_trade['entry'], active_trade['exit'])
+        # التحقق من النتيجة
+        if active_trade and now >= active_trade['exit'] + timedelta(seconds=2):
+            p_open, p_close = verify_result(active_trade['entry_ts'], active_trade['exit_ts'])
             if p_open and p_close:
                 win = (p_close > p_open) if active_trade['dir'] == "CALL" else (p_close < p_open)
                 status = "✅ **WIN**" if win else "❌ **LOSS**"
-                send_telegram_msg(f"{status} | {SYMBOL_NAME}\nEntry: {p_open} | Exit: {p_close}")
+                send_telegram_msg(f"{status} | {active_trade['level']}\nIn: {p_open} | Out: {p_close}")
             active_trade = None 
 
         time.sleep(0.5)
 
 if __name__ == "__main__":
-    # تشغيل Flask في Thread منفصل لفتح الـ Port
-    threading.Thread(target=run_flask, daemon=True).start()
-    # تشغيل محرك التداول
+    port = int(os.environ.get("PORT", 8080))
+    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=port), daemon=True).start()
     start_engine()
