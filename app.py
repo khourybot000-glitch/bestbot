@@ -10,14 +10,10 @@ import threading
 from flask import Flask
 import os
 
-# --- 1. Flask Server for Uptime ---
+# --- 1. Flask Server ---
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Fibo 24/7 Bot: ACTIVE", 200
-
-def run_flask():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
+def home(): return "Fibo Smart Bot: ACTIVE", 200
 
 # --- 2. Configuration ---
 TOKEN = '8511172742:AAFxZIj8N07FB-tFnJ_l3rv13loyRMmsRYU'
@@ -28,7 +24,7 @@ SYMBOL_ID = "frxEURJPY"
 SYMBOL_NAME = "EUR/JPY"
 
 active_trade = None
-last_analysis_time = ""
+last_check_min = ""
 
 def send_telegram_msg(text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
@@ -36,91 +32,92 @@ def send_telegram_msg(text):
     try: requests.post(url, json=payload, timeout=10)
     except: pass
 
-# --- 3. Stable Data Engine ---
-def get_market_analysis():
-    """Fetches ticks for last 100 mins with a safety limit of 3000 ticks"""
+# --- 3. Result Verification Logic ---
+def verify_trade_result(entry_time, direction):
+    """يجلب تيكات دقيقة الصفقة ويقارن سعر الافتتاح بسعر الإغلاق"""
     try:
-        now_ts = int(time.time())
-        start_ts = now_ts - (100 * 60) 
+        start_ts = int(entry_time.timestamp())
+        end_ts = start_ts + 60 # مدة الصفقة دقيقة واحدة
         
-        ws = websocket.create_connection(WS_URL, timeout=12)
+        ws = websocket.create_connection(WS_URL, timeout=15)
         ws.send(json.dumps({
             "ticks_history": SYMBOL_ID,
             "start": start_ts,
-            "end": "latest",
-            "style": "ticks",
-            "count": 3000 
+            "end": end_ts,
+            "style": "ticks"
         }))
         res = json.loads(ws.recv()); ws.close()
         
-        if 'history' not in res: return None, 0, 0, {}
-
-        prices = [float(p) for p in res['history']['prices']]
-        if len(prices) < 10: return None, 0, 0, {}
-
-        h, l = max(prices), min(prices)
-        diff = h - l
-        levels = {
-            "61.8%": round(h - (diff * 0.618), 3),
-            "50.0%": round(h - (diff * 0.500), 3),
-            "38.2%": round(h - (diff * 0.382), 3)
-        }
+        prices = res['history']['prices']
+        if len(prices) < 2: return "Unknown"
         
-        return levels, prices[-1], prices[-2], levels
-    except Exception as e:
-        print(f"Data Error: {e}")
-        return None, 0, 0, {}
+        p_in = float(prices[0])   # سعر أول تيك في دقيقة الدخول
+        p_out = float(prices[-1]) # سعر آخر تيك في دقيقة الدخول
+        
+        win = (p_out > p_in) if direction == "CALL" else (p_out < p_in)
+        status = "✅ WIN" if win else "❌ LOSS"
+        return f"{status} (In: {p_in} | Out: {p_out})"
+    except: return "Error verifying"
 
-# --- 4. Main Execution Loop ---
+# --- 4. Core Strategy Logic ---
+def check_for_opportunity():
+    try:
+        now_ts = int(time.time())
+        start_ts = now_ts - (105 * 60)
+        ws = websocket.create_connection(WS_URL, timeout=15)
+        ws.send(json.dumps({"ticks_history": SYMBOL_ID, "start": start_ts, "end": "latest", "style": "ticks", "count": 4500}))
+        res = json.loads(ws.recv()); ws.close()
+        
+        df = pd.DataFrame({'price': res['history']['prices'], 'time': pd.to_datetime(res['history']['times'], unit='s')})
+        df.set_index('time', inplace=True)
+        candles = df['price'].resample('1Min').ohlc().dropna()
+        
+        recent_100 = candles.tail(100)
+        h, l = recent_100['high'].max(), recent_100['low'].min()
+        diff = h - l
+        levels = [h - (diff * 0.618), h - (diff * 0.500), h - (diff * 0.382)]
+
+        last_candle = candles.iloc[-1]
+        c_open, c_close = last_candle['open'], last_candle['close']
+        
+        for val in levels:
+            if c_open < val and c_close > val: return "CALL"
+            if c_open > val and c_close < val: return "PUT"
+        return None
+    except: return None
+
+# --- 5. Main Loop ---
 def start_engine():
-    global last_analysis_time, active_trade
-    send_telegram_msg("🚀 **Bot Deployment Successful**\n24/7 Monitoring Mode Activated.\nReporting every 1 minute.")
+    global last_check_min, active_trade
+    send_telegram_msg("⚡ **Bot System Online**\nSilent Mode | Auto Verification Enabled.")
 
     while True:
         now = datetime.now(BEIRUT_TZ)
         
-        # العمل في أي وقت (بدون شرط الساعة 9)
-        if now.second == 0 and active_trade is None:
+        # 1. البحث عن إشارة (عند الثانية 01)
+        if now.second == 1 and active_trade is None:
             current_min = now.strftime('%H:%M')
-            if last_analysis_time != current_min:
-                last_analysis_time = current_min
-                
-                fibo_lvls, current_p, last_p, all_lvls = get_market_analysis()
-                
-                if fibo_lvls:
-                    direction, lvl_name = "NONE", ""
-                    for name, val in fibo_lvls.items():
-                        if last_p < val and current_p > val: direction, lvl_name = "CALL", name; break
-                        if last_p > val and current_p < val: direction, lvl_name = "PUT", name; break
-                    
-                    # --- بناء تقرير الدقيقة الشامل ---
-                    report = f"🔍 **Analysis {current_min}**\n"
-                    report += f"Current Price: `{current_p}`\n"
-                    report += "--- Fibo Levels ---\n"
-                    for n, v in all_lvls.items():
-                        report += f"{n}: `{v}`\n"
-                    
-                    if direction != "NONE":
-                        entry_t = now + timedelta(minutes=2)
-                        active_trade = {"dir": direction, "time": entry_t, "level": lvl_name}
-                        report += f"\n🚨 **SIGNAL FOUND: {direction}**\nLevel: `{lvl_name}`\nEntry: {entry_t.strftime('%H:%M:00')}"
-                        send_telegram_msg(report)
-                    else:
-                        report += "\nℹ️ **Result:** `No Signal`"
-                        send_telegram_msg(report)
-                else:
-                    # في حال فشل جلب البيانات
-                    send_telegram_msg(f"⚠️ **Warning {current_min}**: Failed to fetch market data.")
+            if last_check_min != current_min:
+                last_check_min = current_min
+                signal = check_for_opportunity()
+                if signal:
+                    # الدخول بعد دقيقتين (مثال: إشارة 12:05 -> دخول 12:07)
+                    entry_t = now + timedelta(minutes=2)
+                    active_trade = {"dir": signal, "entry_time": entry_t, "notified": False}
+                    msg = f"🚀 **SIGNAL FOUND**\nDir: *{signal}*\nEntry at: {entry_t.strftime('%H:%M:00')}"
+                    send_telegram_msg(msg)
 
-        # التحقق من النتيجة (إذا كانت هناك صفقة نشطة)
+        # 2. التحقق من النتيجة (بعد انتهاء دقيقة الدخول)
         if active_trade:
-            target_close = active_trade['time'] + timedelta(minutes=1)
-            if now >= target_close + timedelta(seconds=2):
-                # يمكنك إضافة كود التحقق من النتيجة هنا
+            # وقت نهاية الصفقة (وقت الدخول + 1 دقيقة)
+            finish_time = active_trade['entry_time'] + timedelta(minutes=1)
+            if now >= finish_time + timedelta(seconds=5): # انتظار 5 ثوانٍ لضمان توفر البيانات
+                result = verify_trade_result(active_trade['entry_time'], active_trade['dir'])
+                send_telegram_msg(f"📊 **Trade Result**\n{result}")
                 active_trade = None
-
+        
         time.sleep(0.5)
 
 if __name__ == "__main__":
-    threading.Thread(target=run_flask, daemon=True).start()
+    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=8080), daemon=True).start()
     start_engine()
