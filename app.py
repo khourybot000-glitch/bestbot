@@ -10,18 +10,23 @@ import threading
 from flask import Flask
 import os
 
-# --- 1. Flask Server for Port Binding ---
+# --- 1. Flask Server ---
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Bot Status: ACTIVE with Error Logging", 200
+def home(): 
+    return "Fibo-Contra Bot: ACTIVE | Stable Mode", 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
 
 # --- 2. Configuration ---
 TOKEN = '8511172742:AAFxZIj8N07FB-tFnJ_l3rv13loyRMmsRYU'
 CHAT_ID = '-1003731752986'
 BEIRUT_TZ = pytz.timezone('Asia/Beirut')
 WS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
-SYMBOL_ID = "frxEURJPY"
 SYMBOL_NAME = "EUR/JPY"
+SYMBOL_ID = "frxEURJPY"
 
 active_trade = None
 last_signal_time = ""
@@ -29,134 +34,106 @@ last_signal_time = ""
 def send_telegram_msg(text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}
-    try:
-        r = requests.post(url, json=payload, timeout=10)
-        if r.status_code != 200:
-            print(f"Telegram API Error: {r.text}")
-    except Exception as e:
-        print(f"Failed to send Telegram message: {e}")
+    try: requests.post(url, json=payload, timeout=10)
+    except: pass
 
-# --- 3. Fibonacci & Breakout Logic ---
-def calculate_breakout_logic(tick_prices, tick_times):
+# --- 3. Fibonacci & Market Logic ---
+def get_market_data_and_fibo():
+    """جلب 2000 تيك فقط لضمان استقرار الاتصال وحساب المستويات"""
     try:
-        df_ticks = pd.DataFrame({'price': tick_prices, 'time': pd.to_datetime(tick_times, unit='s')})
-        df_ticks.set_index('time', inplace=True)
+        ws = websocket.create_connection(WS_URL, timeout=12)
+        ws.send(json.dumps({"ticks_history": SYMBOL_ID, "count": 2000, "style": "ticks"}))
+        res = json.loads(ws.recv()); ws.close()
         
-        # Resample to 1-Minute Candles
-        df_candles = df_ticks['price'].resample('1Min').ohlc().dropna()
-        
-        if len(df_candles) < 3:
-            return "ERROR_DATA", "Not enough candles", {}, 0, 0
-
-        # Calculate Fibonacci for the last 100 minutes
-        recent = df_candles.tail(100)
-        h, l = recent['high'].max(), recent['low'].min()
+        prices = [float(p) for p in res['history']['prices']]
+        h, l = max(prices), min(prices)
         diff = h - l
-
-        levels = {
-            "23.6%": round(h - (diff * 0.236), 3),
-            "38.2%": round(h - (diff * 0.382), 3),
-            "50.0%": round(h - (diff * 0.500), 3),
-            "61.8%": round(h - (diff * 0.618), 3),
-            "78.6%": round(h - (diff * 0.786), 3)
-        }
-
-        last_close = round(df_candles['close'].iloc[-1], 3)
-        last_open = round(df_candles['open'].iloc[-1], 3)
         
-        signal = "NONE"
-        lvl_name = ""
-
-        for name, val in levels.items():
-            if last_open < val and last_close > val:
-                signal = "CALL"
-                lvl_name = name
-                break
-            if last_open > val and last_close < val:
-                signal = "PUT"
-                lvl_name = name
-                break
-
-        return signal, lvl_name, levels, last_open, last_close
+        # حساب مستويات فيبوناتشي الأساسية
+        levels = {
+            "61.8%": h - (diff * 0.618),
+            "50.0%": h - (diff * 0.500),
+            "38.2%": h - (diff * 0.382)
+        }
+        return prices, levels
     except Exception as e:
-        return "ERROR_LOGIC", str(e), {}, 0, 0
+        print(f"Data Error: {e}")
+        return None, None
 
-# --- 4. Main Loop with Full Error Reporting ---
+def calculate_logic(prices, levels):
+    if not prices or not levels: return "NONE", ""
+    
+    current_p = prices[-1]
+    last_p = prices[-2]
+    
+    # فحص الاختراق (Breakout) لأي مستوى فيبوناتشي
+    for name, val in levels.items():
+        # اختراق صاعد (شمعة اخترقت المستوى للأعلى)
+        if last_p < val and current_p > val:
+            return "CALL", name
+        # اختراق هابط (شمعة اخترقت المستوى للأسفل)
+        if last_p > val and current_p < val:
+            return "PUT", name
+            
+    return "NONE", ""
+
+# --- 4. Result Verification ---
+def verify_result(o_ts, c_ts):
+    try:
+        ws = websocket.create_connection(WS_URL, timeout=15)
+        ws.send(json.dumps({"ticks_history": SYMBOL_ID, "count": 100, "end": "latest", "style": "ticks"}))
+        res = json.loads(ws.recv()); ws.close()
+        prices, times = res['history']['prices'], res['history']['times']
+        p_open, p_close = None, None
+        for i in range(len(times)):
+            if times[i] >= o_ts and p_open is None: p_open = float(prices[i])
+            if times[i] >= c_ts and p_close is None: p_close = float(prices[i])
+        return p_open, p_close
+    except: return None, None
+
+# --- 5. Main Loop ---
 def start_engine():
-    global active_trade, last_signal_time
-    print(f"Engine LIVE | Time: {datetime.now(BEIRUT_TZ)}")
-    send_telegram_msg("🚀 **Bot Online - Monitoring Mode Activated**\nError alerts are enabled.")
-
+    global last_signal_time, active_trade
+    print(f"Fibo Engine Active | {SYMBOL_NAME}")
+    send_telegram_msg("🚀 **Fibo Bot Started**\nStable 2000-Tick Mode Enabled.")
+    
     while True:
         now = datetime.now(BEIRUT_TZ)
-        weekday = now.weekday()
-        hour = now.hour
-
-        # Monday to Friday | 09:00 to 21:00 Beirut
-        if 0 <= weekday <= 4 and 9 <= hour < 21:
+        # جدول العمل: الاثنين-الجمعة، 9 صباحاً - 9 مساءً
+        if (0 <= now.weekday() <= 4) and (9 <= now.hour < 21):
+            
+            # التحليل عند الثانية 00 من كل دقيقة
             if now.second == 0 and active_trade is None:
                 current_min = now.strftime('%H:%M')
                 if last_signal_time != current_min:
                     last_signal_time = current_min
                     
-                    try:
-                        # Fetch Data
-                        ws = websocket.create_connection(WS_URL, timeout=12)
-                        ws.send(json.dumps({"ticks_history": SYMBOL_ID, "count": 5000, "style": "ticks"}))
-                        res = json.loads(ws.recv())
-                        ws.close()
+                    prices, fibo_levels = get_market_data_and_fibo()
+                    direction, lvl_name = calculate_logic(prices, fibo_levels)
+                    
+                    if direction != "NONE":
+                        # الدخول بعد دقيقتين كما طلبت سابقاً
+                        entry_t = now + timedelta(minutes=2)
+                        active_trade = {"dir": direction, "time": entry_t, "level": lvl_name}
                         
-                        if 'history' not in res:
-                            send_telegram_msg(f"❌ **Data Error at {current_min}**\nDeriv API did not return history. Check App ID/Token.")
-                            continue
+                        send_telegram_msg(f"🚨 **FIBO SIGNAL**\nLevel: `{lvl_name}`\nDir: *{direction}*\nEntry: {entry_t.strftime('%H:%M:00')}")
+                    else:
+                        print(f"[{current_min}] No Fibo Breakout.")
 
-                        prices = res['history']['prices']
-                        times = res['history']['times']
-                        
-                        # Logic Analysis
-                        direction, lvl_name, all_levels, l_open, l_close = calculate_breakout_logic(prices, times)
-                        
-                        if direction == "ERROR_DATA":
-                            send_telegram_msg(f"⚠️ **Analysis Warning at {current_min}**\n`{lvl_name}` (Need more historical ticks)")
-                            continue
-                        elif direction == "ERROR_LOGIC":
-                            send_telegram_msg(f"❌ **Logic Error at {current_min}**\n`{lvl_name}`")
-                            continue
-
-                        # Detailed Report
-                        report = f"🔍 **Analysis Report: {current_min}**\n"
-                        report += f"Open: `{l_open}` | Close: `{l_close}`\n"
-                        report += "--- Fibo Levels ---\n"
-                        for n, v in all_levels.items():
-                            report += f"{n}: `{v}`\n"
-                        
-                        if direction != "NONE":
-                            entry_t = now + timedelta(minutes=2)
-                            exit_t = entry_t + timedelta(minutes=1)
-                            active_trade = {
-                                "dir": direction, "entry": entry_t, "exit": exit_t,
-                                "entry_ts": int(entry_t.timestamp()), "exit_ts": int(exit_t.timestamp()),
-                                "level": lvl_name
-                            }
-                            report += f"\n🚨 **SIGNAL FOUND: {direction}**\nLevel: `{lvl_name}`\nEntry: {entry_t.strftime('%H:%M:00')}"
-                        else:
-                            report += "\nℹ️ **Result:** `No Signal`"
-                        
-                        send_telegram_msg(report)
-
-                    except Exception as e:
-                        send_telegram_msg(f"💥 **Connection Crash at {current_min}**\nError: `{str(e)}`")
-
-        # Result Verification
-        if active_trade and now >= active_trade['exit'] + timedelta(seconds=2):
-            try:
-                # Basic result check logic here...
-                active_trade = None 
-            except: active_trade = None
-
+            # التحقق من النتيجة (نفس نظام كودك الناجح)
+            if active_trade:
+                target_close = active_trade['time'] + timedelta(minutes=1)
+                if now >= target_close + timedelta(seconds=2):
+                    o_ts, c_ts = int(active_trade['time'].timestamp()), int(target_close.timestamp())
+                    p_in, p_out = verify_result(o_ts, c_ts)
+                    if p_in and p_out:
+                        win = (p_out > p_in) if active_trade['dir'] == "CALL" else (p_out < p_in)
+                        status = "✅ **WIN**" if win else "❌ **LOSS**"
+                        send_telegram_msg(f"{status} | {active_trade['level']}\nIn: {p_in} | Out: {p_out}")
+                    active_trade = None
+        
         time.sleep(0.5)
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=port), daemon=True).start()
+    threading.Thread(target=run_flask, daemon=True).start()
     start_engine()
