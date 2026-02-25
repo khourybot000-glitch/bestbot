@@ -13,7 +13,7 @@ import os
 # --- 1. Flask Server for Port Binding ---
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Bot Status: ACTIVE", 200
+def home(): return "Fibonacci Breakout Bot: ACTIVE", 200
 
 # --- 2. Configuration ---
 TOKEN = '8511172742:AAFxZIj8N07FB-tFnJ_l3rv13loyRMmsRYU'
@@ -31,47 +31,55 @@ def send_telegram_msg(text):
     payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}
     try:
         r = requests.post(url, json=payload, timeout=10)
-        if r.status_code != 200: print(f"Telegram Error: {r.text}")
-    except Exception as e: print(f"Connection Error: {e}")
+    except Exception as e: 
+        print(f"Telegram Connection Error: {e}")
 
-# --- 3. Fibonacci Breakout Logic ---
+# --- 3. Fibonacci & Candle Analysis Logic ---
 def calculate_breakout_logic(tick_prices, tick_times):
     df_ticks = pd.DataFrame({'price': tick_prices, 'time': pd.to_datetime(tick_times, unit='s')})
     df_ticks.set_index('time', inplace=True)
     
-    # Resample ticks into 1-minute candles
+    # Resample ticks into 1-Minute Candles (OHLC)
     df_candles = df_ticks['price'].resample('1Min').ohlc().dropna()
     
     if len(df_candles) < 3: 
-        return "NONE", ""
+        return "NONE", "", {}, 0, 0
 
-    # Calculate Fibonacci levels for the last 100 candles
+    # Calculate Fibonacci levels from the last 100 candles
     recent = df_candles.tail(100)
     h, l = recent['high'].max(), recent['low'].min()
     diff = h - l
 
+    # Define the 5 major Fibonacci Levels
     levels = {
-        "23.6%": h - (diff * 0.236),
-        "38.2%": h - (diff * 0.382),
-        "50.0%": h - (diff * 0.500),
-        "61.8%": h - (diff * 0.618),
-        "78.6%": h - (diff * 0.786)
+        "23.6%": round(h - (diff * 0.236), 3),
+        "38.2%": round(h - (diff * 0.382), 3),
+        "50.0%": round(h - (diff * 0.500), 3),
+        "61.8%": round(h - (diff * 0.618), 3),
+        "78.6%": round(h - (diff * 0.786), 3)
     }
 
-    # Analyze the candle that just closed (Index -1 at 00s)
-    last_close = df_candles['close'].iloc[-1]
-    last_open = df_candles['open'].iloc[-1]
+    # Data of the candle that just CLOSED (at 00s)
+    last_close = round(df_candles['close'].iloc[-1], 3)
+    last_open = round(df_candles['open'].iloc[-1], 3)
     
-    for name, val in levels.items():
-        # CALL: Candle opened below level and closed above it
-        if last_open < val and last_close > val:
-            return "CALL", name
-        
-        # PUT: Candle opened above level and closed below it
-        if last_open > val and last_close < val:
-            return "PUT", name
+    signal = "NONE"
+    level_name = ""
 
-    return "NONE", ""
+    # Check for Breakout on any level
+    for name, val in levels.items():
+        # CALL: Price broke ABOVE the level
+        if last_open < val and last_close > val:
+            signal = "CALL"
+            level_name = name
+            break
+        # PUT: Price broke BELOW the level
+        if last_open > val and last_close < val:
+            signal = "PUT"
+            level_name = name
+            break
+
+    return signal, level_name, levels, last_open, last_close
 
 # --- 4. Result Verification ---
 def verify_result(entry_ts, exit_ts, direction):
@@ -93,62 +101,65 @@ def verify_result(entry_ts, exit_ts, direction):
     except: pass
     return None, None, None
 
-# --- 5. Main Loop ---
+# --- 5. Main Engine Loop ---
 def start_engine():
     global active_trade, last_signal_time
-    print(f"Engine LIVE | {SYMBOL_NAME}")
-    send_telegram_msg("⚡ **Bot Started Successfully**\nWaiting for analysis at 00s...")
+    print(f"Engine LIVE | Monitoring {SYMBOL_NAME}")
+    send_telegram_msg("⚡ **Bot Deployment Successful**\nMonitoring hours: 09:00 - 21:00 (Mon-Fri)")
 
     while True:
         now = datetime.now(BEIRUT_TZ)
-        
-        # 1. Trigger Analysis at 00 seconds
-        if now.second == 0 and active_trade is None:
-            current_min = now.strftime('%H:%M')
-            if last_signal_time != current_min:
-                last_signal_time = current_min
-                
-                send_telegram_msg(f"🔍 **Analyzing {current_min}**...") # Debug Message
-                
-                try:
-                    # 2. Fetch Data
-                    ws = websocket.create_connection(WS_URL, timeout=10)
-                    ws.send(json.dumps({"ticks_history": SYMBOL_ID, "count": 6000, "style": "ticks"}))
-                    res = json.loads(ws.recv()); ws.close()
-                    
-                    if 'history' in res:
-                        direction, level_name = calculate_breakout_logic(res['history']['prices'], res['history']['times'])
-                        
-                        if direction != "NONE":
-                            # Set Entry to T+2 minutes
-                            entry_t = now + timedelta(minutes=2)
-                            exit_t = entry_t + timedelta(minutes=1)
-                            
-                            active_trade = {
-                                "dir": direction,
-                                "entry": entry_t,
-                                "exit": exit_t,
-                                "entry_ts": int(entry_t.timestamp()),
-                                "exit_ts": int(exit_t.timestamp()),
-                                "level": level_name
-                            }
-                            
-                            send_telegram_msg(f"🚨 **SIGNAL FOUND**\n"
-                                              f"Level: `{level_name}`\n"
-                                              f"Dir: *{direction}*\n"
-                                              f"Entry Time: {entry_t.strftime('%H:%M:00')}\n"
-                                              f"Note: Entry in 2 minutes.")
-                        else:
-                            send_telegram_msg(f"ℹ️ Analysis complete: No breakout detected.") # Status Message
-                except Exception as e:
-                    send_telegram_msg(f"⚠️ Error during analysis: {e}")
+        weekday = now.weekday()
+        hour = now.hour
 
-        # 3. Verify Result after Trade Closes
+        # Filter: Mon-Fri & 09:00-21:00 Beirut Time
+        if 0 <= weekday <= 4 and 9 <= hour < 21:
+            if now.second == 0 and active_trade is None:
+                current_min = now.strftime('%H:%M')
+                if last_signal_time != current_min:
+                    last_signal_time = current_min
+                    
+                    try:
+                        # Fetch 6000 ticks for 100-candle accuracy
+                        ws = websocket.create_connection(WS_URL, timeout=10)
+                        ws.send(json.dumps({"ticks_history": SYMBOL_ID, "count": 6000, "style": "ticks"}))
+                        res = json.loads(ws.recv()); ws.close()
+                        
+                        if 'history' in res:
+                            direction, lvl_name, all_levels, l_open, l_close = calculate_breakout_logic(res['history']['prices'], res['history']['times'])
+                            
+                            # Construct Debug Report
+                            report = f"🔍 **Analysis Report: {current_min}**\n"
+                            report += f"Candle Open: `{l_open}` | Close: `{l_close}`\n"
+                            report += "--- Fibo Levels ---\n"
+                            for n, v in all_levels.items():
+                                report += f"{n}: `{v}`\n"
+                            
+                            if direction != "NONE":
+                                # Strategy: Wait 2 minutes then enter for 1 minute
+                                entry_t = now + timedelta(minutes=2)
+                                exit_t = entry_t + timedelta(minutes=1)
+                                
+                                active_trade = {
+                                    "dir": direction, "entry": entry_t, "exit": exit_t,
+                                    "entry_ts": int(entry_t.timestamp()), "exit_ts": int(exit_t.timestamp()),
+                                    "level": lvl_name
+                                }
+                                report += f"\n🚨 **SIGNAL FOUND: {direction}**\nLevel: `{lvl_name}`\nEntry Time: {entry_t.strftime('%H:%M:00')}"
+                                send_telegram_msg(report)
+                            else:
+                                report += "\nℹ️ **Result:** `No Signal`"
+                                send_telegram_msg(report)
+                                
+                    except Exception as e:
+                        print(f"Error: {e}")
+
+        # Check Result (Independent of work hours to ensure trade closure)
         if active_trade and now >= active_trade['exit'] + timedelta(seconds=2):
             win, p_in, p_out = verify_result(active_trade['entry_ts'], active_trade['exit_ts'], active_trade['dir'])
             if win is not None:
                 status = "✅ **WIN**" if win else "❌ **LOSS**"
-                send_telegram_msg(f"📊 **TRADE RESULT**\nLevel: {active_trade['level']}\nOutcome: {status}\nIn: {p_in} | Out: {p_out}")
+                send_telegram_msg(f"📊 **RESULT: {active_trade['level']}**\nOutcome: {status}\nIn: {p_in} | Out: {p_out}")
             active_trade = None 
 
         time.sleep(0.5)
