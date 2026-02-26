@@ -9,10 +9,10 @@ import threading
 from flask import Flask
 import os
 
-# --- 1. Flask Server (Uptime Management) ---
+# --- 1. Flask Server ---
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Synced 5-Min Professional Bot: ACTIVE", 200
+def home(): return "MTG 5-Min Bot: ACTIVE", 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
@@ -36,14 +36,13 @@ def send_telegram_msg(text):
     try: requests.post(url, json=payload, timeout=10)
     except: pass
 
-# --- 3. Persistence Logic (Redeploy Protection) ---
+# --- 3. Persistence Logic ---
 def save_state(trade):
     try:
         if trade:
             temp_trade = trade.copy()
             temp_trade['entry_time'] = trade['entry_time'].strftime('%Y-%m-%d %H:%M:%S')
-            with open(STATE_FILE, 'w') as f:
-                json.dump(temp_trade, f)
+            with open(STATE_FILE, 'w') as f: json.dump(temp_trade, f)
         else:
             if os.path.exists(STATE_FILE): os.remove(STATE_FILE)
     except: pass
@@ -56,32 +55,23 @@ def load_state():
                 trade['entry_time'] = datetime.strptime(trade['entry_time'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=BEIRUT_TZ)
                 return trade
     except: return None
-    return None
 
-# --- 4. Market Schedule Check ---
+# --- 4. Market Hours ---
 def is_market_open(now):
-    is_weekday = 0 <= now.weekday() <= 4  # Monday to Friday
-    is_hours = 9 <= now.hour < 21        # 09:00 to 21:00
-    return is_weekday and is_hours
+    return 0 <= now.weekday() <= 4 and 9 <= now.hour < 21
 
-# --- 5. Auto-Verification Logic ---
-def verify_5min_result(entry_time, direction):
+# --- 5. Data Retrieval & Verification ---
+def get_price_move(start_time, duration_mins):
     try:
-        start_ts = int(entry_time.timestamp())
-        end_ts = start_ts + (5 * 60)
+        start_ts = int(start_time.timestamp())
+        end_ts = start_ts + (duration_mins * 60)
         ws = websocket.create_connection(WS_URL, timeout=15)
         ws.send(json.dumps({"ticks_history": SYMBOL_ID, "start": start_ts, "end": end_ts, "style": "ticks"}))
         res = json.loads(ws.recv()); ws.close()
         prices = res['history']['prices']
-        if not prices: return "RESULT: Data Unavailable"
-        
-        p_in, p_out = float(prices[0]), float(prices[-1])
-        win = (p_out > p_in) if direction == "CALL" else (p_out < p_in)
-        
-        # Detailed English Result Message
-        status = "WIN ✅" if win else "LOSS ❌"
-        return f"Final Status: *{status}*"
-    except: return "RESULT: Verification Error"
+        if not prices: return None, None
+        return float(prices[0]), float(prices[-1])
+    except: return None, None
 
 # --- 6. Core Strategy Logic ---
 def check_5min_strategy(now):
@@ -91,22 +81,14 @@ def check_5min_strategy(now):
         analysis_time = start_candle_0 + timedelta(minutes=4, seconds=30)
         
         ws = websocket.create_connection(WS_URL, timeout=15)
-        ws.send(json.dumps({
-            "ticks_history": SYMBOL_ID,
-            "start": int(start_candle_0.timestamp()),
-            "end": int(analysis_time.timestamp()),
-            "style": "ticks"
-        }))
+        ws.send(json.dumps({"ticks_history": SYMBOL_ID, "start": int(start_candle_0.timestamp()), "end": int(analysis_time.timestamp()), "style": "ticks"}))
         res = json.loads(ws.recv()); ws.close()
         
         prices, times = res['history']['prices'], res['history']['times']
-        if not prices or len(prices) < 10: return None
-        
         df = pd.DataFrame({'price': prices, 'time': times})
         part1 = df[df['time'] < mid_point.timestamp()]
         part2 = df[df['time'] >= mid_point.timestamp()]
         
-        if part1.empty or part2.empty: return None
         p1_start, p1_end = float(part1['price'].iloc[0]), float(part1['price'].iloc[-1])
         p2_start, p2_end = float(part2['price'].iloc[0]), float(part2['price'].iloc[-1])
         
@@ -115,48 +97,57 @@ def check_5min_strategy(now):
         return None
     except: return None
 
-# --- 7. Main Engine Loop ---
+# --- 7. Main Loop ---
 def start_engine():
     global last_analysis_time, active_trade
-    active_trade = load_state() # Resume if redeployed
-    
-    print("Bot is monitoring EUR/JPY (9 AM - 9 PM, Mon-Fri)...")
+    active_trade = load_state()
 
     while True:
         now = datetime.now(BEIRUT_TZ)
         
-        if is_market_open(now):
-            # Analyze ONLY at Minute 4 (or 9, 14, 19...) at Second 30
-            if (now.minute % 5 == 4) and (now.second == 30) and active_trade is None:
+        # 1. Analysis Logic
+        if is_market_open(now) and active_trade is None:
+            if (now.minute % 5 == 4) and (now.second == 30):
                 current_ts = now.strftime('%H:%M')
                 if last_analysis_time != current_ts:
                     last_analysis_time = current_ts
                     signal = check_5min_strategy(now)
-                    
                     if signal:
-                        entry_time = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
-                        active_trade = {"dir": signal, "entry_time": entry_time}
-                        save_state(active_trade) # Immediate save
-                        
-                        msg = (
-                            f"🔔 **PREMIUM SIGNAL FOUND**\n"
-                            f"━━━━━━━━━━━━━━━━━━\n"
-                            f"📈 **Asset:** `{SYMBOL_NAME}`\n"
-                            f"🧭 **Direction:** *{signal}*\n"
-                            f"🕒 **Entry Time:** `{entry_time.strftime('%H:%M:00')}`\n"
-                            f"⌛ **Duration:** 5 Minutes\n"
-                            f"━━━━━━━━━━━━━━━━━━"
-                        )
-                        send_telegram_msg(msg)
-        
-        # Verify Results (Always runs if a trade is pending)
+                        entry_t = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
+                        active_trade = {"dir": signal, "entry_time": entry_t, "step": "INITIAL"}
+                        save_state(active_trade)
+                        send_telegram_msg(f"🚀 **NEW SIGNAL**\nPair: `{SYMBOL_NAME}`\nDIRECTION: *{signal}*\nENTRY: `{entry_t.strftime('%H:%M:00')}`\nTF: 5M")
+
+        # 2. Results & MTG Logic
         if active_trade:
-            finish_time = active_trade['entry_time'] + timedelta(minutes=5)
-            if now >= finish_time + timedelta(seconds=15):
-                res_status = verify_5min_result(active_trade['entry_time'], active_trade['dir'])
-                send_telegram_msg(f"📊 **TRADE RESULT**\n{res_status}")
-                active_trade = None
-                save_state(None) # Clear state after reporting
+            # Check Initial Result
+            if active_trade['step'] == "INITIAL":
+                finish_t = active_trade['entry_time'] + timedelta(minutes=5)
+                if now >= finish_t + timedelta(seconds=6):
+                    p_in, p_out = get_price_move(active_trade['entry_time'], 5)
+                    win = (p_out > p_in) if active_trade['dir'] == "CALL" else (p_out < p_in)
+                    
+                    if win:
+                        send_telegram_msg(f"📊 **TRADE RESULT**\nStatus: *WIN ✅*")
+                        active_trade = None
+                        save_state(None)
+                    else:
+                        # Silent loss, move to MTG
+                        active_trade['step'] = "MTG"
+                        save_state(active_trade)
+            
+            # Check MTG Result
+            elif active_trade['step'] == "MTG":
+                mtg_start_t = active_trade['entry_time'] + timedelta(minutes=5)
+                mtg_finish_t = mtg_start_t + timedelta(minutes=5)
+                if now >= mtg_finish_t + timedelta(seconds=6):
+                    p_in, p_out = get_price_move(mtg_start_t, 5)
+                    win = (p_out > p_in) if active_trade['dir'] == "CALL" else (p_out < p_in)
+                    
+                    status = "MTG WIN ✅" if win else "MTG LOSS ❌"
+                    send_telegram_msg(f"📊 **TRADE RESULT**\nStatus: *{status}*")
+                    active_trade = None
+                    save_state(None)
         
         time.sleep(0.5)
 
