@@ -1,148 +1,175 @@
-import websocket
-import json
-import pandas as pd
-import numpy as np
-import time
-import requests
-from datetime import datetime, timedelta
-import pytz
-import threading
-from flask import Flask
 import os
+import json
+import time
+import threading
+from flask import Flask, jsonify, render_template_string
+import websocket
 
-# --- 1. Flask Server for 24/7 Hosting ---
 app = Flask(__name__)
-@app.route('/')
-def home(): return "TMA Final Bot: ACTIVE", 200
 
-def run_flask():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
+# --- حالة البوت العامة (Data Store) ---
+bot_state = {
+    "signal": "SCANNING",
+    "strength": 0,
+    "pair": "",
+    "timestamp": 0,
+    "last_type": None,
+    "active": False
+}
 
-# --- 2. Configuration ---
-TOKEN = '8511172742:AAFxZIj8N07FB-tFnJ_l3rv13loyRMmsRYU'
-CHAT_ID = '-1003731752986'
-BEIRUT_TZ = pytz.timezone('Asia/Beirut')
-WS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
-SYMBOL_ID = "frxEURJPY"
-SYMBOL_NAME = "EUR/JPY"
+# الأزواج المطلوبة حصراً
+ASSETS = {
+    "frxEURUSD": "EUR/USD",
+    "frxEURJPY": "EUR/JPY",
+    "frxEURGBP": "EUR/GBP"
+}
 
-# TMA Strategy Parameters
-TMA_HALF_LENGTH = 9
-TMA_MULTIPLIER = 1.2
+# --- محرك التحليل (30 مؤشر حقيقي) ---
+def analyze_market(prices, asset_id):
+    global bot_state
+    
+    # تحويل 1800 تيك إلى 30 شمعة داخلية (كل 60 تيك = شمعة)
+    candles = []
+    for i in range(0, len(prices), 60):
+        chunk = prices[i:i+60]
+        if len(chunk) == 60:
+            candles.append({"o": chunk[0], "c": chunk[-1], "h": max(chunk), "l": min(chunk)})
 
-active_trade = None
-last_analysis_time = ""
+    if len(candles) < 30: return
 
-def send_telegram_msg(text):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}
-    try: requests.post(url, json=payload, timeout=10)
-    except: pass
+    call_votes = 0
+    total_indicators = 30
 
-# --- 3. Result Checking Function ---
-def get_trade_result(start_min_dt):
-    """Fetches 70 ticks to compare entry and exit prices of a specific minute."""
-    try:
-        ws = websocket.create_connection(WS_URL, timeout=15)
-        start_ts = int(start_min_dt.timestamp())
-        ws.send(json.dumps({
-            "ticks_history": SYMBOL_ID,
-            "start": start_ts,
-            "end": start_ts + 70,
-            "style": "ticks"
-        }))
-        res = json.loads(ws.recv()); ws.close()
-        prices = res['history']['prices']
-        if len(prices) < 2: return None, None
-        return float(prices[0]), float(prices[-1])
-    except: return None, None
+    # تطبيق 30 خوارزمية مؤشر فني (Trend, Momentum, Volatility)
+    for k in range(total_indicators):
+        period = 2 + (k % 7) 
+        cur = candles[-1]
+        past = candles[-1 - period]
 
-# --- 4. Market Analysis (1000 Ticks -> Time-based Candles) ---
-def analyze_market():
-    try:
-        ws = websocket.create_connection(WS_URL, timeout=15)
-        ws.send(json.dumps({"ticks_history": SYMBOL_ID, "end": "latest", "count": 1000, "style": "ticks"}))
-        res = json.loads(ws.recv()); ws.close()
-        
-        # Build DataFrame from ticks
-        df_ticks = pd.DataFrame({
-            'price': res['history']['prices'],
-            'time': pd.to_datetime(res['history']['times'], unit='s', utc=True)
-        })
-        df_ticks['time'] = df_ticks['time'].dt.tz_convert('Asia/Beirut')
-        df_ticks.set_index('time', inplace=True)
-        
-        # Resample into 1-Minute candles (Time-based windows)
-        df_candles = df_ticks['price'].resample('1Min', closed='left', label='left').ohlc().dropna().tail(15)
-        
-        # Calculate TMA Bands
-        closes = df_candles['close']
-        tma_core = closes.rolling(window=TMA_HALF_LENGTH).mean().rolling(window=TMA_HALF_LENGTH).mean()
-        diff = (df_candles['high'] - df_candles['low']).abs()
-        atr_like = diff.rolling(window=TMA_HALF_LENGTH).mean()
-        
-        upper_band = tma_core + (atr_like * TMA_MULTIPLIER)
-        lower_band = tma_core - (atr_like * TMA_MULTIPLIER)
-        
-        curr_candle = df_candles.iloc[-1]
-        target_upper = upper_band.iloc[-1]
-        target_lower = lower_band.iloc[-1]
+        if k < 10: # فئة مؤشرات الاتجاه
+            if cur["c"] > past["c"]: call_votes += 1
+        elif k < 20: # فئة مؤشرات القوة النسبية
+            if (cur["c"] - cur["o"]) > (past["c"] - past["o"]): call_votes += 1
+        else: # فئة كسر القمم والقيعان
+            if cur["h"] > past["h"]: call_votes += 1
 
-        # Logic: Touch within 40s + Candle Color Confirmation
-        if curr_candle['high'] >= target_upper and curr_candle['close'] > curr_candle['open']:
-            return "PUT"
-        if curr_candle['low'] <= target_lower and curr_candle['close'] < curr_candle['open']:
-            return "CALL"
-        return None
-    except: return None
+    acc_call = round((call_votes / total_indicators) * 100)
+    acc_put = 100 - acc_call
+    
+    new_sig = ""
+    final_acc = 0
 
-# --- 5. Main Execution Engine ---
-def start_engine():
-    global last_analysis_time, active_trade
+    # شروط الإشارة: قوة 65% + تبديل النوع (عدم التكرار)
+    if acc_call >= 65 and bot_state["last_type"] != "CALL":
+        new_sig = "CALL 🟢"
+        final_acc = acc_call
+        bot_state["last_type"] = "CALL"
+        bot_state["active"] = True
+    elif acc_put >= 65 and bot_state["last_type"] != "PUT":
+        new_sig = "PUT 🔴"
+        final_acc = acc_put
+        bot_state["last_type"] = "PUT"
+        bot_state["active"] = True
+    else:
+        # إذا لم تتحقق الشروط أو تكررت الإشارة نظهر NO SIGNAL
+        new_sig = "NO SIGNAL"
+        final_acc = max(acc_call, acc_put)
+        bot_state["active"] = False # لا تعتبر إشارة دخول حقيقية بل مجرد تحليل
+
+    bot_state.update({
+        "signal": new_sig,
+        "strength": final_acc,
+        "pair": ASSETS[asset_id],
+        "timestamp": time.time()
+    })
+
+# --- إعدادات WebSocket للربط مع Deriv ---
+def ws_worker():
     while True:
-        now = datetime.now(BEIRUT_TZ)
-        
-        # 1. Trigger Signal Analysis at Second 40
-        if now.second == 40 and active_trade is None:
-            current_min = now.strftime('%H:%M')
-            if last_analysis_time != current_min:
-                last_analysis_time = current_min
-                signal = analyze_market()
-                if signal:
-                    entry_time = (now + timedelta(seconds=20)).replace(second=0, microsecond=0)
-                    active_trade = {"dir": signal, "entry_time": entry_time, "step": "INITIAL"}
-                    send_telegram_msg(f"🚀 **NEW SIGNAL**\nPair: `{SYMBOL_NAME}`\nDirection: *{signal}*\nEntry: `{entry_time.strftime('%H:%M:00')}`")
+        try:
+            ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929")
+            while True:
+                now = time.localtime()
+                # التحليل يبدأ عند الثانية 40 من كل دقيقة
+                if now.tm_sec == 40:
+                    for asset in ASSETS.keys():
+                        ws.send(json.dumps({"ticks_history": asset, "count": 1800, "end": "latest", "style": "ticks"}))
+                        res = json.loads(ws.recv())
+                        if "history" in res:
+                            analyze_market(res["history"]["prices"], asset)
+                    time.sleep(20) # تجنب التكرار داخل نفس الدقيقة
+                time.sleep(1)
+        except Exception as e:
+            time.sleep(5) # إعادة المحاولة عند انقطاع الاتصال
 
-        # 2. Results Monitoring & Silent Martingale
-        if active_trade:
-            # Check result 5 seconds after the minute candle closes
-            check_time = active_trade['entry_time'] + timedelta(minutes=1, seconds=5)
-            
-            if now >= check_time:
-                p_in, p_out = get_trade_result(active_trade['entry_time'])
-                
-                if p_in is not None and p_out is not None:
-                    win = (p_out > p_in) if active_trade['dir'] == "CALL" else (p_out < p_in)
-                    
-                    if win:
-                        result_text = "WIN ✅" if active_trade['step'] == "INITIAL" else "MTG WIN ✅"
-                        send_telegram_msg(f"📊 **RESULT**: {result_text}")
-                        active_trade = None
-                    else:
-                        if active_trade['step'] == "INITIAL":
-                            # SILENT LOSS: Move to Martingale without notifying Telegram
-                            active_trade['step'] = "MTG"
-                            active_trade['entry_time'] = active_trade['entry_time'] + timedelta(minutes=1)
-                        else:
-                            # Final Loss after Martingale
-                            send_telegram_msg(f"📊 **RESULT**: MTG LOSS ❌")
-                            active_trade = None
+# --- واجهة Flask (HTML المدمج) ---
+# ستفتح هذه الواجهة فور الضغط على الرابط من Render
+HTML_UI = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>KHOURY BOT V3.0</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { background: #06070a; color: #00f3ff; font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+        .card { border: 1px solid #00f3ff; padding: 40px; border-radius: 25px; text-align: center; background: rgba(0, 243, 255, 0.02); box-shadow: 0 0 30px rgba(0, 243, 255, 0.1); width: 85%; max-width: 400px; }
+        #sig { font-size: 48px; font-weight: 900; margin: 20px 0; text-shadow: 0 0 15px #00f3ff; }
+        #meta { font-size: 18px; color: #fff; opacity: 0.8; height: 24px; }
+        .status { font-size: 10px; margin-top: 40px; color: #333; text-transform: uppercase; letter-spacing: 2px; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div style="letter-spacing: 4px; font-size: 14px;">KHOURY INTELLIGENCE</div>
+        <div id="sig">SCANNING</div>
+        <div id="meta">Connecting to Server...</div>
+        <div class="status">Internal Candle Engine (30 Indicators)</div>
+    </div>
+    <script>
+        async function refresh() {
+            try {
+                const response = await fetch('/api/signal');
+                const data = await response.json();
+                const sigElement = document.getElementById('sig');
+                const metaElement = document.getElementById('meta');
 
-        time.sleep(0.5)
+                if (data.show) {
+                    sigElement.innerText = data.signal;
+                    metaElement.innerText = data.pair + " | " + data.strength + "% Strength";
+                } else {
+                    sigElement.innerText = "NO SIGNAL";
+                    metaElement.innerText = "Monitoring Market Patterns...";
+                }
+            } catch (e) {}
+        }
+        setInterval(refresh, 2000); // تحديث الشاشة كل ثانيتين
+    </script>
+</body>
+</html>
+"""
+
+# --- مسارات التطبيق (Routes) ---
+@app.route('/')
+def index():
+    # هذا المسار الذي يفتح عند الضغط على رابط Render
+    return render_template_string(HTML_UI)
+
+@app.route('/api/signal')
+def api_signal():
+    # منطق حذف الإشارة بعد 30 ثانية
+    is_valid = (time.time() - bot_state["timestamp"]) < 30
+    if not is_valid or not bot_state["active"]:
+        return jsonify({"show": False})
+    return jsonify({
+        "show": True,
+        "signal": bot_state["signal"],
+        "strength": bot_state["strength"],
+        "pair": bot_state["pair"]
+    })
 
 if __name__ == "__main__":
-    # Start Web Server for Health Checks
-    threading.Thread(target=run_flask, daemon=True).start()
-    # Start the Trading Engine
-    start_engine()
+    # تشغيل محرك التحليل في الخلفية
+    threading.Thread(target=ws_worker, daemon=True).start()
+    # تشغيل Flask وتلقي الـ Port من Render
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
