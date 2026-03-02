@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-BOT_TOKEN = "8309516496:AAExvXLR46vGN26RgkNYzSyrnz6iW1wX2lI"
+BOT_TOKEN = "8309516496:AAH6RWxzW-bYxqMLM-zNHSp7mGhgWAXe2bU"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
@@ -40,6 +40,7 @@ def user_trading_loop(chat_id, token):
             if not session: break
 
             now = datetime.now()
+            # Entry point: Every 5th minute (4, 9, 14...) at second 56
             if now.minute % 5 == 4 and now.second == 56:
                 if not trade_locks.get(chat_id, False):
                     threading.Thread(target=run_trade_logic, args=(chat_id, token)).start()
@@ -61,6 +62,7 @@ def run_trade_logic(chat_id, token):
         acc_data = session["accounts_data"][token]
         stake = acc_data["current_stake"]
 
+        # Request 320 ticks to analyze history
         ws.send(json.dumps({"ticks_history": "R_100", "end": "latest", "count": 320, "style": "ticks"}))
         res = json.loads(ws.recv())
 
@@ -74,24 +76,13 @@ def run_trade_logic(chat_id, token):
 
                 is_m4_up = current_p > p_start_min_4
                 is_m5_up = current_p > p_start_5min
-                
-                m4_dir = "UP 🟢" if is_m4_up else "DOWN 🔴"
-                m5_dir = "UP 🟢" if is_m5_up else "DOWN 🔴"
 
+                # Signal logic
                 if is_m4_up and is_m5_up:
                     target = "CALL"
                 elif not is_m4_up and not is_m5_up:
                     target = "PUT"
-                else:
-                    no_trade_msg = (
-                        f"🔍 **Analysis Report (No Signal)**\n"
-                        f"Time: {datetime.now().strftime('%H:%M:%S')}\n"
-                        f"Current Price: {current_p}\n"
-                        f"M4 Trend: {m4_dir}\n"
-                        f"M5 Trend: {m5_dir}\n"
-                        f"Result: ⚠️ Directions not aligned."
-                    )
-                    bot.send_message(chat_id, no_trade_msg, parse_mode="Markdown")
+                # If no alignment, the bot remains silent as requested
         
         if target:
             ws.send(json.dumps({
@@ -104,7 +95,7 @@ def run_trade_logic(chat_id, token):
             buy_res = json.loads(ws.recv())
             if "buy" in buy_res:
                 contract_id = buy_res["buy"]["contract_id"]
-                bot.send_message(chat_id, f"🔔 **Trade Placed: {target}**\nStake: ${stake}\nStatus: Trend Alignment Found ✅")
+                bot.send_message(chat_id, f"🔔 **Trade Placed: {target}**\nStake: ${stake}\nAnalyzing M4 & M5 trends... ✅ Match Found.")
                 ws.close()
                 time.sleep(58) 
                 monitor_result(chat_id, token, contract_id, target)
@@ -115,9 +106,10 @@ def run_trade_logic(chat_id, token):
 
         if ws: ws.close()
         trade_locks[chat_id] = False
-    except:
+    except Exception as e:
         if ws: ws.close()
         trade_locks[chat_id] = False
+        print(f"Error: {e}")
 
 def monitor_result(chat_id, token, contract_id, last_type):
     ws, _ = get_safe_connection(token)
@@ -147,6 +139,7 @@ def handle_outcome(chat_id, token, profit, last_type):
     new_total_profit = round(acc["total_profit"] + profit, 2)
     new_wins = acc.get("wins", 0) + (1 if is_win else 0)
     new_losses = acc.get("losses", 0) + (0 if is_win else 1)
+    
     new_stake = session["initial_stake"] if is_win else round(acc["current_stake"] * 2.2, 2)
 
     active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {
@@ -173,7 +166,7 @@ def handle_outcome(chat_id, token, profit, last_type):
     
     trade_locks[chat_id] = False
 
-# --- UI ---
+# --- UI & AUTH ---
 def main_keyboard():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(types.KeyboardButton('START 🚀'), types.KeyboardButton('STOP 🛑'))
@@ -217,7 +210,7 @@ def start_engine(m, token, stake, target):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {
         "is_running": True, "initial_stake": stake, "target_profit": target, "accounts_data": acc_data
     }}, upsert=True)
-    bot.send_message(m.chat.id, "🛰️ **Engine Active**", reply_markup=main_keyboard(), parse_mode="Markdown")
+    bot.send_message(m.chat.id, "🛰️ **Engine Active**\nWaiting for signal alignment...", reply_markup=main_keyboard(), parse_mode="Markdown")
     threading.Thread(target=user_trading_loop, args=(m.chat.id, token), daemon=True).start()
 
 # --- ADMIN PANEL ---
@@ -227,11 +220,12 @@ def admin():
     return render_template_string("""
     <!DOCTYPE html><html><head><title>Admin Panel</title><style>
     body { background: #0f172a; color: #f8fafc; font-family: sans-serif; text-align: center; }
-    .card { background: #1e293b; padding: 20px; border-radius: 10px; display: inline-block; margin-top: 50px; width: 400px; }
-    input, select { padding: 10px; margin: 5px; width: 80%; border-radius: 5px; border: none; }
-    button { padding: 10px 20px; background: #38bdf8; border: none; cursor: pointer; font-weight: bold; border-radius: 5px; }
+    .card { background: #1e293b; padding: 20px; border-radius: 10px; display: inline-block; margin-top: 50px; width: 420px; }
+    input, select { padding: 10px; margin: 5px; width: 85%; border-radius: 5px; border: none; }
+    button { padding: 10px 20px; background: #38bdf8; border: none; cursor: pointer; font-weight: bold; border-radius: 5px; margin-top: 10px; }
     table { width: 100%; margin-top: 20px; border-collapse: collapse; }
     th, td { padding: 10px; border-bottom: 1px solid #334155; }
+    .del-btn { color: #f87171; text-decoration: none; font-weight: bold; }
     </style></head><body><div class="card"><h2>User Management</h2>
     <form action="/add" method="POST">
         <input name="email" placeholder="User Email" required><br>
@@ -245,7 +239,7 @@ def admin():
     </form>
     <table><tr><th>Email</th><th>Expiry</th><th>Action</th></tr>
     {% for u in users %}
-    <tr><td>{{u.email}}</td><td>{{u.expiry}}</td><td><a href="/delete/{{u.email}}" style="color:#f87171">Del</a></td></tr>
+    <tr><td>{{u.email}}</td><td>{{u.expiry}}</td><td><a href="/delete/{{u.email}}" class="del-btn">Del</a></td></tr>
     {% endfor %}</table></div></body></html>
     """, users=users)
 
