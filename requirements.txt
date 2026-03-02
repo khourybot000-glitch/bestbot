@@ -1,8 +1,5 @@
+pyTelegramBotAPI
 websocket-client
-pandas
-requests
-pytz
+pymongo
+dnspython
 flask
-gunicorn
-pandas_ta
-telebot
