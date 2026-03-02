@@ -8,7 +8,6 @@ from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
-# --- إعدادات النظام ---
 bot_config = {
     "isRunning": False,
     "displayMsg": "WAITING",
@@ -28,116 +27,117 @@ def add_log(msg):
     bot_config["logs"].append(f"[{time.strftime('%H:%M:%S')}] {msg}")
     if len(bot_config["logs"]) > 5: bot_config["logs"].pop(0)
 
-# --- محرك التحليل الزمني (Snapshot Analysis) ---
 def perform_analysis(ticks, times, asset_id):
     global bot_config
     
-    current_price = ticks[-1]
+    # 1. السعر الحالي اللحظي (عند ثانية 50)
+    current_price = ticks[-1] 
+    
+    # 2. تحديد الأوقات المستهدفة
     now = datetime.now()
+    # بداية شمعة الـ 10 دقائق (مثلاً 12:00:00)
+    target_10m = now.replace(minute=(now.minute // 10) * 10, second=0, microsecond=0).timestamp()
+    # بداية الدقيقة الأخيرة (مثلاً 12:09:00)
+    target_1m = now.replace(second=0, microsecond=0).timestamp()
     
-    # تحديد النقاط الزمنية المطلوبة
-    # نقطة الـ 10 دقائق (بداية العشر دقائق الحالية)
-    start_of_10m = now.replace(minute=(now.minute // 10) * 10, second=0, microsecond=0)
-    # نقطة الدقيقة الحالية (بداية الدقيقة التي نحن فيها)
-    start_of_1m = now.replace(second=0, microsecond=0)
+    price_at_10m = None
+    price_at_1m = None
+
+    # البحث العكسي (من الأحدث للأقدم) لضمان دقة "آخر" تيك في تلك اللحظة
+    for i in range(len(times)-1, -1, -1):
+        if price_at_1m is None and times[i] <= target_1m:
+            price_at_1m = ticks[i]
+        if price_at_10m is None and times[i] <= target_10m:
+            price_at_10m = ticks[i]
+            break # وجدنا الأبعد، نتوقف
+
+    # تأمين البيانات في حال وجود فجوة (Gap)
+    if price_at_1m is None: price_at_1m = ticks[-60]
+    if price_at_10m is None: price_at_10m = ticks[0]
+
+    # --- المنطق الحسابي الصارم ---
+    # شمعة 10 دقائق: (السعر الآن) أكبر من (السعر قبل 10 دقائق)
+    is_m10_up = current_price > price_at_10m
+    is_m10_down = current_price < price_at_10m
     
-    price_at_10m_start = None
-    price_at_1m_start = None
-
-    # البحث في الـ 1000 تيك عن الأسعار عند تلك اللحظات
-    for i in range(len(times)):
-        t_dt = datetime.fromtimestamp(int(times[i]))
-        if price_at_10m_start is None and t_dt >= start_of_10m:
-            price_at_10m_start = ticks[i]
-        if price_at_1m_start is None and t_dt >= start_of_1m:
-            price_at_1m_start = ticks[i]
-
-    # احتياطي في حال عدم توفر البيانات الزمنية بدقة
-    if price_at_10m_start is None: price_at_10m_start = ticks[0]
-    if price_at_1m_start is None: price_at_1m_start = ticks[-60] if len(ticks) > 60 else ticks[0]
-
-    # المقارنة الشرطية
-    is_m10_up = current_price > price_at_10m_start
-    is_m10_down = current_price < price_at_10m_start
-    is_m1_up = current_price > price_at_1m_start
-    is_m1_down = current_price < price_at_1m_start
+    # شمعة الدقيقة الأخيرة: (السعر الآن) أكبر من (السعر قبل 50 ثانية)
+    is_m1_up = current_price > price_at_1m
+    is_m1_down = current_price < price_at_1m
 
     next_entry = (now + timedelta(seconds=10)).strftime("%H:%M")
 
-    # إصدار الإشارة
+    # تطبيق الفلتر المزدوج (يجب أن يتفقا تماماً)
     if is_m10_up and is_m1_up:
         bot_config.update({
             "displayMsg": "SIGNAL FOUND", "isSignal": True, "direction": "CALL 🟢",
             "strength": 98, "pair_name": ASSETS[asset_id],
             "timestamp": time.time(), "entryTime": next_entry
         })
-        add_log("Bullish Alignment: CALL Signal sent.")
+        add_log(f"SUCCESS: M10 UP & M1 UP")
     elif is_m10_down and is_m1_down:
         bot_config.update({
             "displayMsg": "SIGNAL FOUND", "isSignal": True, "direction": "PUT 🔴",
             "strength": 98, "pair_name": ASSETS[asset_id],
             "timestamp": time.time(), "entryTime": next_entry
         })
-        add_log("Bearish Alignment: PUT Signal sent.")
+        add_log(f"SUCCESS: M10 DOWN & M1 DOWN")
     else:
+        # هنا الحالة التي حدثت معك: اختلاف الاتجاهين
         bot_config.update({
             "displayMsg": "NO SIGNAL", "isSignal": False,
             "timestamp": time.time(), "entryTime": ""
         })
-        add_log("No trend alignment found at 50s.")
+        reason = "M10 UP but M1 DOWN" if is_m10_up else "M10 DOWN but M1 UP"
+        add_log(f"REJECTED: {reason}")
 
-# --- نظام WebSocket المتقطع ---
 def smart_ws_worker():
     while True:
         now = datetime.now()
-        # التحليل فقط عند الدقيقة 9 و الثانية 50
         if bot_config["isRunning"] and (now.minute % 10 == 9) and (now.second == 50):
             try:
                 ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=15)
-                asset = bot_config["pair_id"]
-                ws.send(json.dumps({"ticks_history": asset, "count": 1000, "end": "latest", "style": "ticks"}))
+                ws.send(json.dumps({"ticks_history": bot_config["pair_id"], "count": 1000, "end": "latest", "style": "ticks"}))
                 res = json.loads(ws.recv())
                 if "history" in res:
-                    perform_analysis(res["history"]["prices"], res["history"]["times"], asset)
+                    perform_analysis(res["history"]["prices"], res["history"]["times"], bot_config["pair_id"])
                 ws.close()
                 time.sleep(5)
-            except Exception as e:
-                add_log(f"Socket Error: {str(e)}")
+            except: pass
         time.sleep(0.5)
 
-# --- واجهة المستخدم النيون ---
+# --- واجهة المستخدم (تعديل M1 و LOGS) ---
 UI = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>KHOURY M1 BOT</title>
+    <title>KHOURY V4 PRECISION</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         :root { --neon: #00f3ff; --green: #39ff14; --red: #ff4757; }
-        body { background: #06070a; color: white; font-family: 'Courier New', monospace; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
-        #login { position: fixed; inset: 0; background: #020617; z-index: 2000; display: flex; flex-direction: column; justify-content: center; align-items: center; }
-        .box { background: rgba(0,243,255,0.02); padding: 30px; border-radius: 20px; border: 1px solid var(--neon); text-align: center; width: 300px; box-shadow: 0 0 15px rgba(0,243,255,0.1); }
-        input, select { background: #000; border: 1px solid #333; color: var(--neon); padding: 12px; width: 100%; margin-bottom: 15px; border-radius: 8px; outline: none; text-align: center; }
-        .btn { width: 100%; padding: 12px; border-radius: 8px; border: 1px solid var(--neon); background: transparent; color: var(--neon); font-weight: bold; cursor: pointer; transition: 0.3s; }
+        body { background: #010409; color: white; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
+        #login { position: fixed; inset: 0; background: #0d1117; z-index: 2000; display: flex; flex-direction: column; justify-content: center; align-items: center; }
+        .box { background: #161b22; padding: 40px; border-radius: 20px; border: 1px solid var(--neon); text-align: center; width: 320px; box-shadow: 0 0 20px rgba(0,243,255,0.2); }
+        input, select { background: #0d1117; border: 1px solid #30363d; color: var(--neon); padding: 12px; width: 100%; margin-bottom: 20px; border-radius: 8px; text-align: center; outline: none; }
+        .btn { width: 100%; padding: 14px; border-radius: 8px; border: 1px solid var(--neon); background: transparent; color: var(--neon); font-weight: bold; cursor: pointer; transition: 0.3s; }
         .btn:hover { background: var(--neon); color: black; }
-        #dash { display: none; width: 90%; max-width: 400px; text-align: center; }
-        .clock { font-size: 40px; color: var(--neon); margin: 15px 0; text-shadow: 0 0 10px var(--neon); }
-        .display-area { border: 2px solid var(--neon); padding: 25px; border-radius: 20px; margin: 20px 0; background: rgba(0,243,255,0.05); min-height: 220px; display: flex; flex-direction: column; justify-content: center; }
-        .sig-text { font-size: 16px; line-height: 1.8; text-align: left; color: #fff; }
-        .logs { background: #000; height: 90px; padding: 10px; font-size: 10px; overflow-y: auto; color: var(--green); border-radius: 10px; text-align: left; border: 1px solid #111; margin-top: 15px; }
+        #dash { display: none; width: 95%; max-width: 420px; text-align: center; }
+        .clock { font-size: 45px; color: var(--neon); margin: 20px 0; font-family: monospace; text-shadow: 0 0 10px var(--neon); }
+        .display-area { border: 2px solid var(--neon); padding: 30px; border-radius: 25px; margin: 20px 0; background: rgba(0,243,255,0.02); min-height: 220px; display: flex; flex-direction: column; justify-content: center; }
+        .sig-text { font-size: 16px; line-height: 2; text-align: left; font-family: monospace; }
+        .logs { background: #000; height: 100px; padding: 10px; font-family: monospace; font-size: 11px; overflow-y: auto; color: var(--green); border-radius: 10px; text-align: left; border: 1px solid #30363d; }
     </style>
 </head>
 <body>
     <div id="login">
         <div class="box">
-            <h2 style="color: var(--neon)">KHOURY M1</h2>
-            <input type="text" id="u" placeholder="ID">
+            <h2 style="color: var(--neon)">KHOURY PRO V4</h2>
+            <input type="text" id="u" placeholder="USERNAME">
             <input type="password" id="p" placeholder="PASSWORD">
             <button class="btn" onclick="check()">LOGIN</button>
         </div>
     </div>
     <div id="dash">
-        <h2 style="color: var(--neon)">KHOURY M1 PRO</h2>
+        <h2 style="color: var(--neon)">KHOURY INTELLIGENCE</h2>
         <select id="asset">
             <option value="frxEURUSD">EUR/USD</option>
             <option value="frxEURJPY">EUR/JPY</option>
@@ -157,7 +157,7 @@ UI = """
                 document.getElementById('login').style.display='none';
                 document.getElementById('dash').style.display='block';
                 setInterval(upd, 1000);
-            } else alert('Access Denied');
+            } else alert('Error');
         }
         async function ctl(a) { await fetch(`/api/cmd?action=${a}&pair=${document.getElementById('asset').value}`); }
         async function upd() {
@@ -174,11 +174,10 @@ UI = """
                         <span style="color:var(--neon)">TIME FRAME:</span> M1<br>
                         <span style="color:var(--neon)">ENTRY TIME:</span> ${d.entry}
                     </div>`;
-                } else { disp.innerHTML = `<div style="font-size:30px; color:#555">NO SIGNAL</div>`; }
+                } else { disp.innerHTML = `<div style="font-size:32px; color:#444">NO SIGNAL</div>`; }
             } else { 
-                let m = new Date().getMinutes();
-                let wait = 9 - (m % 10);
-                disp.innerHTML = `<div style="color:#444; font-size:14px;">${d.run ? "ANALYZING TREND... (Wait " + wait + "m)" : "BOT OFFLINE"}</div>`; 
+                let wait = 9 - (new Date().getMinutes() % 10);
+                disp.innerHTML = `<div style="color:#333; font-size:14px;">ANALYZING TREND... (${wait}m remaining)</div>`; 
             }
             document.getElementById('lBox').innerHTML = d.logs.join('<br>');
         }
