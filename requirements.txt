@@ -5,3 +5,4 @@ pytz
 flask
 gunicorn
 pandas_ta
+telebot
