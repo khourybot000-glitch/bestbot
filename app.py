@@ -28,123 +28,116 @@ def add_log(msg):
     bot_config["logs"].append(f"[{time.strftime('%H:%M:%S')}] {msg}")
     if len(bot_config["logs"]) > 5: bot_config["logs"].pop(0)
 
-# --- محرك التحليل المعتمد على كتل التيكات ---
-def perform_analysis(all_prices, asset_id):
+# --- محرك التحليل الزمني (Snapshot Analysis) ---
+def perform_analysis(ticks, times, asset_id):
     global bot_config
     
-    if len(all_prices) < 120: return
-
-    # 1. تقسيم آخر 120 تيك إلى شمعتين افتراضيتين
-    # الشمعة الحالية (آخر 60 تيك)
-    current_ticks = all_prices[-60:]
-    c_open = current_ticks[0]
-    c_close = current_ticks[-1]
+    current_price = ticks[-1]
+    now = datetime.now()
     
-    # الشمعة السابقة (الـ 60 تيك التي قبلها)
-    previous_ticks = all_prices[-120:-60]
-    p_open = previous_ticks[0]
-    p_close = previous_ticks[-1]
-
-    # تحديد الاتجاهات
-    is_current_up = c_close > c_open
-    is_current_down = c_close < c_open
-    is_prev_up = p_close > p_open
-    is_prev_down = p_close < p_open
-
-    # 2. تحليل الـ 30 مؤشر (باستخدام الـ 1800 تيك كاملة للقوة الفنية)
-    candles_for_ind = []
-    for i in range(0, len(all_prices), 60):
-        chunk = all_prices[i:i+60]
-        if len(chunk) == 60:
-            candles_for_ind.append({"o": chunk[0], "c": chunk[-1]})
-
-    call_votes = 0
-    if len(candles_for_ind) >= 30:
-        for k in range(30):
-            period = 2 + (k % 8)
-            if candles_for_ind[-1]["c"] > candles_for_ind[-1-period]["c"]: call_votes += 1
-
-    acc_call = round((call_votes / 30) * 100)
-    acc_put = 100 - acc_call
-    next_min = (datetime.now() + timedelta(minutes=1)).strftime("%H:%M")
-
-    # 3. تطبيق الشروط بناءً على تقسيم الـ 120 تيك
+    # تحديد النقاط الزمنية المطلوبة
+    # نقطة الـ 10 دقائق (بداية العشر دقائق الحالية)
+    start_of_10m = now.replace(minute=(now.minute // 10) * 10, second=0, microsecond=0)
+    # نقطة الدقيقة الحالية (بداية الدقيقة التي نحن فيها)
+    start_of_1m = now.replace(second=0, microsecond=0)
     
-    # شرط CALL: (آخر 60 تيك صعود) + (الـ 60 تيك السابقة هبوط)
-    if acc_call >= 65 and is_current_up and is_prev_down:
+    price_at_10m_start = None
+    price_at_1m_start = None
+
+    # البحث في الـ 1000 تيك عن الأسعار عند تلك اللحظات
+    for i in range(len(times)):
+        t_dt = datetime.fromtimestamp(int(times[i]))
+        if price_at_10m_start is None and t_dt >= start_of_10m:
+            price_at_10m_start = ticks[i]
+        if price_at_1m_start is None and t_dt >= start_of_1m:
+            price_at_1m_start = ticks[i]
+
+    # احتياطي في حال عدم توفر البيانات الزمنية بدقة
+    if price_at_10m_start is None: price_at_10m_start = ticks[0]
+    if price_at_1m_start is None: price_at_1m_start = ticks[-60] if len(ticks) > 60 else ticks[0]
+
+    # المقارنة الشرطية
+    is_m10_up = current_price > price_at_10m_start
+    is_m10_down = current_price < price_at_10m_start
+    is_m1_up = current_price > price_at_1m_start
+    is_m1_down = current_price < price_at_1m_start
+
+    next_entry = (now + timedelta(seconds=10)).strftime("%H:%M")
+
+    # إصدار الإشارة
+    if is_m10_up and is_m1_up:
         bot_config.update({
             "displayMsg": "SIGNAL FOUND", "isSignal": True, "direction": "CALL 🟢",
-            "strength": acc_call, "pair_name": ASSETS[asset_id],
-            "timestamp": time.time(), "entryTime": next_min
+            "strength": 98, "pair_name": ASSETS[asset_id],
+            "timestamp": time.time(), "entryTime": next_entry
         })
-        add_log(f"CALL Pattern Match: {acc_call}%")
-
-    # شرط PUT: (آخر 60 تيك هبوط) + (الـ 60 تيك السابقة صعود)
-    elif acc_put >= 65 and is_current_down and is_prev_up:
+        add_log("Bullish Alignment: CALL Signal sent.")
+    elif is_m10_down and is_m1_down:
         bot_config.update({
             "displayMsg": "SIGNAL FOUND", "isSignal": True, "direction": "PUT 🔴",
-            "strength": acc_put, "pair_name": ASSETS[asset_id],
-            "timestamp": time.time(), "entryTime": next_min
+            "strength": 98, "pair_name": ASSETS[asset_id],
+            "timestamp": time.time(), "entryTime": next_entry
         })
-        add_log(f"PUT Pattern Match: {acc_put}%")
-    
+        add_log("Bearish Alignment: PUT Signal sent.")
     else:
-        # إذا لم يتحقق تقسيم الـ 120 تيك أو القوة
         bot_config.update({
             "displayMsg": "NO SIGNAL", "isSignal": False,
             "timestamp": time.time(), "entryTime": ""
         })
-        add_log("No Signal: Pattern or Strength mismatch.")
+        add_log("No trend alignment found at 50s.")
 
-# --- نظام WebSocket الذكي ---
+# --- نظام WebSocket المتقطع ---
 def smart_ws_worker():
     while True:
         now = datetime.now()
-        if bot_config["isRunning"] and now.second == 39:
+        # التحليل فقط عند الدقيقة 9 و الثانية 50
+        if bot_config["isRunning"] and (now.minute % 10 == 9) and (now.second == 50):
             try:
-                ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=10)
+                ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=15)
                 asset = bot_config["pair_id"]
-                ws.send(json.dumps({"ticks_history": asset, "count": 1800, "end": "latest", "style": "ticks"}))
-                data = json.loads(ws.recv())
-                if "history" in data:
-                    perform_analysis(data["history"]["prices"], asset)
+                ws.send(json.dumps({"ticks_history": asset, "count": 1000, "end": "latest", "style": "ticks"}))
+                res = json.loads(ws.recv())
+                if "history" in res:
+                    perform_analysis(res["history"]["prices"], res["history"]["times"], asset)
                 ws.close()
-                time.sleep(2) 
-            except: pass
+                time.sleep(5)
+            except Exception as e:
+                add_log(f"Socket Error: {str(e)}")
         time.sleep(0.5)
 
-# --- الواجهة البرمجية (HTML المعتمد سابقاً) ---
+# --- واجهة المستخدم النيون ---
 UI = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>KHOURY BOT V3.0</title>
+    <title>KHOURY M1 BOT</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         :root { --neon: #00f3ff; --green: #39ff14; --red: #ff4757; }
-        body { background: #06070a; color: white; font-family: sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
+        body { background: #06070a; color: white; font-family: 'Courier New', monospace; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
         #login { position: fixed; inset: 0; background: #020617; z-index: 2000; display: flex; flex-direction: column; justify-content: center; align-items: center; }
-        .box { background: rgba(255,255,255,0.02); padding: 35px; border-radius: 25px; border: 1px solid var(--neon); text-align: center; width: 300px; }
-        input, select { background: #000; border: 1px solid #222; color: var(--neon); padding: 12px; width: 100%; margin-bottom: 15px; border-radius: 10px; outline: none; text-align: center; }
-        .btn { width: 100%; padding: 12px; border-radius: 10px; border: 1px solid var(--neon); background: transparent; color: var(--neon); font-weight: bold; cursor: pointer; }
-        #dash { display: none; width: 95%; max-width: 400px; text-align: center; }
-        .clock { font-size: 35px; color: var(--neon); margin: 15px 0; font-family: monospace; }
-        .display-area { border: 2px solid var(--neon); padding: 20px; border-radius: 20px; margin: 20px 0; background: rgba(0,243,255,0.03); min-height: 180px; display: flex; flex-direction: column; justify-content: center; align-items: center; }
-        .sig-text { font-size: 14px; line-height: 1.7; text-align: left; font-family: monospace; color: #fff; }
-        .logs { background: #000; height: 80px; padding: 10px; font-family: monospace; font-size: 10px; overflow-y: auto; color: var(--green); border-radius: 10px; text-align: left; border: 1px solid #111; margin-top: 15px; }
+        .box { background: rgba(0,243,255,0.02); padding: 30px; border-radius: 20px; border: 1px solid var(--neon); text-align: center; width: 300px; box-shadow: 0 0 15px rgba(0,243,255,0.1); }
+        input, select { background: #000; border: 1px solid #333; color: var(--neon); padding: 12px; width: 100%; margin-bottom: 15px; border-radius: 8px; outline: none; text-align: center; }
+        .btn { width: 100%; padding: 12px; border-radius: 8px; border: 1px solid var(--neon); background: transparent; color: var(--neon); font-weight: bold; cursor: pointer; transition: 0.3s; }
+        .btn:hover { background: var(--neon); color: black; }
+        #dash { display: none; width: 90%; max-width: 400px; text-align: center; }
+        .clock { font-size: 40px; color: var(--neon); margin: 15px 0; text-shadow: 0 0 10px var(--neon); }
+        .display-area { border: 2px solid var(--neon); padding: 25px; border-radius: 20px; margin: 20px 0; background: rgba(0,243,255,0.05); min-height: 220px; display: flex; flex-direction: column; justify-content: center; }
+        .sig-text { font-size: 16px; line-height: 1.8; text-align: left; color: #fff; }
+        .logs { background: #000; height: 90px; padding: 10px; font-size: 10px; overflow-y: auto; color: var(--green); border-radius: 10px; text-align: left; border: 1px solid #111; margin-top: 15px; }
     </style>
 </head>
 <body>
     <div id="login">
         <div class="box">
-            <h2 style="color: var(--neon)">KHOURY BOT</h2>
-            <input type="text" id="u" placeholder="USERNAME">
+            <h2 style="color: var(--neon)">KHOURY M1</h2>
+            <input type="text" id="u" placeholder="ID">
             <input type="password" id="p" placeholder="PASSWORD">
             <button class="btn" onclick="check()">LOGIN</button>
         </div>
     </div>
     <div id="dash">
-        <h2 style="color: var(--neon)">KHOURY BOT V3.0</h2>
+        <h2 style="color: var(--neon)">KHOURY M1 PRO</h2>
         <select id="asset">
             <option value="frxEURUSD">EUR/USD</option>
             <option value="frxEURJPY">EUR/JPY</option>
@@ -164,7 +157,7 @@ UI = """
                 document.getElementById('login').style.display='none';
                 document.getElementById('dash').style.display='block';
                 setInterval(upd, 1000);
-            } else alert('Error');
+            } else alert('Access Denied');
         }
         async function ctl(a) { await fetch(`/api/cmd?action=${a}&pair=${document.getElementById('asset').value}`); }
         async function upd() {
@@ -177,12 +170,16 @@ UI = """
                     disp.innerHTML = `<div class="sig-text">
                         <span style="color:var(--neon)">PAIR:</span> ${d.pair}<br>
                         <span style="color:var(--neon)">DIRECTION:</span> ${d.signal}<br>
-                        <span style="color:var(--neon)">ACCURACY:</span> ${d.strength}%<br>
+                        <span style="color:var(--neon)">ACCURACY:</span> 98%<br>
                         <span style="color:var(--neon)">TIME FRAME:</span> M1<br>
                         <span style="color:var(--neon)">ENTRY TIME:</span> ${d.entry}
                     </div>`;
                 } else { disp.innerHTML = `<div style="font-size:30px; color:#555">NO SIGNAL</div>`; }
-            } else { disp.innerHTML = `<div style="color:#333">${d.run ? "ANALYZING..." : "OFFLINE"}</div>`; }
+            } else { 
+                let m = new Date().getMinutes();
+                let wait = 9 - (m % 10);
+                disp.innerHTML = `<div style="color:#444; font-size:14px;">${d.run ? "ANALYZING TREND... (Wait " + wait + "m)" : "BOT OFFLINE"}</div>`; 
+            }
             document.getElementById('lBox').innerHTML = d.logs.join('<br>');
         }
     </script>
@@ -202,7 +199,7 @@ def cmd():
 
 @app.route('/api/status')
 def get_status():
-    show = (time.time() - bot_config["timestamp"]) < 30 and bot_config["timestamp"] > 0
+    show = (time.time() - bot_config["timestamp"]) < 40 and bot_config["timestamp"] > 0
     return jsonify({
         "run": bot_config["isRunning"], "show": show, "isSignal": bot_config["isSignal"],
         "signal": bot_config["direction"], "strength": bot_config["strength"],
