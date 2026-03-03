@@ -7,8 +7,8 @@ from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
-# --- CONFIGURATION ---
-BOT_TOKEN = "8309516496:AAHYItdXoYNk6NHGsEUVGExhbyeFOVtk3fQ"
+# --- CONFIGURATION (UPDATED TOKEN) ---
+BOT_TOKEN = "8309516496:AAE8uhI2HCUTIm9Z5NA-n65n8mUgQd7544Q"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
@@ -32,7 +32,7 @@ def get_safe_connection(token):
         except:
             time.sleep(1)
 
-# --- CORE TRADING ENGINE (10-Minute Logic) ---
+# --- CORE TRADING ENGINE (10-Minute Hybrid Logic) ---
 def user_trading_loop(chat_id, token):
     while True:
         try:
@@ -40,8 +40,8 @@ def user_trading_loop(chat_id, token):
             if not session: break
 
             now = datetime.now()
-            # Analyze at minute 9, 19, 29, 39, 49, 59 at second 56
-            if now.minute % 5 == 4 and now.second == 56:
+            # Analyze at minute 9:56 of the 10-min candle
+            if now.minute % 10 == 9 and now.second == 56:
                 if not trade_locks.get(chat_id, False):
                     threading.Thread(target=run_trade_logic, args=(chat_id, token)).start()
                     time.sleep(5) 
@@ -62,7 +62,6 @@ def run_trade_logic(chat_id, token):
         acc_data = session["accounts_data"][token]
         stake = acc_data["current_stake"]
 
-        # Request 620 ticks to cover the 10-minute window
         ws.send(json.dumps({"ticks_history": "R_100", "end": "latest", "count": 620, "style": "ticks"}))
         res = json.loads(ws.recv())
 
@@ -71,32 +70,37 @@ def run_trade_logic(chat_id, token):
             prices = res["history"]["prices"]
             if len(prices) >= 600:
                 current_p = float(prices[-1])         
-                p_start_min_5 = float(prices[-301])   
-                p_start_10min = float(prices[-597])   
+                p_start_mid = float(prices[-301])   # Start of second 5 mins (Min 5)
+                p_start_10min = float(prices[-597])   # Start of 10 min candle (Min 0)
 
-                is_first_5_up = p_start_min_5 > p_start_10min
-                is_second_5_up = current_p > p_start_min_5
+                # Check directions
+                is_first_5_down = p_start_mid < p_start_10min
+                is_first_5_up = p_start_mid > p_start_10min
+                is_second_5_up = current_p > p_start_mid
+                is_second_5_down = current_p < p_start_mid
 
-                # --- REVERSED SIGNALS LOGIC ---
-                if is_first_5_up and is_second_5_up:
-                    target = "PUT"   # Trend is UP -> Trade DOWN
-                elif not is_first_5_up and not is_second_5_up:
-                    target = "CALL"  # Trend is DOWN -> Trade UP
+                # --- HYBRID LOGIC ---
+                # CALL if first 5m was DOWN and second 5m is UP
+                if is_first_5_down and is_second_5_up:
+                    target = "CALL"
+                # PUT if first 5m was UP and second 5m is DOWN
+                elif is_first_5_up and is_second_5_down:
+                    target = "PUT"
         
         if target:
             ws.send(json.dumps({
                 "buy": "1", "price": stake,
                 "parameters": {
                     "amount": stake, "basis": "stake", "contract_type": target,
-                    "duration": 1, "duration_unit": "m", "symbol": "R_100", "currency": currency
+                    "duration": 60, "duration_unit": "s", "symbol": "R_100", "currency": currency
                 }
             }))
             buy_res = json.loads(ws.recv())
             if "buy" in buy_res:
                 contract_id = buy_res["buy"]["contract_id"]
-                bot.send_message(chat_id, f"🔔 **Reversed Trade Placed: {target}**\nStake: ${stake}\nDuration: 5 Minutes")
+                bot.send_message(chat_id, f"🔔 **Trade Placed: {target}**\nStake: ${stake}\nDuration: 1 Minute")
                 ws.close()
-                time.sleep(62) 
+                time.sleep(60) 
                 monitor_result(chat_id, token, contract_id, target)
                 return 
 
@@ -119,7 +123,7 @@ def monitor_result(chat_id, token, contract_id, last_type):
                     ws.close()
                     handle_outcome(chat_id, token, profit, last_type)
                     break
-            time.sleep(2)
+            time.sleep(1)
         except:
             ws, _ = get_safe_connection(token)
             time.sleep(1)
@@ -156,7 +160,7 @@ def handle_outcome(chat_id, token, profit, last_type):
 
     if new_streak >= 4 or new_total_profit >= session["target_profit"]:
         active_sessions_col.delete_one({"chat_id": chat_id})
-        bot.send_message(chat_id, "🛑 Session Closed (Target reached or max losses).", reply_markup=main_keyboard())
+        bot.send_message(chat_id, "🛑 Session Closed (Target/Limit).", reply_markup=main_keyboard())
     
     trade_locks[chat_id] = False
 
@@ -167,7 +171,6 @@ def main_keyboard():
     return markup
 
 def reset_user_data(chat_id):
-    """Delete all session data for the user"""
     active_sessions_col.delete_one({"chat_id": chat_id})
     if chat_id in trade_locks:
         trade_locks[chat_id] = False
@@ -175,44 +178,43 @@ def reset_user_data(chat_id):
 @bot.message_handler(commands=['start'])
 def start_cmd(m):
     reset_user_data(m.chat.id)
-    bot.send_message(m.chat.id, "♻️ Data Reset. Please enter your registered email:", reply_markup=main_keyboard())
+    bot.send_message(m.chat.id, "♻️ Data Reset. Enter Registered Email:", reply_markup=main_keyboard())
     bot.register_next_step_handler(m, auth)
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
 def stop_handler(m):
     reset_user_data(m.chat.id)
-    bot.send_message(m.chat.id, "🛑 Bot Stopped and all session data cleared.", reply_markup=main_keyboard())
+    bot.send_message(m.chat.id, "🛑 Bot Stopped. All session data cleared.", reply_markup=main_keyboard())
 
 @bot.message_handler(func=lambda m: m.text == 'START 🚀')
 def start_button_handler(m):
     reset_user_data(m.chat.id)
-    bot.send_message(m.chat.id, "♻️ Restarting... Please enter your registered email:", reply_markup=main_keyboard())
+    bot.send_message(m.chat.id, "♻️ Restarting... Enter Registered Email:", reply_markup=main_keyboard())
     bot.register_next_step_handler(m, auth)
 
 def auth(m):
     if m.text == 'STOP 🛑':
         stop_handler(m)
         return
-        
     user = users_col.find_one({"email": m.text.strip().lower()})
     if user and datetime.strptime(user['expiry'], "%Y-%m-%d") > datetime.now():
-        bot.send_message(m.chat.id, "✅ Access Granted. Enter your Deriv API Token:")
+        bot.send_message(m.chat.id, "✅ Access Granted. Enter API Token:")
         bot.register_next_step_handler(m, lambda msg: setup_stake(msg, msg.text.strip()))
     else: 
-        bot.send_message(m.chat.id, "🚫 Email not found or access expired.")
+        bot.send_message(m.chat.id, "🚫 Email not registered or expired.")
 
 def setup_stake(m, token):
     if m.text == 'STOP 🛑':
         stop_handler(m)
         return
-    bot.send_message(m.chat.id, "Enter Initial Stake ($):")
+    bot.send_message(m.chat.id, "Initial Stake ($):")
     bot.register_next_step_handler(m, lambda msg: setup_target(msg, token, float(msg.text)))
 
 def setup_target(m, token, stake):
     if m.text == 'STOP 🛑':
         stop_handler(m)
         return
-    bot.send_message(m.chat.id, "Enter Target Profit ($):")
+    bot.send_message(m.chat.id, "Target Profit ($):")
     bot.register_next_step_handler(m, lambda msg: start_engine(msg, token, stake, float(msg.text)))
 
 def start_engine(m, token, stake, target):
@@ -223,7 +225,7 @@ def start_engine(m, token, stake, target):
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {
         "is_running": True, "initial_stake": stake, "target_profit": target, "accounts_data": acc_data
     }}, upsert=True)
-    bot.send_message(m.chat.id, "🛰️ **10-Minute Engine Active**\nMonitoring market... Signals are REVERSED.", reply_markup=main_keyboard(), parse_mode="Markdown")
+    bot.send_message(m.chat.id, "🛰️ **10min Hybrid Logic Active**\nMonitoring market...", reply_markup=main_keyboard())
     threading.Thread(target=user_trading_loop, args=(m.chat.id, token), daemon=True).start()
 
 # --- ADMIN PANEL ---
@@ -249,7 +251,7 @@ def admin():
         </select><br>
         <button type="submit">Activate User</button>
     </form>
-    <table><tr><th>Email</th><th>Expiry</th><th>Delete</th></tr>
+    <table><tr><th>Email</th><th>Expiry</th><th>Action</th></tr>
     {% for u in users %}
     <tr><td>{{u.email}}</td><td>{{u.expiry}}</td><td><a href="/delete/{{u.email}}" style="color:#f87171">Delete</a></td></tr>
     {% endfor %}</table></div></body></html>
