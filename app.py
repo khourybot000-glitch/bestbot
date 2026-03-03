@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-BOT_TOKEN = "8309516496:AAG7ENghwGwFobenvaCBg5iNWR7QY624v3k"
+BOT_TOKEN = "8309516496:AAHYItdXoYNk6NHGsEUVGExhbyeFOVtk3fQ"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
@@ -41,7 +41,7 @@ def user_trading_loop(chat_id, token):
 
             now = datetime.now()
             # Analyze at minute 9, 19, 29, 39, 49, 59 at second 56
-            if now.minute % 10 == 9 and now.second == 56:
+            if now.minute % 5 == 4 and now.second == 56:
                 if not trade_locks.get(chat_id, False):
                     threading.Thread(target=run_trade_logic, args=(chat_id, token)).start()
                     time.sleep(5) 
@@ -88,7 +88,7 @@ def run_trade_logic(chat_id, token):
                 "buy": "1", "price": stake,
                 "parameters": {
                     "amount": stake, "basis": "stake", "contract_type": target,
-                    "duration": 5, "duration_unit": "m", "symbol": "R_100", "currency": currency
+                    "duration": 1, "duration_unit": "m", "symbol": "R_100", "currency": currency
                 }
             }))
             buy_res = json.loads(ws.recv())
@@ -96,7 +96,7 @@ def run_trade_logic(chat_id, token):
                 contract_id = buy_res["buy"]["contract_id"]
                 bot.send_message(chat_id, f"🔔 **Reversed Trade Placed: {target}**\nStake: ${stake}\nDuration: 5 Minutes")
                 ws.close()
-                time.sleep(300) 
+                time.sleep(62) 
                 monitor_result(chat_id, token, contract_id, target)
                 return 
 
