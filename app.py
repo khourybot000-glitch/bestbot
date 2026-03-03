@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION (UPDATED TOKEN) ---
-BOT_TOKEN = "8309516496:AAE8uhI2HCUTIm9Z5NA-n65n8mUgQd7544Q"
+BOT_TOKEN = "8309516496:AAE7cxbGD4A9karkdZwVqvT0PB6uzzTGbFI"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
@@ -82,10 +82,10 @@ def run_trade_logic(chat_id, token):
                 # --- HYBRID LOGIC ---
                 # CALL if first 5m was DOWN and second 5m is UP
                 if is_first_5_down and is_second_5_up:
-                    target = "CALL"
+                    target = "PUT"
                 # PUT if first 5m was UP and second 5m is DOWN
                 elif is_first_5_up and is_second_5_down:
-                    target = "PUT"
+                    target = "CALL"
         
         if target:
             ws.send(json.dumps({
@@ -158,7 +158,7 @@ def handle_outcome(chat_id, token, profit, last_type):
     )
     bot.send_message(chat_id, stats_msg, parse_mode="Markdown")
 
-    if new_streak >= 4 or new_total_profit >= session["target_profit"]:
+    if new_streak >= 5 or new_total_profit >= session["target_profit"]:
         active_sessions_col.delete_one({"chat_id": chat_id})
         bot.send_message(chat_id, "🛑 Session Closed (Target/Limit).", reply_markup=main_keyboard())
     
