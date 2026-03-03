@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-BOT_TOKEN = "8309516496:AAFLNEFFZS4cVoeA0Gcfy7vEiTbVTsm69XA"
+BOT_TOKEN = "8433565422:AAHmYyeMm9MjjQ_FBQe7gwpv4EEzM6upWZI"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
@@ -32,7 +32,7 @@ def get_safe_connection(token):
         except:
             time.sleep(1)
 
-# --- CORE TRADING ENGINE ---
+# --- CORE TRADING ENGINE (10-Minute Logic) ---
 def user_trading_loop(chat_id, token):
     while True:
         try:
@@ -40,7 +40,7 @@ def user_trading_loop(chat_id, token):
             if not session: break
 
             now = datetime.now()
-            # الدخول عند الدقيقة التاسعة من كل 10 دقائق (9, 19, 29...)
+            # Analyze at minute 9, 19, 29, 39, 49, 59 at second 56
             if now.minute % 10 == 9 and now.second == 56:
                 if not trade_locks.get(chat_id, False):
                     threading.Thread(target=run_trade_logic, args=(chat_id, token)).start()
@@ -62,7 +62,7 @@ def run_trade_logic(chat_id, token):
         acc_data = session["accounts_data"][token]
         stake = acc_data["current_stake"]
 
-        # جلب 620 تيك لتغطية كامل الـ 10 دقائق
+        # Request 620 ticks to cover the 10-minute window
         ws.send(json.dumps({"ticks_history": "R_100", "end": "latest", "count": 620, "style": "ticks"}))
         res = json.loads(ws.recv())
 
@@ -70,19 +70,18 @@ def run_trade_logic(chat_id, token):
         if "history" in res and "prices" in res["history"]:
             prices = res["history"]["prices"]
             if len(prices) >= 600:
-                current_p = float(prices[-1])         # السعر الحالي (د 9:56)
-                p_start_min_5 = float(prices[-301])   # السعر عند بداية الـ 5 دقائق الثانية (د 5:00)
-                p_start_10min = float(prices[-597])   # السعر عند بداية شمعة الـ 10 دقائق (د 0:00)
+                current_p = float(prices[-1])         
+                p_start_min_5 = float(prices[-301])   
+                p_start_10min = float(prices[-597])   
 
-                # التحليل: توافق اتجاه أول 5 دقائق مع ثاني 5 دقائق
                 is_first_5_up = p_start_min_5 > p_start_10min
                 is_second_5_up = current_p > p_start_min_5
 
-                # الإشارات (عكسية حسب طلبك السابق - إذا أردت عادية اقلب PUT/CALL)
+                # --- REVERSED SIGNALS LOGIC ---
                 if is_first_5_up and is_second_5_up:
-                    target = "PUT"   # صعود قوي في 10 دقائق -> دخول هبوط
+                    target = "PUT"   # Trend is UP -> Trade DOWN
                 elif not is_first_5_up and not is_second_5_up:
-                    target = "CALL"  # هبوط قوي في 10 دقائق -> دخول صعود
+                    target = "CALL"  # Trend is DOWN -> Trade UP
         
         if target:
             ws.send(json.dumps({
@@ -95,18 +94,17 @@ def run_trade_logic(chat_id, token):
             buy_res = json.loads(ws.recv())
             if "buy" in buy_res:
                 contract_id = buy_res["buy"]["contract_id"]
-                bot.send_message(chat_id, f"🔔 **10min Candle Signal**\nType: {target}\nStake: ${stake}\nDuration: 5 Minutes")
+                bot.send_message(chat_id, f"🔔 **Reversed Trade Placed: {target}**\nStake: ${stake}\nDuration: 5 Minutes")
                 ws.close()
-                time.sleep(300) # انتظار 5 دقائق لانتهاء الصفقة
+                time.sleep(300) 
                 monitor_result(chat_id, token, contract_id, target)
                 return 
 
         if ws: ws.close()
         trade_locks[chat_id] = False
-    except Exception as e:
+    except:
         if ws: ws.close()
         trade_locks[chat_id] = False
-        print(f"Error: {e}")
 
 def monitor_result(chat_id, token, contract_id, last_type):
     ws, _ = get_safe_connection(token)
@@ -136,7 +134,6 @@ def handle_outcome(chat_id, token, profit, last_type):
     new_total_profit = round(acc["total_profit"] + profit, 2)
     new_wins = acc.get("wins", 0) + (1 if is_win else 0)
     new_losses = acc.get("losses", 0) + (0 if is_win else 1)
-    
     new_stake = session["initial_stake"] if is_win else round(acc["current_stake"] * 2.2, 2)
 
     active_sessions_col.update_one({"chat_id": chat_id}, {"$set": {
@@ -159,48 +156,77 @@ def handle_outcome(chat_id, token, profit, last_type):
 
     if new_streak >= 4 or new_total_profit >= session["target_profit"]:
         active_sessions_col.delete_one({"chat_id": chat_id})
-        bot.send_message(chat_id, f"🛑 **Session Finished**", reply_markup=main_keyboard())
+        bot.send_message(chat_id, "🛑 Session Closed (Target reached or max losses).", reply_markup=main_keyboard())
     
     trade_locks[chat_id] = False
 
-# --- UI & AUTH (نفس الكود السابق) ---
+# --- UI & DATA CONTROL ---
 def main_keyboard():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(types.KeyboardButton('START 🚀'), types.KeyboardButton('STOP 🛑'))
     return markup
 
+def reset_user_data(chat_id):
+    """Delete all session data for the user"""
+    active_sessions_col.delete_one({"chat_id": chat_id})
+    if chat_id in trade_locks:
+        trade_locks[chat_id] = False
+
 @bot.message_handler(commands=['start'])
 def start_cmd(m):
-    active_sessions_col.delete_one({"chat_id": m.chat.id})
-    trade_locks[m.chat.id] = False
-    bot.send_message(m.chat.id, "♻️ 10min System Online. Enter Email:", reply_markup=main_keyboard())
+    reset_user_data(m.chat.id)
+    bot.send_message(m.chat.id, "♻️ Data Reset. Please enter your registered email:", reply_markup=main_keyboard())
+    bot.register_next_step_handler(m, auth)
+
+@bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
+def stop_handler(m):
+    reset_user_data(m.chat.id)
+    bot.send_message(m.chat.id, "🛑 Bot Stopped and all session data cleared.", reply_markup=main_keyboard())
+
+@bot.message_handler(func=lambda m: m.text == 'START 🚀')
+def start_button_handler(m):
+    reset_user_data(m.chat.id)
+    bot.send_message(m.chat.id, "♻️ Restarting... Please enter your registered email:", reply_markup=main_keyboard())
     bot.register_next_step_handler(m, auth)
 
 def auth(m):
+    if m.text == 'STOP 🛑':
+        stop_handler(m)
+        return
+        
     user = users_col.find_one({"email": m.text.strip().lower()})
     if user and datetime.strptime(user['expiry'], "%Y-%m-%d") > datetime.now():
-        bot.send_message(m.chat.id, "Enter API Token:")
+        bot.send_message(m.chat.id, "✅ Access Granted. Enter your Deriv API Token:")
         bot.register_next_step_handler(m, lambda msg: setup_stake(msg, msg.text.strip()))
     else: 
-        bot.send_message(m.chat.id, "🚫 No Access.")
+        bot.send_message(m.chat.id, "🚫 Email not found or access expired.")
 
 def setup_stake(m, token):
-    bot.send_message(m.chat.id, "Initial Stake ($):")
+    if m.text == 'STOP 🛑':
+        stop_handler(m)
+        return
+    bot.send_message(m.chat.id, "Enter Initial Stake ($):")
     bot.register_next_step_handler(m, lambda msg: setup_target(msg, token, float(msg.text)))
 
 def setup_target(m, token, stake):
-    bot.send_message(m.chat.id, "Target Profit ($):")
+    if m.text == 'STOP 🛑':
+        stop_handler(m)
+        return
+    bot.send_message(m.chat.id, "Enter Target Profit ($):")
     bot.register_next_step_handler(m, lambda msg: start_engine(msg, token, stake, float(msg.text)))
 
 def start_engine(m, token, stake, target):
+    if m.text == 'STOP 🛑':
+        stop_handler(m)
+        return
     acc_data = {token: {"current_stake": stake, "total_profit": 0, "streak": 0, "wins": 0, "losses": 0}}
     active_sessions_col.update_one({"chat_id": m.chat.id}, {"$set": {
         "is_running": True, "initial_stake": stake, "target_profit": target, "accounts_data": acc_data
     }}, upsert=True)
-    bot.send_message(m.chat.id, "🛰️ **10min Logic Active**\nMonitoring for Minute 9:56...", reply_markup=main_keyboard(), parse_mode="Markdown")
+    bot.send_message(m.chat.id, "🛰️ **10-Minute Engine Active**\nMonitoring market... Signals are REVERSED.", reply_markup=main_keyboard(), parse_mode="Markdown")
     threading.Thread(target=user_trading_loop, args=(m.chat.id, token), daemon=True).start()
 
-# --- ADMIN PANEL (نفس الكود السابق) ---
+# --- ADMIN PANEL ---
 @app.route('/')
 def admin():
     users = list(users_col.find())
@@ -212,7 +238,7 @@ def admin():
     button { padding: 10px 20px; background: #38bdf8; border: none; cursor: pointer; font-weight: bold; border-radius: 5px; margin-top: 10px; }
     table { width: 100%; margin-top: 20px; border-collapse: collapse; }
     th, td { padding: 10px; border-bottom: 1px solid #334155; }
-    </style></head><body><div class="card"><h2>10min System Management</h2>
+    </style></head><body><div class="card"><h2>User Management</h2>
     <form action="/add" method="POST">
         <input name="email" placeholder="User Email" required><br>
         <select name="days">
@@ -223,9 +249,9 @@ def admin():
         </select><br>
         <button type="submit">Activate User</button>
     </form>
-    <table><tr><th>Email</th><th>Expiry</th><th>Action</th></tr>
+    <table><tr><th>Email</th><th>Expiry</th><th>Delete</th></tr>
     {% for u in users %}
-    <tr><td>{{u.email}}</td><td>{{u.expiry}}</td><td><a href="/delete/{{u.email}}" style="color:#f87171">Del</a></td></tr>
+    <tr><td>{{u.email}}</td><td>{{u.expiry}}</td><td><a href="/delete/{{u.email}}" style="color:#f87171">Delete</a></td></tr>
     {% endfor %}</table></div></body></html>
     """, users=users)
 
