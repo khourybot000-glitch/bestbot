@@ -1,4 +1,4 @@
 Flask==2.3.2
-websocket-client==1.6.2
 numpy==1.25.2
-TA-Lib==0.4.27
+pandas==2.1.1
+websocket-client==1.6.2
