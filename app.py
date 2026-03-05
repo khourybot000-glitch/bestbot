@@ -13,11 +13,10 @@ app = Flask(__name__)
 # --- إعدادات MongoDB ---
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 client = MongoClient(MONGO_URI)
-db = client['khoury_bot_v5_ticks']
+db = client['khoury_bot_v5_reversed']
 users_col = db['users']
 
 DERIV_WS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
-ASSETS = ["R_100", "R_75", "R_50", "R_10"]
 
 # --- منطق التحليل الفني (2 تيك) ---
 def compute_logic(df):
@@ -32,6 +31,7 @@ def compute_logic(df):
     r_curr, r_prev1, r_prev2 = rsi.iloc[-1], rsi.iloc[-2], rsi.iloc[-3]
     p_curr, e_curr = c.iloc[-1], ema_fast.iloc[-1]
     
+    # الإشارات الأصلية
     if ((r_prev1 <= 50 and r_curr > 50) or (r_prev2 <= 50 and r_prev1 > 50)) and p_curr > e_curr:
         return "CALL"
     if ((r_prev1 >= 50 and r_curr < 50) or (r_prev2 >= 50 and r_prev1 < 50)) and p_curr < e_curr:
@@ -42,40 +42,35 @@ def user_bot_logic(user_id):
     while True:
         try:
             user = users_col.find_one({"_id": ObjectId(user_id)})
-            # إذا لم يجد المستخدم (تم مسحه)، ننهي الخيط البرمجي
-            if not user:
-                break
-                
+            if not user: break
             if not user.get("is_running"):
                 time.sleep(1)
                 continue
-
             if user.get("active_contract"):
                 check_and_update_trade(user_id)
                 time.sleep(1)
                 continue
 
-            scan_and_place(user_id)
+            scan_selected_asset(user_id, user.get("selected_asset"))
             time.sleep(0.5)
-            
         except:
             time.sleep(2)
 
-def scan_and_place(user_id):
-    user = users_col.find_one({"_id": ObjectId(user_id)})
-    if not user: return
-    for asset in ASSETS:
-        try:
-            ws = websocket.create_connection(DERIV_WS_URL)
-            ws.send(json.dumps({"ticks_history": asset, "count": 200, "end": "latest", "style": "ticks"}))
-            res = json.loads(ws.recv())
-            ws.close()
-            ticks = pd.DataFrame(res['history']['prices'], columns=['close'])
-            signal = compute_logic(ticks.iloc[::2])
-            if signal != "NONE":
-                place_deriv_trade(user_id, asset, signal)
-                break
-        except: continue
+def scan_selected_asset(user_id, asset):
+    try:
+        ws = websocket.create_connection(DERIV_WS_URL)
+        ws.send(json.dumps({"ticks_history": asset, "count": 200, "end": "latest", "style": "ticks"}))
+        res = json.loads(ws.recv())
+        ws.close()
+        
+        ticks = pd.DataFrame(res['history']['prices'], columns=['close'])
+        signal = compute_logic(ticks.iloc[::2])
+        
+        if signal != "NONE":
+            # --- منطق عكس الإشارة هنا ---
+            reversed_signal = "PUT" if signal == "CALL" else "CALL"
+            place_deriv_trade(user_id, asset, reversed_signal)
+    except: pass
 
 def place_deriv_trade(user_id, asset, side):
     user = users_col.find_one({"_id": ObjectId(user_id)})
@@ -101,7 +96,7 @@ def place_deriv_trade(user_id, asset, side):
         if "buy" in res:
             users_col.update_one({"_id": ObjectId(user_id)}, {"$set": {
                 "active_contract": res["buy"]["contract_id"],
-                "status": f"IN TRADE ({asset})",
+                "status": f"IN REVERSE TRADE ({asset})",
                 "currency": currency
             }})
     except: pass
@@ -131,7 +126,6 @@ def check_and_update_trade(user_id):
                 new_data["consecutive_losses"] = user["consecutive_losses"] + 1
                 new_data["current_stake"] = round(user["current_stake"] * 2.2, 2)
             
-            # إذا وصل للخسارة الرابعة أو الهدف، نقوم بالمسح فوراً
             if new_data["consecutive_losses"] >= 4 or new_data.get("total_profit", 0) >= user["take_profit"]:
                 users_col.delete_one({"_id": ObjectId(user_id)})
                 return
@@ -139,18 +133,18 @@ def check_and_update_trade(user_id):
             users_col.update_one({"_id": ObjectId(user_id)}, {"$set": new_data})
     except: pass
 
-# --- واجهة المستخدم ---
+# --- الواجهة (HTML) ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>KHOURY PRIVACY BOT</title>
+    <title>KHOURY REVERSE V5</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        :root { --bg: #05080a; --card: #0d1117; --blue: #58a6ff; --green: #238636; --red: #da3633; }
+        :root { --bg: #05080a; --card: #0d1117; --blue: #ff9f43; --green: #238636; --red: #da3633; }
         body { background: var(--bg); color: white; font-family: sans-serif; display: flex; justify-content: center; padding: 20px; }
         .panel { background: var(--card); padding: 25px; border-radius: 20px; width: 100%; max-width: 400px; border: 1px solid #30363d; }
-        input { width: 100%; padding: 12px; margin: 8px 0; background: #010409; color: #79c0ff; border: 1px solid #30363d; border-radius: 8px; box-sizing: border-box; }
+        input, select { width: 100%; padding: 12px; margin: 8px 0; background: #010409; color: #ff9f43; border: 1px solid #30363d; border-radius: 8px; box-sizing: border-box; }
         .status-box { background: #161b22; padding: 15px; border-radius: 10px; text-align: center; margin: 15px 0; border: 1px solid #30363d; color: #f1e05a; font-weight: bold; }
         .btn { width: 100%; padding: 15px; border: none; border-radius: 10px; font-weight: bold; cursor: pointer; margin-top: 10px; }
         .start { background: var(--green); color: white; }
@@ -161,20 +155,31 @@ HTML_TEMPLATE = """
 </head>
 <body>
     <div class="panel">
-        <h2 style="text-align:center; color:var(--blue);">KHOURY SECURE V5</h2>
+        <h2 style="text-align:center; color:var(--blue);">KHOURY REVERSE V5</h2>
         <input type="text" id="user" placeholder="Session Name">
         <input type="password" id="token" placeholder="Deriv API Token">
+        
+        <select id="asset">
+            <option value="R_100">Volatility 100 Index</option>
+            <option value="R_75">Volatility 75 Index</option>
+            <option value="R_50">Volatility 50 Index</option>
+            <option value="R_10">Volatility 10 Index</option>
+            <option value="1HZ100V">Volatility 100 (1s) Index</option>
+            <option value="1HZ10V">Volatility 10 (1s) Index</option>
+        </select>
+
         <div style="display:flex; gap:10px;">
             <input type="number" id="stake" placeholder="Stake" value="1.00">
             <input type="number" id="tp" placeholder="Target" value="10.00">
         </div>
-        <div class="status-box" id="ui_status">STATUS: READY</div>
-        <button class="btn start" id="btnStart" onclick="handle('start')">START & SAVE</button>
-        <button class="btn stop" id="btnStop" onclick="handle('stop')" style="display:none;">STOP & DELETE DATA</button>
+        <div class="status-box" id="ui_status">REVERSE MODE: ON</div>
+        <button class="btn start" id="btnStart" onclick="handle('start')">START REVERSED BOT</button>
+        <button class="btn stop" id="btnStop" onclick="handle('stop')" style="display:none;">STOP & PURGE</button>
+        
         <div class="stats">
             <div class="stat-card">Wins: <b id="ui_wins">0</b></div>
             <div class="stat-card">Losses: <b id="ui_losses">0</b></div>
-            <div class="stat-card" style="grid-column: span 2;">Profit: <b id="ui_profit" style="color:var(--blue);">$ 0.00</b></div>
+            <div class="stat-card" style="grid-column: span 2;">Profit: <b id="ui_profit" style="color:var(--blue); font-size:20px;">$ 0.00</b></div>
         </div>
     </div>
     <script>
@@ -182,15 +187,13 @@ HTML_TEMPLATE = """
             const payload = {
                 username: document.getElementById('user').value,
                 token: document.getElementById('token').value,
+                asset: document.getElementById('asset').value,
                 stake: document.getElementById('stake').value,
                 tp: document.getElementById('tp').value,
                 action: type
             };
             await fetch('/manage', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
-            if(type === 'stop') {
-                alert("Session ended. All data deleted from database.");
-                location.reload();
-            }
+            if(type === 'stop') location.reload();
         }
         async function refresh() {
             const user = document.getElementById('user').value;
@@ -236,10 +239,11 @@ def manage_bot():
     user = users_col.find_one({"username": username})
     if not user:
         new_user = {
-            "username": username, "token": req['token'], "base_stake": float(req['stake']),
-            "current_stake": float(req['stake']), "take_profit": float(req['tp']),
-            "is_running": True, "status": "WAITING", "wins": 0, "losses": 0,
-            "total_profit": 0.0, "consecutive_losses": 0, "active_contract": None, "currency": "$"
+            "username": username, "token": req['token'], "selected_asset": req['asset'],
+            "base_stake": float(req['stake']), "current_stake": float(req['stake']),
+            "take_profit": float(req['tp']), "is_running": True, "status": "WAITING",
+            "wins": 0, "losses": 0, "total_profit": 0.0, "consecutive_losses": 0,
+            "active_contract": None, "currency": "$"
         }
         user_id = users_col.insert_one(new_user).inserted_id
         Thread(target=user_bot_logic, args=(str(user_id),), daemon=True).start()
