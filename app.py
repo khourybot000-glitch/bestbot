@@ -5,118 +5,91 @@ import pandas as pd
 import time
 from threading import Thread
 from flask import Flask, render_template_string, jsonify, request
+from pymongo import MongoClient
+from bson.objectid import ObjectId
 
 app = Flask(__name__)
+
+# --- إعدادات MongoDB ---
+MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
+client = MongoClient(MONGO_URI)
+db = client['khoury_bot_v5']
+users_col = db['users']
 
 # --- الإعدادات الفنية ---
 DERIV_WS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 ASSETS = ["R_100", "R_75", "R_50", "R_10"]
 
-# متغيرات الحالة العالمية
-bot_data = {
-    "is_running": False,
-    "token": "",
-    "base_stake": 1.0,
-    "current_stake": 1.0,
-    "take_profit": 10.0,
-    "status": "WAITING",
-    "wins": 0,
-    "losses": 0,
-    "total_profit": 0.0,
-    "consecutive_losses": 0,
-    "active_contract": None,
-    "check_time": 0
-}
-
+# --- منطق التحليل الفني ---
 def compute_logic(df):
-    """منطق القناص: الاختراق يجب أن يكون في آخر 60 تيك (آخر شمعتين)"""
     if len(df) < 60: return "NONE"
     c = df['close']
-    
-    # حساب RSI 14
     delta = c.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rsi = 100 - (100 / (1 + (gain / loss)))
-    
-    # حساب EMA 50
     ema50 = c.ewm(span=50, adjust=False).mean()
     
-    # تعريف المؤشرات للشموع الحالية والسابقة
-    r_curr = rsi.iloc[-1]      # الشمعة الحالية
-    r_prev1 = rsi.iloc[-2]     # الشمعة السابقة
-    r_prev2 = rsi.iloc[-3]     # الشمعة ما قبل السابقة
+    r_curr, r_prev1, r_prev2 = rsi.iloc[-1], rsi.iloc[-2], rsi.iloc[-3]
+    p_curr, e_curr = c.iloc[-1], ema50.iloc[-1]
     
-    p_curr = c.iloc[-1]
-    e_curr = ema50.iloc[-1]
-    
-    # شرط الشراء (CALL): الاختراق في آخر 60 تيك (بين الحالية والسابقة OR السابقة وما قبلها)
-    is_call_crossover = (r_prev1 <= 50 and r_curr > 50) or (r_prev2 <= 50 and r_prev1 > 50)
-    if is_call_crossover and p_curr > e_curr:
+    if ((r_prev1 <= 50 and r_curr > 50) or (r_prev2 <= 50 and r_prev1 > 50)) and p_curr > e_curr:
         return "CALL"
-    
-    # شرط البيع (PUT): الاختراق لأسفل في آخر 60 تيك
-    is_put_crossover = (r_prev1 >= 50 and r_curr < 50) or (r_prev2 >= 50 and r_prev1 < 50)
-    if is_put_crossover and p_curr < e_curr:
+    if ((r_prev1 >= 50 and r_curr < 50) or (r_prev2 >= 50 and r_prev1 < 50)) and p_curr < e_curr:
         return "PUT"
-        
     return "NONE"
 
-def bot_loop():
-    global bot_data
+# --- وظائف التداول لكل مستخدم ---
+def user_bot_logic(user_id):
     while True:
-        if not bot_data["is_running"]:
-            time.sleep(1)
+        user = users_col.find_one({"_id": ObjectId(user_id)})
+        if not user or not user.get("is_running"):
+            time.sleep(2)
             continue
 
-        # 1. فحص نتيجة الصفقة (بعد 5 دقائق و 6 ثواني)
-        if bot_data["active_contract"] and time.time() >= bot_data["check_time"]:
-            check_trade_result()
+        # 1. فحص النتيجة إذا كان هناك عقد مفتوح
+        if user.get("active_contract") and time.time() >= user.get("check_time"):
+            check_and_update_trade(user_id)
+            continue
 
-        # 2. المسح الرباعي عند الثانية 00 (فقط إذا كان البوت في حالة انتظار)
-        if bot_data["status"] == "WAITING" and not bot_data["active_contract"]:
+        # 2. المسح عند الثانية 00 إذا كان المستخدم WAITING
+        if user.get("status") == "WAITING" and not user.get("active_contract"):
             if time.strftime("%S") == "00":
-                scan_markets()
-                time.sleep(1) 
+                scan_and_place(user_id)
+                time.sleep(1)
         
         time.sleep(0.5)
 
-def scan_markets():
-    global bot_data
+def scan_and_place(user_id):
+    user = users_col.find_one({"_id": ObjectId(user_id)})
     for asset in ASSETS:
         try:
             ws = websocket.create_connection(DERIV_WS_URL)
-            # طلب 3000 تيك لضمان جودة البيانات الفنية
-            ws.send(json.dumps({"ticks_history": asset, "count": 3000, "end": "latest", "style": "ticks"}))
+            ws.send(json.dumps({"ticks_history": asset, "count": 1000, "end": "latest", "style": "ticks"}))
             res = json.loads(ws.recv())
             ws.close()
             
             ticks = pd.DataFrame(res['history']['prices'], columns=['close'])
-            candles = ticks.iloc[::30].copy() # تجميع الشموع كل 30 تيك
-            
-            signal = compute_logic(candles)
+            signal = compute_logic(ticks.iloc[::30])
             
             if signal != "NONE":
-                place_trade(asset, signal)
-                break # التوقف فوراً عن فحص باقي الأزواج فور دخول صفقة
+                place_deriv_trade(user_id, asset, signal)
+                break
         except: continue
 
-def place_trade(asset, side):
-    global bot_data
+def place_deriv_trade(user_id, asset, side):
+    user = users_col.find_one({"_id": ObjectId(user_id)})
     try:
         ws = websocket.create_connection(DERIV_WS_URL)
-        ws.send(json.dumps({"authorize": bot_data["token"]}))
+        ws.send(json.dumps({"authorize": user['token']}))
         ws.recv()
         
-        # ضمان إرسال المبلغ بخانتين عشريتين فقط
-        final_stake = round(bot_data["current_stake"], 2)
-        
+        stake = round(user['current_stake'], 2)
         trade_req = {
-            "buy": 1, "price": final_stake,
+            "buy": 1, "price": stake,
             "parameters": {
-                "amount": final_stake, "basis": "stake",
-                "contract_type": side, "currency": "USD",
-                "duration": 5, "duration_unit": "m", "symbol": asset
+                "amount": stake, "basis": "stake", "contract_type": side,
+                "currency": "USD", "duration": 5, "duration_unit": "m", "symbol": asset
             }
         }
         ws.send(json.dumps(trade_req))
@@ -124,145 +97,110 @@ def place_trade(asset, side):
         ws.close()
 
         if "buy" in res:
-            bot_data["active_contract"] = res["buy"]["contract_id"]
-            bot_data["status"] = f"IN TRADE ({asset})"
-            bot_data["check_time"] = time.time() + 306 
+            users_col.update_one({"_id": ObjectId(user_id)}, {"$set": {
+                "active_contract": res["buy"]["contract_id"],
+                "status": f"IN TRADE ({asset})",
+                "check_time": time.time() + 306
+            }})
     except: pass
 
-def check_trade_result():
-    global bot_data
+def check_and_update_trade(user_id):
+    user = users_col.find_one({"_id": ObjectId(user_id)})
     try:
         ws = websocket.create_connection(DERIV_WS_URL)
-        ws.send(json.dumps({"authorize": bot_data["token"]}))
+        ws.send(json.dumps({"authorize": user['token']}))
         ws.recv()
-        ws.send(json.dumps({"proposal_open_contract": 1, "contract_id": bot_data["active_contract"]}))
+        ws.send(json.dumps({"proposal_open_contract": 1, "contract_id": user['active_contract']}))
         res = json.loads(ws.recv())
         ws.close()
 
         contract = res["proposal_open_contract"]
         if contract["is_sold"]:
-            status = contract["status"]
-            if status == "won":
-                bot_data["total_profit"] += contract["profit"]
-                bot_data["wins"] += 1
-                bot_data["current_stake"] = round(bot_data["base_stake"], 2)
-                bot_data["consecutive_losses"] = 0
+            new_data = {
+                "active_contract": None,
+                "status": "WAITING"
+            }
+            if contract["status"] == "won":
+                new_data["total_profit"] = user["total_profit"] + contract["profit"]
+                new_data["wins"] = user["wins"] + 1
+                new_data["current_stake"] = round(user["base_stake"], 2)
+                new_data["consecutive_losses"] = 0
             else:
-                bot_data["total_profit"] -= bot_data["current_stake"]
-                bot_data["losses"] += 1
-                bot_data["consecutive_losses"] += 1
-                # مضاعفة × 2.2 مع التقريب لخانين
-                bot_data["current_stake"] = round(bot_data["current_stake"] * 2.2, 2)
+                new_data["total_profit"] = user["total_profit"] - user["current_stake"]
+                new_data["losses"] = user["losses"] + 1
+                new_data["consecutive_losses"] = user["consecutive_losses"] + 1
+                new_data["current_stake"] = round(user["current_stake"] * 2.2, 2)
             
-            bot_data["active_contract"] = None
-            bot_data["status"] = "WAITING"
+            if new_data["consecutive_losses"] >= 4 or new_data.get("total_profit", 0) >= user["take_profit"]:
+                new_data["is_running"] = False
+                new_data["status"] = "STOPPED (LIMIT REACHED)"
 
-            # شروط التوقف الإجباري
-            if bot_data["consecutive_losses"] >= 4:
-                bot_data["is_running"] = False
-                bot_data["status"] = "STOPPED: MAX LOSS (4)"
-            elif bot_data["total_profit"] >= bot_data["take_profit"]:
-                bot_data["is_running"] = False
-                bot_data["status"] = "STOPPED: TARGET REACHED"
+            users_col.update_one({"_id": ObjectId(user_id)}, {"$set": new_data})
     except: pass
 
+# --- واجهة المستخدم (HTML) ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>KHOURY V5 PRO SNIPER</title>
+    <title>KHOURY MULTI-USER BOT</title>
     <style>
-        :root { --bg: #05080a; --blue: #58a6ff; --green: #238636; --red: #da3633; --card: #0d1117; }
-        body { background: var(--bg); color: #e6edf3; font-family: 'Segoe UI', sans-serif; display: flex; flex-direction: column; align-items: center; padding: 20px; }
-        .container { background: var(--card); padding: 25px; border-radius: 20px; width: 420px; border: 1px solid #30363d; box-shadow: 0 10px 40px rgba(0,0,0,0.6); }
-        h2 { text-align: center; color: var(--blue); letter-spacing: 1.5px; margin-bottom: 25px; }
-        label { font-size: 11px; color: #8b949e; font-weight: bold; text-transform: uppercase; }
-        input { width: 100%; padding: 12px; margin: 8px 0 15px 0; background: #010409; color: #79c0ff; border: 1px solid #30363d; border-radius: 8px; box-sizing: border-box; }
-        .status-bar { background: #161b22; padding: 15px; border-radius: 10px; text-align: center; margin-bottom: 20px; border: 1px solid #30363d; color: #f1e05a; font-weight: bold; }
-        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px; }
-        .card { background: #21262d; padding: 15px; border-radius: 12px; text-align: center; border: 1px solid #30363d; }
-        .btn { width: 100%; padding: 16px; border: none; border-radius: 10px; font-weight: bold; cursor: pointer; font-size: 16px; margin-bottom: 10px; }
-        .start { background: var(--green); color: white; }
-        .stop { background: var(--red); color: white; }
-        .reset { background: #30363d; color: #8b949e; font-size: 12px; padding: 8px; margin-top: 5px; }
+        body { background: #05080a; color: white; font-family: sans-serif; display: flex; justify-content: center; padding: 20px; }
+        .card { background: #0d1117; padding: 20px; border-radius: 15px; width: 380px; border: 1px solid #30363d; }
+        input { width: 100%; padding: 10px; margin: 10px 0; background: #000; color: #58a6ff; border: 1px solid #333; border-radius: 8px; box-sizing: border-box; }
+        .btn { width: 100%; padding: 12px; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; }
+        .start { background: #238636; color: white; margin-bottom: 10px; }
+        .stop { background: #da3633; color: white; }
+        .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 15px; }
+        .stat-item { background: #161b22; padding: 10px; border-radius: 8px; text-align: center; font-size: 14px; border: 1px solid #30363d; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h2>KHOURY V5 PRO</h2>
-        
-        <label>Deriv API Token</label>
-        <input type="password" id="token" placeholder="Paste Token with Trade Access">
-        
-        <div class="grid">
-            <div>
-                <label>Initial Stake ($)</label>
-                <input type="number" id="stake" value="1.00" step="0.01">
-            </div>
-            <div>
-                <label>Target Profit ($)</label>
-                <input type="number" id="tp" value="10.00">
-            </div>
+    <div class="card">
+        <h2 style="text-align:center; color:#58a6ff;">V5 MULTI-SNIPER</h2>
+        <input type="text" id="username" placeholder="Enter Your Name">
+        <input type="password" id="token" placeholder="Deriv API Token">
+        <div style="display:flex; gap:10px;">
+            <input type="number" id="stake" placeholder="Stake" value="1.00">
+            <input type="number" id="tp" placeholder="T.Profit" value="10.00">
         </div>
-
-        <div class="status-bar" id="status">STATUS: WAITING</div>
-
-        <button id="mainBtn" class="btn start" onclick="toggleBot()">START AUTO-TRADING</button>
-        <button class="btn reset" onclick="resetStats()">RESET STATISTICS</button>
-
-        <div class="grid" style="margin-top: 20px;">
-            <div class="card">
-                <label style="color:#3fb950;">Wins</label><br>
-                <b id="wins" style="font-size:22px;">0</b>
-            </div>
-            <div class="card">
-                <label style="color:#f85149;">Losses</label><br>
-                <b id="losses" style="font-size:22px;">0</b>
-            </div>
-            <div class="card" style="grid-column: span 2; border-top: 2px solid var(--blue);">
-                <label style="color:var(--blue);">Net Profit / Loss</label><br>
-                <b id="profit" style="font-size:28px;">$ 0.00</b>
-            </div>
+        <button class="btn start" onclick="action('start')">START BOT</button>
+        <button class="btn stop" onclick="action('stop')">STOP BOT</button>
+        
+        <div id="ui_status" style="text-align:center; margin:15px 0; color:#f1e05a; font-weight:bold;">Status: Offline</div>
+        
+        <div class="stats">
+            <div class="stat-item">Wins: <b id="ui_wins" style="color:#3fb950;">0</b></div>
+            <div class="stat-item">Losses: <b id="ui_losses" style="color:#f85149;">0</b></div>
+            <div class="stat-item" style="grid-column: span 2;">Profit: <b id="ui_profit" style="color:#58a6ff;">$ 0.00</b></div>
         </div>
     </div>
 
     <script>
-        async function updateUI() {
-            try {
-                const res = await fetch('/get_data');
-                const data = await res.json();
-                document.getElementById('status').innerText = "STATUS: " + data.status;
-                document.getElementById('wins').innerText = data.wins;
-                document.getElementById('losses').innerText = data.losses;
-                document.getElementById('profit').innerText = "$ " + data.total_profit.toFixed(2);
-                
-                const btn = document.getElementById('mainBtn');
-                if(data.is_running) {
-                    btn.innerText = "STOP BOT";
-                    btn.className = "btn stop";
-                } else {
-                    btn.innerText = "START AUTO-TRADING";
-                    btn.className = "btn start";
-                }
-            } catch(e) {}
+        async function action(type) {
+            const data = {
+                username: document.getElementById('username').value,
+                token: document.getElementById('token').value,
+                stake: document.getElementById('stake').value,
+                tp: document.getElementById('tp').value,
+                type: type
+            };
+            await fetch('/handle_bot', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data) });
         }
 
-        function toggleBot() {
-            const token = document.getElementById('token').value;
-            const stake = document.getElementById('stake').value;
-            const tp = document.getElementById('tp').value;
-            if(!token) { alert("Please enter API Token"); return; }
-            fetch('/toggle', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({token, stake, tp})
-            });
+        async function update() {
+            const user = document.getElementById('username').value;
+            if(!user) return;
+            const res = await fetch('/status/' + user);
+            const d = await res.json();
+            if(d.exists) {
+                document.getElementById('ui_status').innerText = "Status: " + d.status;
+                document.getElementById('ui_wins').innerText = d.wins;
+                document.getElementById('ui_losses').innerText = d.losses;
+                document.getElementById('ui_profit').innerText = "$ " + d.total_profit.toFixed(2);
+            }
         }
-
-        function resetStats() {
-            if(confirm("Are you sure you want to reset all data?")) fetch('/reset');
-        }
-        setInterval(updateUI, 1000);
+        setInterval(update, 2000);
     </script>
 </body>
 </html>
@@ -271,33 +209,46 @@ HTML_TEMPLATE = """
 @app.route('/')
 def index(): return render_template_string(HTML_TEMPLATE)
 
-@app.route('/get_data')
-def get_data(): return jsonify(bot_data)
+@app.route('/status/<username>')
+def get_status(username):
+    user = users_col.find_one({"username": username})
+    if not user: return jsonify({"exists": False})
+    user['_id'] = str(user['_id'])
+    user['exists'] = True
+    return jsonify(user)
 
-@app.route('/reset')
-def reset():
-    global bot_data
-    bot_data.update({"wins": 0, "losses": 0, "total_profit": 0.0, "consecutive_losses": 0, "current_stake": bot_data["base_stake"]})
-    return jsonify({"ok": True})
-
-@app.route('/toggle', methods=['POST'])
-def toggle():
-    global bot_data
+@app.route('/handle_bot', methods=['POST'])
+def handle_bot():
     req = request.json
-    if not bot_data["is_running"]:
-        bot_data.update({
-            "token": req['token'],
-            "base_stake": float(req['stake']),
-            "current_stake": float(req['stake']),
-            "take_profit": float(req['tp']),
-            "is_running": True,
-            "status": "WAITING"
-        })
-    else:
-        bot_data["is_running"] = False
+    username = req['username']
+    
+    user = users_col.find_one({"username": username})
+    if not user:
+        # إنشاء مستخدم جديد في قاعدة البيانات
+        new_user = {
+            "username": username, "token": req['token'], "base_stake": float(req['stake']),
+            "current_stake": float(req['stake']), "take_profit": float(req['tp']),
+            "is_running": False, "status": "WAITING", "wins": 0, "losses": 0,
+            "total_profit": 0.0, "consecutive_losses": 0, "active_contract": None, "check_time": 0
+        }
+        user_id = users_col.insert_one(new_user).inserted_id
+        # تشغيل خيط معالجة خاص بهذا المستخدم
+        Thread(target=user_bot_logic, args=(str(user_id),), daemon=True).start()
+    
+    is_running = True if req['type'] == 'start' else False
+    users_col.update_one({"username": username}, {"$set": {
+        "is_running": is_running,
+        "token": req['token'],
+        "base_stake": float(req['stake']),
+        "take_profit": float(req['tp'])
+    }})
     return jsonify({"ok": True})
+
+# عند تشغيل التطبيق، أعد تشغيل الخيوط لجميع المستخدمين الذين لديهم حسابات
+def restart_all_threads():
+    for user in users_col.find():
+        Thread(target=user_bot_logic, args=(str(user['_id']),), daemon=True).start()
 
 if __name__ == "__main__":
-    Thread(target=bot_loop, daemon=True).start()
-    # تشغيل البوت على المنفذ 5000
-    app.run(host='0.0.0.0', port=5000)
+    restart_all_threads()
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
