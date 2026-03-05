@@ -5,44 +5,30 @@ from flask import Flask, render_template_string, jsonify, request
 
 app = Flask(__name__)
 
-# --- Technical Config ---
+# --- الإعدادات الفنية ---
 PASSWORD = "KHOURYBOT"
 DERIV_WS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 
 def compute_logic(df):
-    """
-    RSI 50 Cross Logic on the last 30-tick candle with EMA 50 Filter.
-    """
-    if len(df) < 52: return "NONE"
-    
+    """تحليل 5 تيك للشمعة واختراق آخر 15 تيك"""
+    if len(df) < 60: return "NONE"
     c = df['close']
-    
-    # 1. RSI Calculation (14 periods)
     delta = c.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
-    
-    # 2. EMA 50 Calculation
     ema50 = c.ewm(span=50, adjust=False).mean()
     
-    # Values for the last completed candle and the one before it
-    curr_rsi = rsi.iloc[-1]
-    prev_rsi = rsi.iloc[-2]
-    curr_price = c.iloc[-1]
-    curr_ema = ema50.iloc[-1]
+    curr_rsi, prev_rsi, older_rsi = rsi.iloc[-1], rsi.iloc[-2], rsi.iloc[-3]
+    curr_price, curr_ema = c.iloc[-1], ema50.iloc[-1]
     
-    # --- Strategy Execution ---
-    
-    # CALL: RSI crossed 50 UPWARDS + Price is ABOVE EMA 50
-    if prev_rsi <= 50 < curr_rsi and curr_price > curr_ema:
+    # شرط الصعود: اختراق الـ 50 للأعلى في آخر 15 تيك + السعر فوق EMA50
+    if (older_rsi <= 50 or prev_rsi <= 50) and curr_rsi > 50 and curr_price > curr_ema:
         return "BUY"
-    
-    # PUT: RSI crossed 50 DOWNWARDS + Price is BELOW EMA 50
-    if prev_rsi >= 50 > curr_rsi and curr_price < curr_ema:
+    # شرط الهبوط: اختراق الـ 50 للأسفل في آخر 15 تيك + السعر تحت EMA50
+    if (older_rsi >= 50 or prev_rsi >= 50) and curr_rsi < 50 and curr_price < curr_ema:
         return "SELL"
-        
     return "NONE"
 
 def get_ohlc(prices, size):
@@ -50,143 +36,162 @@ def get_ohlc(prices, size):
     for i in range(0, len(prices), size):
         chunk = prices.iloc[i:i+size]
         if len(chunk) >= size:
-            candles.append({
-                'open': chunk.iloc[0]['close'],
-                'high': chunk['close'].max(),
-                'low': chunk['close'].min(),
-                'close': chunk.iloc[-1]['close']
-            })
+            candles.append({'close': chunk.iloc[-1]['close']})
     return pd.DataFrame(candles)
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8">
-    <title>KHOURY SNIPER PRO - V3</title>
+    <title>KHOURY TRIPLE PANEL</title>
     <style>
-        :root { --neon-green: #00ff88; --neon-red: #ff3b3b; --neon-blue: #00d4ff; --bg-dark: #020508; --gold: #ffae00; }
-        body { background: var(--bg-dark); color: white; font-family: 'Inter', sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
-        .container { width: 380px; background: #0b0f1a; border-radius: 35px; padding: 30px; border: 1px solid #1f2633; text-align: center; position: relative; }
-        .timer-box { font-size: 60px; font-weight: 900; color: var(--neon-blue); }
-        .circle { width: 170px; height: 170px; border-radius: 50%; margin: 25px auto; border: 4px solid #1f2633; display: flex; flex-direction: column; justify-content: center; align-items: center; transition: 0.5s; }
-        .buy-glow { border-color: var(--neon-green); box-shadow: 0 0 60px var(--neon-green); }
-        .sell-glow { border-color: var(--neon-red); box-shadow: 0 0 60px var(--neon-red); }
-        .freeze-mode { border-color: var(--gold); opacity: 0.5; filter: grayscale(0.5); }
-        .btn { width: 100%; padding: 16px; border-radius: 12px; border: none; background: linear-gradient(135deg, #00d4ff, #7000ff); color: white; font-weight: bold; cursor: pointer; }
-        #status { font-size: 12px; color: #666; margin: 15px 0; height: 35px; }
-        #freeze-status { color: var(--gold); font-size: 12px; font-weight: bold; margin-bottom: 10px; display: none; }
-        .badge { font-size: 10px; border: 1px solid #333; padding: 4px 8px; border-radius: 5px; color: #888; }
+        :root { --bg: #06090f; --card: #0d1117; --blue: #58a6ff; --green: #238636; --red: #da3633; --gold: #d29922; }
+        body { background: var(--bg); color: white; font-family: 'Segoe UI', Tahoma, sans-serif; margin: 0; padding: 20px; }
+        .dashboard { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; max-width: 1100px; margin: 40px auto; }
+        
+        .pair-column { background: var(--card); border: 1px solid #30363d; border-radius: 15px; padding: 15px; text-align: center; }
+        .pair-header { font-size: 20px; font-weight: bold; color: var(--blue); border-bottom: 2px solid #21262d; padding-bottom: 10px; margin-bottom: 20px; }
+        
+        .signal-box { 
+            height: 180px; width: 100%; background: #161b22; border-radius: 12px; 
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            transition: 0.4s; border: 2px solid transparent; margin-bottom: 15px;
+        }
+        
+        .buy-active { background: var(--green) !important; box-shadow: 0 0 30px var(--green); border-color: #fff; }
+        .sell-active { background: var(--red) !important; box-shadow: 0 0 30px var(--red); border-color: #fff; }
+        .sleep-active { background: var(--gold) !important; opacity: 0.6; }
+
+        .sig-title { font-size: 24px; font-weight: 900; }
+        .sig-timer { font-size: 14px; margin-top: 5px; opacity: 0.8; }
+        .countdown { font-size: 35px; font-weight: bold; color: #8b949e; margin-bottom: 10px; }
+        
+        #login-screen { position:fixed; inset:0; background:var(--bg); z-index:1000; display:flex; flex-direction:column; justify-content:center; align-items:center; }
+        input { padding: 12px; border-radius: 8px; border: 1px solid #30363d; background: #0d1117; color: white; text-align: center; width: 200px; }
     </style>
 </head>
 <body>
-    <div id="login-screen" style="position:fixed; inset:0; background:var(--bg-dark); z-index:100; display:flex; flex-direction:column; justify-content:center; align-items:center;">
-        <h2 style="color:var(--neon-blue)">KHOURY SNIPER AI</h2>
-        <input type="password" id="pass" style="padding:15px; border-radius:12px; text-align:center; background:#111; color:white; border:1px solid #333;" placeholder="PASSWORD">
-        <button class="btn" style="width:220px; margin-top:20px" onclick="login()">ACTIVATE</button>
+
+    <div id="login-screen">
+        <h2 style="color:var(--blue)">KHOURY TRIPLE SNIPER</h2>
+        <input type="password" id="pass" placeholder="كلمة المرور">
+        <button style="margin-top:15px; padding:10px 30px; cursor:pointer;" onclick="login()">دخول</button>
     </div>
 
-    <div class="container" id="bot-ui" style="display:none">
-        <div id="freeze-status">ANALYSIS FROZEN - TRADE IN PROGRESS</div>
-        <div class="badge">30-TICK / 5-MIN EXPR</div>
-        <div class="timer-box" id="countdown">00</div>
+    <div id="main-ui" style="display:none">
+        <div style="text-align:center; color:#8b949e;">فريم 5 تيك | انتظار 2 دقيقة | فحص عند الثاية :50</div>
         
-        <div id="glow-circle" class="circle">
-            <span id="icon" style="font-size:60px">📡</span>
-            <span id="sig-text" style="font-weight:900; letter-spacing:1px;">SCANNING</span>
+        <div class="dashboard">
+            <div class="pair-column">
+                <div class="pair-header">EUR / USD</div>
+                <div class="countdown" id="count-0">00</div>
+                <div class="signal-box" id="box-0">
+                    <span class="sig-title" id="text-0">SCANNING</span>
+                    <span class="sig-timer" id="timer-0">---</span>
+                </div>
+                <div style="font-size:10px; color:#444;" id="status-0">جاهز</div>
+            </div>
+
+            <div class="pair-column">
+                <div class="pair-header">GBP / USD</div>
+                <div class="countdown" id="count-1">00</div>
+                <div class="signal-box" id="box-1">
+                    <span class="sig-title" id="text-1">SCANNING</span>
+                    <span class="sig-timer" id="timer-1">---</span>
+                </div>
+                <div style="font-size:10px; color:#444;" id="status-1">جاهز</div>
+            </div>
+
+            <div class="pair-column">
+                <div class="pair-header">EUR / JPY</div>
+                <div class="countdown" id="count-2">00</div>
+                <div class="signal-box" id="box-2">
+                    <span class="sig-title" id="text-2">SCANNING</span>
+                    <span class="sig-timer" id="timer-2">---</span>
+                </div>
+                <div style="font-size:10px; color:#444;" id="status-2">جاهز</div>
+            </div>
         </div>
-
-        <select id="asset" style="width:100%; padding:12px; background:#161b26; color:white; border-radius:10px; border:1px solid #2d3545; outline:none;">
-            <option value="frxEURUSD">EUR/USD</option>
-            <option value="frxEURGBP">EUR/GBP</option>
-            <option value="frxEURJPY">EUR/JPY</option>
-        </select>
-
-        <div id="status">Waiting for next scan...</div>
     </div>
 
     <script>
-        let lastSignalDirection = null;
-        let isFrozen = false;
-        let freezeEndTime = 0;
+        const pairs = ["frxEURUSD", "frxGBPUSD", "frxEURJPY"];
+        let lastSignals = [null, null, null];
+        let sleepEnds = [0, 0, 0];
+        let isSleeping = [false, false, false];
 
-        function playAlert(isBuy) {
-            const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        function playSound(isBuy) {
+            const ctx = new AudioContext();
             const osc = ctx.createOscillator();
-            const gain = ctx.createGain();
-            osc.frequency.setValueAtTime(isBuy ? 880 : 440, ctx.currentTime);
-            gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 2);
-            osc.connect(gain); gain.connect(ctx.destination);
-            osc.start(); osc.stop(ctx.currentTime + 2);
+            osc.frequency.value = isBuy ? 800 : 400;
+            const g = ctx.createGain();
+            g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 1);
+            osc.connect(g); g.connect(ctx.destination);
+            osc.start(); osc.stop(ctx.currentTime + 1);
         }
 
         function login() {
             if(document.getElementById('pass').value === "KHOURYBOT") {
                 document.getElementById('login-screen').style.display = 'none';
-                document.getElementById('bot-ui').style.display = 'block';
-                runClock();
+                document.getElementById('main-ui').style.display = 'block';
+                setInterval(run, 1000);
             }
         }
 
-        function runClock() {
-            setInterval(() => {
-                const now = Date.now();
-                const s = new Date().getSeconds();
-                document.getElementById('countdown').innerText = (50 - s < 0 ? 60 + (50 - s) : 50 - s).toString().padStart(2, '0');
-
-                if (isFrozen) {
-                    if (now >= freezeEndTime) {
-                        isFrozen = false;
-                        document.getElementById('freeze-status').style.display = 'none';
-                        document.getElementById('glow-circle').className = "circle";
-                        document.getElementById('status').innerText = "System back online.";
-                    } else {
-                        let rem = Math.round((freezeEndTime - now) / 1000);
-                        document.getElementById('status').innerText = `Analysis locked for ${rem}s`;
-                    }
-                }
-
-                if (s === 50 && !isFrozen) triggerScan();
-                if (s === 0 && !isFrozen) resetUI();
-            }, 1000);
-        }
-
-        async function triggerScan() {
-            document.getElementById('status').innerText = "Analyzing 30-Tick Candle...";
+        async function trigger(i) {
             try {
                 const res = await fetch('/scan', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ asset: document.getElementById('asset').value })
+                    body: JSON.stringify({ asset: pairs[i] })
                 });
                 const data = await res.json();
                 
-                if(data.signal !== "NONE") {
-                    if(data.signal === lastSignalDirection) {
-                        document.getElementById('status').innerText = "Duplicate signal skipped.";
-                        return;
-                    }
-
-                    // Signal Found
-                    lastSignalDirection = data.signal;
-                    document.getElementById('glow-circle').className = data.signal === "BUY" ? "circle buy-glow" : "circle sell-glow";
-                    document.getElementById('sig-text').innerText = data.signal === "BUY" ? "CALL 5M" : "PUT 5M";
-                    playAlert(data.signal === "BUY");
-
-                    // Start 5-Minute Freeze
-                    isFrozen = true;
-                    freezeEndTime = Date.now() + 300000; 
-                    document.getElementById('freeze-status').style.display = 'block';
-                    document.getElementById('glow-circle').classList.add('freeze-mode');
-                } else {
-                    document.getElementById('status').innerText = "No crossover detected.";
+                if(data.signal !== "NONE" && data.signal !== lastSignals[i]) {
+                    lastSignals[i] = data.signal;
+                    playSound(data.signal === "BUY");
+                    
+                    // تفعيل المربع
+                    const box = document.getElementById(`box-${i}`);
+                    box.className = data.signal === "BUY" ? "signal-box buy-active" : "signal-box sell-active";
+                    document.getElementById(`text-${i}`).innerText = data.signal === "BUY" ? "CALL 1M" : "PUT 1M";
+                    
+                    // بدء النوم (120 ثانية)
+                    isSleeping[i] = true;
+                    sleepEnds[i] = Date.now() + 120000;
                 }
-            } catch(e) { document.getElementById('status').innerText = "Sync Error"; }
+            } catch(e) {}
         }
 
-        function resetUI() {
-            document.getElementById('glow-circle').className = "circle";
-            document.getElementById('sig-text').innerText = "SCANNING";
+        function run() {
+            const now = Date.now();
+            const s = new Date().getSeconds();
+            const commonCountdown = (50 - s < 0 ? 60 + (50 - s) : 50 - s).toString().padStart(2, '0');
+
+            for(let i=0; i<3; i++) {
+                document.getElementById(`count-${i}`).innerText = commonCountdown;
+
+                if(isSleeping[i]) {
+                    const rem = Math.round((sleepEnds[i] - now) / 1000);
+                    if(rem <= 0) {
+                        isSleeping[i] = false;
+                        document.getElementById(`box-${i}`).className = "signal-box";
+                        document.getElementById(`text-${i}`).innerText = "SCANNING";
+                        document.getElementById(`timer-${i}`).innerText = "---";
+                    } else {
+                        document.getElementById(`box-${i}`).className = "signal-box sleep-active";
+                        document.getElementById(`text-${i}`).innerText = "SLEEPING";
+                        document.getElementById(`timer-${i}`).innerText = rem + "s left";
+                    }
+                }
+
+                if(s === 50 && !isSleeping[i]) trigger(i);
+                if(s === 0 && !isSleeping[i]) {
+                    document.getElementById(`box-${i}`).className = "signal-box";
+                    document.getElementById(`text-${i}`).innerText = "SCANNING";
+                }
+            }
         }
     </script>
 </body>
@@ -198,24 +203,17 @@ def index(): return render_template_string(HTML_TEMPLATE)
 
 @app.route('/scan', methods=['POST'])
 def scan():
-    asset = request.json.get('asset', 'frxEURUSD')
+    asset = request.json.get('asset')
     try:
         ws = websocket.create_connection(DERIV_WS_URL)
-        ws.send(json.dumps({"ticks_history": asset, "count": 2000, "end": "latest", "style": "ticks"}))
+        ws.send(json.dumps({"ticks_history": asset, "count": 1000, "end": "latest", "style": "ticks"}))
         data = json.loads(ws.recv())
         ws.close()
-        
         ticks = pd.DataFrame(data['history']['prices'], columns=['close'])
-        
-        # Build 30-tick candles
-        df_30t = get_ohlc(ticks, 30)
-        
-        # Compute Strategy
-        signal = compute_logic(df_30t)
-        
+        df_5t = get_ohlc(ticks, 5)
+        signal = compute_logic(df_5t)
         return jsonify({"signal": signal})
-    except:
-        return jsonify({"signal": "NONE"})
+    except: return jsonify({"signal": "NONE"})
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
