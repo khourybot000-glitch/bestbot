@@ -10,31 +10,27 @@ PASSWORD = "KHOURYBOT"
 DERIV_WS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 
 def compute_50_indicators(df):
-    """Analyzes 50 technical conditions for absolute direction accuracy."""
-    if len(df) < 20: return "NEUTRAL"
+    """Deep analysis for micro-timeframes (5 & 2 ticks)."""
+    if len(df) < 10: return "NEUTRAL"
     c, h, l, o = df['close'], df['high'], df['low'], df['open']
     
     score = 0
-    # Core indicators
-    rsi = 100 - (100 / (1 + (c.diff().clip(lower=0).rolling(14).mean() / -c.diff().clip(upper=0).rolling(14).mean())))
-    macd = c.ewm(span=12).mean() - c.ewm(span=26).mean()
-    ema = c.ewm(span=20).mean()
-    std = c.rolling(20).std()
+    # Technical Indicators optimized for noise reduction
+    rsi = 100 - (100 / (1 + (c.diff().clip(lower=0).rolling(7).mean() / -c.diff().clip(upper=0).rolling(7).mean())))
+    macd = c.ewm(span=5).mean() - c.ewm(span=13).mean()
+    ema = c.ewm(span=10).mean()
+    std = c.rolling(10).std()
     z_score = (c - ema) / std
-    stoch = (c - l.rolling(14).min()) / (h.rolling(14).max() - l.rolling(14).min()) * 100
-    cci = (c - c.rolling(14).mean()) / (0.015 * c.rolling(14).std())
-    ao = ((h+l)/2).rolling(5).mean() - ((h+l)/2).rolling(34).mean()
     
-    if rsi.iloc[-1] > 50: score += 1
+    # Fast-response logic
+    if rsi.iloc[-1] > 55: score += 1
     if macd.iloc[-1] > 0: score += 1
     if c.iloc[-1] > ema.iloc[-1]: score += 1
-    if z_score.iloc[-1] > 0: score += 1
-    if stoch.iloc[-1] > 50: score += 1
-    if cci.iloc[-1] > 0: score += 1
-    if ao.iloc[-1] > 0: score += 1
+    if z_score.iloc[-1] > 0.5: score += 1
+    if c.iloc[-1] > o.iloc[-1]: score += 1 # Price Action confirmation
     
-    if score >= 5: return "UP"
-    if score <= 2: return "DOWN"
+    if score >= 4: return "UP"
+    if score <= 1: return "DOWN"
     return "NEUTRAL"
 
 def get_ohlc(prices, size):
@@ -50,35 +46,36 @@ HTML_TEMPLATE = """
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>KHOURY SNIPER - ALTERNATING MODE</title>
+    <title>KHOURY MICRO-SNIPER (5/2 TICKS)</title>
     <style>
         :root { --neon-green: #00ff88; --neon-red: #ff3b3b; --neon-blue: #00d4ff; --bg-dark: #020508; }
         body { background: var(--bg-dark); color: white; font-family: 'Inter', sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
         .container { width: 380px; background: #0b0f1a; border-radius: 35px; padding: 30px; border: 1px solid #1f2633; text-align: center; }
         .timer-box { font-size: 55px; font-weight: 900; color: var(--neon-blue); text-shadow: 0 0 20px var(--neon-blue); }
-        .circle { width: 160px; height: 160px; border-radius: 50%; margin: 25px auto; border: 4px solid #1f2633; display: flex; flex-direction: column; justify-content: center; align-items: center; transition: 0.5s; }
+        .circle { width: 160px; height: 160px; border-radius: 50%; margin: 25px auto; border: 4px solid #1f2633; display: flex; flex-direction: column; justify-content: center; align-items: center; transition: 0.4s; }
         .buy-glow { border-color: var(--neon-green); box-shadow: 0 0 60px var(--neon-green); }
         .sell-glow { border-color: var(--neon-red); box-shadow: 0 0 60px var(--neon-red); }
         .btn { width: 100%; padding: 16px; border-radius: 12px; border: none; background: linear-gradient(135deg, #00d4ff, #7000ff); color: white; font-weight: bold; cursor: pointer; }
         select { width:100%; padding:12px; background:#161b26; color:var(--neon-green); border:1px solid #2d3545; border-radius:10px; font-weight:bold; outline:none; text-align: center; }
         #status { font-size: 12px; color: #666; margin: 15px 0; height: 35px; }
-        .memory-tag { font-size: 10px; color: var(--neon-blue); background: rgba(0,212,255,0.1); padding: 5px 10px; border-radius: 20px; margin-top: 10px; display: inline-block; }
+        .mode-tag { font-size: 9px; color: #ffae00; border: 1px solid #ffae00; padding: 2px 8px; border-radius: 5px; text-transform: uppercase; }
     </style>
 </head>
 <body>
     <div id="login-screen" style="position:fixed; inset:0; background:var(--bg-dark); z-index:100; display:flex; flex-direction:column; justify-content:center; align-items:center;">
-        <h1 style="color:var(--neon-blue); font-weight: 900;">KHOURY SNIPER AI</h1>
+        <h1 style="color:var(--neon-blue); font-weight: 900;">MICRO SNIPER AI</h1>
         <input type="password" id="pass" style="padding:15px; border-radius:12px; text-align:center; background:#111; color:white;" placeholder="PASSWORD">
         <button class="btn" style="width:200px; margin-top:20px" onclick="login()">ACTIVATE</button>
     </div>
 
     <div class="container" id="bot-ui" style="display:none">
-        <div id="live-clock" style="font-size:13px; color:var(--neon-blue);">00:00:00</div>
+        <div class="mode-tag">High-Frequency 5/2 Ticks</div>
+        <div id="live-clock" style="font-size:13px; color:var(--neon-blue); margin-top:5px;">00:00:00</div>
         <div class="timer-box" id="countdown">00</div>
         
         <div id="glow-circle" class="circle">
-            <span id="icon" style="font-size:55px">📡</span>
-            <span id="sig-text" style="font-weight:900; font-size:22px">WAITING</span>
+            <span id="icon" style="font-size:55px">🎯</span>
+            <span id="sig-text" style="font-weight:900; font-size:22px">HUNTING</span>
         </div>
 
         <select id="asset">
@@ -88,11 +85,11 @@ HTML_TEMPLATE = """
         </select>
 
         <div id="status">System Online...</div>
-        <div class="memory-tag" id="memory">Waiting for first signal...</div>
+        <div style="font-size:10px; color: var(--neon-blue);" id="memory">Ready for first flip</div>
     </div>
 
     <script>
-        let lastSignalType = null; // Memory variable: can be 'BUY' or 'SELL'
+        let lastSignalType = null; 
 
         function playSignalSound(isBuy) {
             const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -128,7 +125,7 @@ HTML_TEMPLATE = """
         }
 
         async function trigger() {
-            document.getElementById('status').innerText = "Analyzing Market Confluence...";
+            document.getElementById('status').innerText = "Scanning Micro-Ticks...";
             try {
                 const res = await fetch('/scan', {
                     method: 'POST',
@@ -137,16 +134,14 @@ HTML_TEMPLATE = """
                 });
                 const data = await res.json();
                 
-                // --- Alternating Logic Check ---
                 if(data.signal !== "NONE") {
                     if (data.signal === lastSignalType) {
-                        document.getElementById('status').innerText = `Skipped: Duplicate ${data.signal} detected.`;
+                        document.getElementById('status').innerText = `Skipped: Duplicate ${data.signal} direction.`;
                         return; 
                     }
 
-                    // Success: Signal is different from last one
                     lastSignalType = data.signal;
-                    document.getElementById('memory').innerText = `Next required: ${lastSignalType === 'BUY' ? 'SELL' : 'BUY'}`;
+                    document.getElementById('memory').innerText = `Required: ${lastSignalType === 'BUY' ? 'SELL' : 'BUY'}`;
                     
                     document.getElementById('glow-circle').className = data.signal === "BUY" ? "circle buy-glow" : "circle sell-glow";
                     document.getElementById('sig-text').innerText = data.signal === "BUY" ? "CALL" : "PUT";
@@ -154,18 +149,18 @@ HTML_TEMPLATE = """
                     document.getElementById('icon').innerText = data.signal === "BUY" ? "▲" : "▼";
                     
                     playSignalSound(data.signal === "BUY");
-                    document.getElementById('status').innerText = "Signal Confirmed!";
+                    document.getElementById('status').innerText = "MICRO SIGNAL DETECTED!";
                 } else {
-                    document.getElementById('status').innerText = "No Confluence found.";
+                    document.getElementById('status').innerText = "No Confluence.";
                 }
             } catch(e) { document.getElementById('status').innerText = "Sync Error"; }
         }
 
         function resetUI() {
             document.getElementById('glow-circle').className = "circle";
-            document.getElementById('sig-text').innerText = "WAITING";
+            document.getElementById('sig-text').innerText = "HUNTING";
             document.getElementById('sig-text').style.color = "white";
-            document.getElementById('icon').innerText = "📡";
+            document.getElementById('icon').innerText = "🎯";
         }
     </script>
 </body>
@@ -180,19 +175,19 @@ def scan():
     asset = request.json.get('asset', 'frxEURUSD')
     try:
         ws = websocket.create_connection(DERIV_WS_URL)
-        ws.send(json.dumps({"ticks_history": asset, "count": 1500, "end": "latest", "style": "ticks"}))
+        ws.send(json.dumps({"ticks_history": asset, "count": 1000, "end": "latest", "style": "ticks"}))
         data = json.loads(ws.recv())
         ws.close()
         
         ticks = pd.DataFrame(data['history']['prices'], columns=['close'])
-        f60 = compute_50_indicators(get_ohlc(ticks, 60))
-        f20 = compute_50_indicators(get_ohlc(ticks, 20))
+        
+        # Dual-Micro-Stage Analysis Only (5 & 2 ticks)
         f5 = compute_50_indicators(get_ohlc(ticks, 5))
         f2 = compute_50_indicators(get_ohlc(ticks, 2))
         
-        if f60 == f20 == f5 == f2 == "UP":
+        if f5 == f2 == "UP":
             return jsonify({"signal": "BUY"})
-        if f60 == f20 == f5 == f2 == "DOWN":
+        if f5 == f2 == "DOWN":
             return jsonify({"signal": "SELL"})
 
         return jsonify({"signal": "NONE"})
