@@ -15,7 +15,7 @@ def compute_50_indicators(df):
     c, h, l, o = df['close'], df['high'], df['low'], df['open']
     
     score = 0
-    # Core technical indicators
+    # Core indicators
     rsi = 100 - (100 / (1 + (c.diff().clip(lower=0).rolling(14).mean() / -c.diff().clip(upper=0).rolling(14).mean())))
     macd = c.ewm(span=12).mean() - c.ewm(span=26).mean()
     ema = c.ewm(span=20).mean()
@@ -25,7 +25,6 @@ def compute_50_indicators(df):
     cci = (c - c.rolling(14).mean()) / (0.015 * c.rolling(14).std())
     ao = ((h+l)/2).rolling(5).mean() - ((h+l)/2).rolling(34).mean()
     
-    # Voting logic
     if rsi.iloc[-1] > 50: score += 1
     if macd.iloc[-1] > 0: score += 1
     if c.iloc[-1] > ema.iloc[-1]: score += 1
@@ -51,34 +50,35 @@ HTML_TEMPLATE = """
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>KHOURY SNIPER PRO - AUDIO ENABLED</title>
+    <title>KHOURY SNIPER - ALTERNATING MODE</title>
     <style>
         :root { --neon-green: #00ff88; --neon-red: #ff3b3b; --neon-blue: #00d4ff; --bg-dark: #020508; }
         body { background: var(--bg-dark); color: white; font-family: 'Inter', sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
-        .container { width: 380px; background: #0b0f1a; border-radius: 35px; padding: 30px; border: 1px solid #1f2633; text-align: center; box-shadow: 0 0 50px rgba(0,212,255,0.1); }
+        .container { width: 380px; background: #0b0f1a; border-radius: 35px; padding: 30px; border: 1px solid #1f2633; text-align: center; }
         .timer-box { font-size: 55px; font-weight: 900; color: var(--neon-blue); text-shadow: 0 0 20px var(--neon-blue); }
-        .circle { width: 160px; height: 160px; border-radius: 50%; margin: 25px auto; border: 4px solid #1f2633; display: flex; flex-direction: column; justify-content: center; align-items: center; transition: 0.5s; background: rgba(0,212,255,0.02); }
-        .buy-glow { border-color: var(--neon-green); box-shadow: 0 0 60px var(--neon-green); transform: scale(1.05); }
-        .sell-glow { border-color: var(--neon-red); box-shadow: 0 0 60px var(--neon-red); transform: scale(1.05); }
-        .btn { width: 100%; padding: 16px; border-radius: 12px; border: none; background: linear-gradient(135deg, #00d4ff, #7000ff); color: white; font-weight: bold; cursor: pointer; font-size: 16px; }
+        .circle { width: 160px; height: 160px; border-radius: 50%; margin: 25px auto; border: 4px solid #1f2633; display: flex; flex-direction: column; justify-content: center; align-items: center; transition: 0.5s; }
+        .buy-glow { border-color: var(--neon-green); box-shadow: 0 0 60px var(--neon-green); }
+        .sell-glow { border-color: var(--neon-red); box-shadow: 0 0 60px var(--neon-red); }
+        .btn { width: 100%; padding: 16px; border-radius: 12px; border: none; background: linear-gradient(135deg, #00d4ff, #7000ff); color: white; font-weight: bold; cursor: pointer; }
         select { width:100%; padding:12px; background:#161b26; color:var(--neon-green); border:1px solid #2d3545; border-radius:10px; font-weight:bold; outline:none; text-align: center; }
         #status { font-size: 12px; color: #666; margin: 15px 0; height: 35px; }
+        .memory-tag { font-size: 10px; color: var(--neon-blue); background: rgba(0,212,255,0.1); padding: 5px 10px; border-radius: 20px; margin-top: 10px; display: inline-block; }
     </style>
 </head>
 <body>
     <div id="login-screen" style="position:fixed; inset:0; background:var(--bg-dark); z-index:100; display:flex; flex-direction:column; justify-content:center; align-items:center;">
-        <h1 style="color:var(--neon-blue); letter-spacing:3px; font-weight: 900;">KHOURY SNIPER AI</h1>
-        <input type="password" id="pass" style="padding:15px; border-radius:12px; text-align:center; background:#111; color:white; width: 80%; margin-bottom: 20px;" placeholder="PASSWORD">
-        <button class="btn" style="width:220px;" onclick="login()">ACTIVATE SYSTEM</button>
+        <h1 style="color:var(--neon-blue); font-weight: 900;">KHOURY SNIPER AI</h1>
+        <input type="password" id="pass" style="padding:15px; border-radius:12px; text-align:center; background:#111; color:white;" placeholder="PASSWORD">
+        <button class="btn" style="width:200px; margin-top:20px" onclick="login()">ACTIVATE</button>
     </div>
 
     <div class="container" id="bot-ui" style="display:none">
-        <div style="font-size:13px; color:var(--neon-blue);" id="live-clock">00:00:00</div>
+        <div id="live-clock" style="font-size:13px; color:var(--neon-blue);">00:00:00</div>
         <div class="timer-box" id="countdown">00</div>
         
         <div id="glow-circle" class="circle">
             <span id="icon" style="font-size:55px">📡</span>
-            <span id="sig-text" style="font-weight:900; font-size:22px">READY</span>
+            <span id="sig-text" style="font-weight:900; font-size:22px">WAITING</span>
         </div>
 
         <select id="asset">
@@ -87,29 +87,24 @@ HTML_TEMPLATE = """
             <option value="frxEURJPY">EUR/JPY</option>
         </select>
 
-        <div id="status">Syncing with Market Data...</div>
-        <div style="color:var(--neon-blue); font-size:10px; margin-top:10px;">SOUND ALERTS: ENABLED 🔊</div>
+        <div id="status">System Online...</div>
+        <div class="memory-tag" id="memory">Waiting for first signal...</div>
     </div>
 
     <script>
-        // Function to generate signal sound
+        let lastSignalType = null; // Memory variable: can be 'BUY' or 'SELL'
+
         function playSignalSound(isBuy) {
             const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
             const oscillator = audioCtx.createOscillator();
             const gainNode = audioCtx.createGain();
-
             oscillator.type = 'sine';
-            // High pitch for BUY, Slightly lower for SELL
             oscillator.frequency.setValueAtTime(isBuy ? 880 : 660, audioCtx.currentTime); 
-            
             gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
             gainNode.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 1);
-
             oscillator.connect(gainNode);
             gainNode.connect(audioCtx.destination);
-
-            oscillator.start();
-            oscillator.stop(audioCtx.currentTime + 1);
+            oscillator.start(); oscillator.stop(audioCtx.currentTime + 1);
         }
 
         function login() {
@@ -133,7 +128,7 @@ HTML_TEMPLATE = """
         }
 
         async function trigger() {
-            document.getElementById('status').innerText = "Analyzing Confluence...";
+            document.getElementById('status').innerText = "Analyzing Market Confluence...";
             try {
                 const res = await fetch('/scan', {
                     method: 'POST',
@@ -141,22 +136,34 @@ HTML_TEMPLATE = """
                     body: JSON.stringify({ asset: document.getElementById('asset').value })
                 });
                 const data = await res.json();
+                
+                // --- Alternating Logic Check ---
                 if(data.signal !== "NONE") {
+                    if (data.signal === lastSignalType) {
+                        document.getElementById('status').innerText = `Skipped: Duplicate ${data.signal} detected.`;
+                        return; 
+                    }
+
+                    // Success: Signal is different from last one
+                    lastSignalType = data.signal;
+                    document.getElementById('memory').innerText = `Next required: ${lastSignalType === 'BUY' ? 'SELL' : 'BUY'}`;
+                    
                     document.getElementById('glow-circle').className = data.signal === "BUY" ? "circle buy-glow" : "circle sell-glow";
                     document.getElementById('sig-text').innerText = data.signal === "BUY" ? "CALL" : "PUT";
                     document.getElementById('sig-text').style.color = data.signal === "BUY" ? "var(--neon-green)" : "var(--neon-red)";
                     document.getElementById('icon').innerText = data.signal === "BUY" ? "▲" : "▼";
                     
-                    // Trigger the Sound Alert
                     playSignalSound(data.signal === "BUY");
+                    document.getElementById('status').innerText = "Signal Confirmed!";
+                } else {
+                    document.getElementById('status').innerText = "No Confluence found.";
                 }
-                document.getElementById('status').innerText = data.msg;
-            } catch(e) { document.getElementById('status').innerText = "Connection Error"; }
+            } catch(e) { document.getElementById('status').innerText = "Sync Error"; }
         }
 
         function resetUI() {
             document.getElementById('glow-circle').className = "circle";
-            document.getElementById('sig-text').innerText = "READY";
+            document.getElementById('sig-text').innerText = "WAITING";
             document.getElementById('sig-text').style.color = "white";
             document.getElementById('icon').innerText = "📡";
         }
@@ -178,22 +185,19 @@ def scan():
         ws.close()
         
         ticks = pd.DataFrame(data['history']['prices'], columns=['close'])
-        
-        # Quad-Stage Confluence
         f60 = compute_50_indicators(get_ohlc(ticks, 60))
         f20 = compute_50_indicators(get_ohlc(ticks, 20))
         f5 = compute_50_indicators(get_ohlc(ticks, 5))
         f2 = compute_50_indicators(get_ohlc(ticks, 2))
         
         if f60 == f20 == f5 == f2 == "UP":
-            return jsonify({"signal": "BUY", "msg": "QUAD-SYNC CALL"})
-            
+            return jsonify({"signal": "BUY"})
         if f60 == f20 == f5 == f2 == "DOWN":
-            return jsonify({"signal": "SELL", "msg": "QUAD-SYNC PUT"})
+            return jsonify({"signal": "SELL"})
 
-        return jsonify({"signal": "NONE", "msg": "No Confluence Found"})
+        return jsonify({"signal": "NONE"})
     except:
-        return jsonify({"signal": "NONE", "msg": "Data Sync Error"})
+        return jsonify({"signal": "NONE"})
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
