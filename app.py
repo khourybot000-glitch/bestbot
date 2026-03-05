@@ -11,6 +11,7 @@ from bson.objectid import ObjectId
 app = Flask(__name__)
 
 # --- إعدادات MongoDB ---
+# تم استخدام الـ URI الخاص بك للاتصال بقاعدة البيانات
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 client = MongoClient(MONGO_URI)
 db = client['khoury_bot_v5_final']
@@ -29,13 +30,13 @@ def compute_logic(df):
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rsi = 100 - (100 / (1 + (gain / loss)))
     
-    # حساب EMA 20 للفلاتر السريعة
+    # حساب EMA 20 لفلترة الاتجاه السريع
     ema_fast = c.ewm(span=20, adjust=False).mean()
     
     r_curr, r_prev1, r_prev2 = rsi.iloc[-1], rsi.iloc[-2], rsi.iloc[-3]
     p_curr, e_curr = c.iloc[-1], ema_fast.iloc[-1]
     
-    # الإشارات الطبيعية (Direct) بناءً على شمعة الـ 5 تيك
+    # شروط الإشارة الأصلية
     if ((r_prev1 <= 50 and r_curr > 50) or (r_prev2 <= 50 and r_prev1 > 50)) and p_curr > e_curr:
         return "CALL"
     if ((r_prev1 >= 50 and r_curr < 50) or (r_prev2 >= 50 and r_prev1 < 50)) and p_curr < e_curr:
@@ -46,7 +47,7 @@ def user_bot_logic(user_id):
     while True:
         try:
             user = users_col.find_one({"_id": ObjectId(user_id)})
-            if not user: break # الخروج إذا تم مسح الجلسة
+            if not user: break # الخروج من الحلقة إذا تم مسح المستخدم
                 
             if not user.get("is_running"):
                 time.sleep(1)
@@ -57,27 +58,30 @@ def user_bot_logic(user_id):
                 time.sleep(1)
                 continue
 
-            # التحليل والبحث في الزوج المختار
+            # تحليل الزوج المختار بناءً على شمعة الـ 5 تيك
             scan_selected_asset(user_id, user.get("selected_asset"))
-            time.sleep(1) # انتظار ثانية بين كل محاولة تحليل لشموع الـ 5 تيك
+            time.sleep(0.5)
         except:
             time.sleep(2)
 
 def scan_selected_asset(user_id, asset):
     try:
         ws = websocket.create_connection(DERIV_WS_URL)
-        # نطلب 500 تيك للحصول على داتا كافية لشموع الـ 5 تيك
+        # طلب 500 تيك للحصول على داتا كافية لشموع الـ 5 تيك
         ws.send(json.dumps({"ticks_history": asset, "count": 500, "end": "latest", "style": "ticks"}))
         res = json.loads(ws.recv())
         ws.close()
         
         ticks = pd.DataFrame(res['history']['prices'], columns=['close'])
-        # --- التعديل هنا: كل شمعة = 5 تيكات ---
+        # تجميع كل 5 تيكات في شمعة واحدة
         candles = ticks.iloc[::5].copy()
         
         signal = compute_logic(candles)
+        
         if signal != "NONE":
-            place_deriv_trade(user_id, asset, signal)
+            # --- عكس الإشارة هنا ---
+            reversed_side = "PUT" if signal == "CALL" else "CALL"
+            place_deriv_trade(user_id, asset, reversed_side)
     except: pass
 
 def place_deriv_trade(user_id, asset, side):
@@ -107,7 +111,7 @@ def place_deriv_trade(user_id, asset, side):
         if "buy" in res:
             users_col.update_one({"_id": ObjectId(user_id)}, {"$set": {
                 "active_contract": res["buy"]["contract_id"],
-                "status": f"IN TRADE ({asset})",
+                "status": f"REVERSED ({asset})",
                 "currency": currency
             }})
     except: pass
@@ -137,7 +141,7 @@ def check_and_update_trade(user_id):
                 new_data["consecutive_losses"] = user["consecutive_losses"] + 1
                 new_data["current_stake"] = round(user["current_stake"] * 2.2, 2)
             
-            # محو البيانات عند انتهاء الجلسة (خسارة 4 أو ربح هدف)
+            # تدمير البيانات عند الوصول للحدود (أمان المستخدم)
             if new_data["consecutive_losses"] >= 4 or new_data.get("total_profit", 0) >= user["take_profit"]:
                 users_col.delete_one({"_id": ObjectId(user_id)})
                 return
@@ -150,15 +154,16 @@ HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>KHOURY 5-TICKS V5</title>
+    <title>KHOURY REVERSE 5-TICKS</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        :root { --bg: #05080a; --card: #0d1117; --blue: #58a6ff; --green: #238636; --red: #da3633; }
-        body { background: var(--bg); color: white; font-family: sans-serif; display: flex; justify-content: center; padding: 20px; }
-        .panel { background: var(--card); padding: 25px; border-radius: 20px; width: 100%; max-width: 400px; border: 1px solid #30363d; }
-        input, select { width: 100%; padding: 12px; margin: 8px 0; background: #010409; color: #79c0ff; border: 1px solid #30363d; border-radius: 8px; box-sizing: border-box; }
-        .status-box { background: #161b22; padding: 15px; border-radius: 10px; text-align: center; margin: 15px 0; border: 1px solid #30363d; color: #f1e05a; font-weight: bold; }
-        .btn { width: 100%; padding: 15px; border: none; border-radius: 10px; font-weight: bold; cursor: pointer; margin-top: 10px; }
+        :root { --bg: #05080a; --card: #0d1117; --blue: #ff9f43; --green: #238636; --red: #da3633; }
+        body { background: var(--bg); color: white; font-family: 'Segoe UI', sans-serif; display: flex; justify-content: center; padding: 20px; }
+        .panel { background: var(--card); padding: 25px; border-radius: 20px; width: 100%; max-width: 400px; border: 1px solid #30363d; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+        h2 { text-align: center; color: var(--blue); margin-bottom: 20px; font-size: 22px; }
+        input, select { width: 100%; padding: 12px; margin: 8px 0; background: #010409; color: #ff9f43; border: 1px solid #30363d; border-radius: 8px; box-sizing: border-box; }
+        .status-box { background: #161b22; padding: 15px; border-radius: 10px; text-align: center; margin: 15px 0; border: 1px solid #30363d; color: #f1e05a; font-weight: bold; font-size: 14px; }
+        .btn { width: 100%; padding: 15px; border: none; border-radius: 10px; font-weight: bold; cursor: pointer; margin-top: 10px; transition: 0.3s; }
         .start { background: var(--green); color: white; }
         .stop { background: var(--red); color: white; }
         .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 20px; }
@@ -167,7 +172,7 @@ HTML_TEMPLATE = """
 </head>
 <body>
     <div class="panel">
-        <h2 style="text-align:center; color:var(--blue);">KHOURY 5-TICKS</h2>
+        <h2>REVERSE 5-TICKS V5</h2>
         <input type="text" id="user" placeholder="Session Name">
         <input type="password" id="token" placeholder="Deriv API Token">
         
@@ -184,13 +189,13 @@ HTML_TEMPLATE = """
             <input type="number" id="stake" placeholder="Stake" value="1.00">
             <input type="number" id="tp" placeholder="Target" value="10.00">
         </div>
-        <div class="status-box" id="ui_status">5-TICKS CANDLE: ON</div>
+        <div class="status-box" id="ui_status">MODE: REVERSED (5-TICKS)</div>
         <button class="btn start" id="btnStart" onclick="handle('start')">START BOT</button>
-        <button class="btn stop" id="btnStop" onclick="handle('stop')" style="display:none;">STOP & DELETE DATA</button>
+        <button class="btn stop" id="btnStop" onclick="handle('stop')" style="display:none;">STOP & PURGE DATA</button>
         
         <div class="stats">
-            <div class="stat-card">Wins: <b id="ui_wins">0</b></div>
-            <div class="stat-card">Losses: <b id="ui_losses">0</b></div>
+            <div class="stat-card">Wins: <b id="ui_wins" style="color:var(--green);">0</b></div>
+            <div class="stat-card">Losses: <b id="ui_losses" style="color:var(--red);">0</b></div>
             <div class="stat-card" style="grid-column: span 2;">Profit: <b id="ui_profit" style="color:var(--blue); font-size:20px;">$ 0.00</b></div>
         </div>
     </div>
@@ -204,6 +209,7 @@ HTML_TEMPLATE = """
                 tp: document.getElementById('tp').value,
                 action: type
             };
+            if(!payload.username || !payload.token) return alert("Fill Name and Token");
             await fetch('/manage', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
             if(type === 'stop') location.reload();
         }
