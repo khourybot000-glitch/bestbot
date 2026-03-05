@@ -16,49 +16,60 @@ client = MongoClient(MONGO_URI)
 db = client['khoury_bot_v5']
 users_col = db['users']
 
-# --- الإعدادات الفنية ---
+# --- الإعدادات التقنية لـ Deriv ---
 DERIV_WS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 ASSETS = ["R_100", "R_75", "R_50", "R_10"]
 
-# --- منطق التحليل الفني ---
+# --- منطق التحليل الفني (قناص الـ 60 تيك) ---
 def compute_logic(df):
     if len(df) < 60: return "NONE"
     c = df['close']
+    
+    # حساب RSI 14
     delta = c.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rsi = 100 - (100 / (1 + (gain / loss)))
+    
+    # حساب EMA 50
     ema50 = c.ewm(span=50, adjust=False).mean()
     
     r_curr, r_prev1, r_prev2 = rsi.iloc[-1], rsi.iloc[-2], rsi.iloc[-3]
     p_curr, e_curr = c.iloc[-1], ema50.iloc[-1]
     
+    # شرط الشراء: تقاطع صعودي في آخر شمعتين + السعر فوق EMA
     if ((r_prev1 <= 50 and r_curr > 50) or (r_prev2 <= 50 and r_prev1 > 50)) and p_curr > e_curr:
         return "CALL"
+    
+    # شرط البيع: تقاطع هبوطي في آخر شمعتين + السعر تحت EMA
     if ((r_prev1 >= 50 and r_curr < 50) or (r_prev2 >= 50 and r_prev1 < 50)) and p_curr < e_curr:
         return "PUT"
     return "NONE"
 
-# --- وظائف التداول لكل مستخدم ---
+# --- وظيفة التداول الآلي لكل مستخدم ---
 def user_bot_logic(user_id):
     while True:
-        user = users_col.find_one({"_id": ObjectId(user_id)})
-        if not user or not user.get("is_running"):
-            time.sleep(2)
-            continue
+        try:
+            user = users_col.find_one({"_id": ObjectId(user_id)})
+            if not user or not user.get("is_running"):
+                time.sleep(2)
+                continue
 
-        # 1. فحص النتيجة إذا كان هناك عقد مفتوح
-        if user.get("active_contract") and time.time() >= user.get("check_time"):
-            check_and_update_trade(user_id)
-            continue
+            # 1. التحقق من نتيجة الصفقة المنتهية
+            if user.get("active_contract") and time.time() >= user.get("check_time"):
+                check_and_update_trade(user_id)
+                continue
 
-        # 2. المسح عند الثانية 00 إذا كان المستخدم WAITING
-        if user.get("status") == "WAITING" and not user.get("active_contract"):
-            if time.strftime("%S") == "00":
-                scan_and_place(user_id)
-                time.sleep(1)
-        
-        time.sleep(0.5)
+            # 2. البحث عن إشارة عند الدقيقة 00 (فقط إذا كان WAITING)
+            if user.get("status") == "WAITING" and not user.get("active_contract"):
+                if time.strftime("%S") == "00":
+                    scan_and_place(user_id)
+                    time.sleep(1)
+            
+            time.sleep(0.5)
+        except Exception as e:
+            print(f"Loop Error for {user_id}: {e}")
+            time.sleep(5)
 
 def scan_and_place(user_id):
     user = users_col.find_one({"_id": ObjectId(user_id)})
@@ -70,6 +81,7 @@ def scan_and_place(user_id):
             ws.close()
             
             ticks = pd.DataFrame(res['history']['prices'], columns=['close'])
+            # تحليل شموع (كل شمعة 30 تيك)
             signal = compute_logic(ticks.iloc[::30])
             
             if signal != "NONE":
@@ -81,15 +93,24 @@ def place_deriv_trade(user_id, asset, side):
     user = users_col.find_one({"_id": ObjectId(user_id)})
     try:
         ws = websocket.create_connection(DERIV_WS_URL)
+        # Authorize أولاً لجلب العملة
         ws.send(json.dumps({"authorize": user['token']}))
-        ws.recv()
+        auth_res = json.loads(ws.recv())
         
+        if "error" in auth_res:
+            users_col.update_one({"_id": ObjectId(user_id)}, {"$set": {"is_running": False, "status": "AUTH ERROR"}})
+            ws.close()
+            return
+
+        # استخلاص العملة ديناميكياً
+        currency = auth_res['authorize'].get('currency', 'USD')
         stake = round(user['current_stake'], 2)
+        
         trade_req = {
             "buy": 1, "price": stake,
             "parameters": {
                 "amount": stake, "basis": "stake", "contract_type": side,
-                "currency": "USD", "duration": 5, "duration_unit": "m", "symbol": asset
+                "currency": currency, "duration": 5, "duration_unit": "m", "symbol": asset
             }
         }
         ws.send(json.dumps(trade_req))
@@ -100,7 +121,8 @@ def place_deriv_trade(user_id, asset, side):
             users_col.update_one({"_id": ObjectId(user_id)}, {"$set": {
                 "active_contract": res["buy"]["contract_id"],
                 "status": f"IN TRADE ({asset})",
-                "check_time": time.time() + 306
+                "check_time": time.time() + 306,
+                "currency": currency
             }})
     except: pass
 
@@ -116,10 +138,8 @@ def check_and_update_trade(user_id):
 
         contract = res["proposal_open_contract"]
         if contract["is_sold"]:
-            new_data = {
-                "active_contract": None,
-                "status": "WAITING"
-            }
+            new_data = {"active_contract": None, "status": "WAITING"}
+            
             if contract["status"] == "won":
                 new_data["total_profit"] = user["total_profit"] + contract["profit"]
                 new_data["wins"] = user["wins"] + 1
@@ -131,124 +151,137 @@ def check_and_update_trade(user_id):
                 new_data["consecutive_losses"] = user["consecutive_losses"] + 1
                 new_data["current_stake"] = round(user["current_stake"] * 2.2, 2)
             
-            if new_data["consecutive_losses"] >= 4 or new_data.get("total_profit", 0) >= user["take_profit"]:
+            # قوانين التوقف
+            if new_data["consecutive_losses"] >= 4:
                 new_data["is_running"] = False
-                new_data["status"] = "STOPPED (LIMIT REACHED)"
+                new_data["status"] = "STOPPED: 4 LOSSES"
+            elif new_data.get("total_profit", 0) >= user["take_profit"]:
+                new_data["is_running"] = False
+                new_data["status"] = "STOPPED: TARGET REACHED"
 
             users_col.update_one({"_id": ObjectId(user_id)}, {"$set": new_data})
     except: pass
 
-# --- واجهة المستخدم (HTML) ---
+# --- واجهة المستخدم (HTML/JS) ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>KHOURY MULTI-USER BOT</title>
+    <title>KHOURY V5 MULTI-CLIENT</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        body { background: #05080a; color: white; font-family: sans-serif; display: flex; justify-content: center; padding: 20px; }
-        .card { background: #0d1117; padding: 20px; border-radius: 15px; width: 380px; border: 1px solid #30363d; }
-        input { width: 100%; padding: 10px; margin: 10px 0; background: #000; color: #58a6ff; border: 1px solid #333; border-radius: 8px; box-sizing: border-box; }
-        .btn { width: 100%; padding: 12px; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; }
-        .start { background: #238636; color: white; margin-bottom: 10px; }
-        .stop { background: #da3633; color: white; }
-        .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 15px; }
-        .stat-item { background: #161b22; padding: 10px; border-radius: 8px; text-align: center; font-size: 14px; border: 1px solid #30363d; }
+        :root { --bg: #05080a; --card: #0d1117; --blue: #58a6ff; --green: #238636; --red: #da3633; }
+        body { background: var(--bg); color: white; font-family: 'Segoe UI', sans-serif; display: flex; justify-content: center; padding: 20px; }
+        .panel { background: var(--card); padding: 25px; border-radius: 20px; width: 100%; max-width: 400px; border: 1px solid #30363d; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+        h2 { text-align: center; color: var(--blue); margin-bottom: 25px; }
+        input { width: 100%; padding: 12px; margin: 8px 0; background: #010409; color: #79c0ff; border: 1px solid #30363d; border-radius: 8px; box-sizing: border-box; }
+        .status-box { background: #161b22; padding: 15px; border-radius: 10px; text-align: center; margin: 15px 0; border: 1px solid #30363d; color: #f1e05a; font-weight: bold; }
+        .btn { width: 100%; padding: 15px; border: none; border-radius: 10px; font-weight: bold; cursor: pointer; font-size: 16px; margin-top: 10px; }
+        .start { background: var(--green); color: white; }
+        .stop { background: var(--red); color: white; }
+        .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 20px; }
+        .stat-card { background: #21262d; padding: 12px; border-radius: 10px; text-align: center; border: 1px solid #30363d; }
     </style>
 </head>
 <body>
-    <div class="card">
-        <h2 style="text-align:center; color:#58a6ff;">V5 MULTI-SNIPER</h2>
-        <input type="text" id="username" placeholder="Enter Your Name">
+    <div class="panel">
+        <h2>KHOURY CLOUD V5</h2>
+        <input type="text" id="user" placeholder="Your Name (Login)">
         <input type="password" id="token" placeholder="Deriv API Token">
         <div style="display:flex; gap:10px;">
             <input type="number" id="stake" placeholder="Stake" value="1.00">
-            <input type="number" id="tp" placeholder="T.Profit" value="10.00">
+            <input type="number" id="tp" placeholder="Target" value="10.00">
         </div>
-        <button class="btn start" onclick="action('start')">START BOT</button>
-        <button class="btn stop" onclick="action('stop')">STOP BOT</button>
         
-        <div id="ui_status" style="text-align:center; margin:15px 0; color:#f1e05a; font-weight:bold;">Status: Offline</div>
-        
+        <div class="status-box" id="ui_status">STATUS: DISCONNECTED</div>
+
+        <button class="btn start" id="btnStart" onclick="handle('start')">START BOT</button>
+        <button class="btn stop" id="btnStop" onclick="handle('stop')" style="display:none;">STOP BOT</button>
+
         <div class="stats">
-            <div class="stat-item">Wins: <b id="ui_wins" style="color:#3fb950;">0</b></div>
-            <div class="stat-item">Losses: <b id="ui_losses" style="color:#f85149;">0</b></div>
-            <div class="stat-item" style="grid-column: span 2;">Profit: <b id="ui_profit" style="color:#58a6ff;">$ 0.00</b></div>
+            <div class="stat-card">Wins: <b id="ui_wins" style="color:#3fb950;">0</b></div>
+            <div class="stat-card">Losses: <b id="ui_losses" style="color:#f85149;">0</b></div>
+            <div class="stat-card" style="grid-column: span 2;">
+                Total Profit: <b id="ui_profit" style="color:var(--blue); font-size:20px;">$ 0.00</b>
+            </div>
         </div>
     </div>
 
     <script>
-        async function action(type) {
-            const data = {
-                username: document.getElementById('username').value,
+        async function handle(type) {
+            const payload = {
+                username: document.getElementById('user').value,
                 token: document.getElementById('token').value,
                 stake: document.getElementById('stake').value,
                 tp: document.getElementById('tp').value,
-                type: type
+                action: type
             };
-            await fetch('/handle_bot', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data) });
+            if(!payload.username || !payload.token) return alert("Fill Name and Token");
+            await fetch('/manage', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
         }
 
-        async function update() {
-            const user = document.getElementById('username').value;
+        async function refresh() {
+            const user = document.getElementById('user').value;
             if(!user) return;
-            const res = await fetch('/status/' + user);
+            const res = await fetch('/data/' + user);
             const d = await res.json();
-            if(d.exists) {
-                document.getElementById('ui_status').innerText = "Status: " + d.status;
+            if(d.found) {
+                document.getElementById('ui_status').innerText = "STATUS: " + d.status;
                 document.getElementById('ui_wins').innerText = d.wins;
                 document.getElementById('ui_losses').innerText = d.losses;
-                document.getElementById('ui_profit').innerText = "$ " + d.total_profit.toFixed(2);
+                document.getElementById('ui_profit').innerText = (d.currency || "$") + " " + d.total_profit.toFixed(2);
+                
+                document.getElementById('btnStart').style.display = d.is_running ? "none" : "block";
+                document.getElementById('btnStop').style.display = d.is_running ? "block" : "none";
             }
         }
-        setInterval(update, 2000);
+        setInterval(refresh, 1500);
     </script>
 </body>
 </html>
 """
 
+# --- Routes ---
 @app.route('/')
-def index(): return render_template_string(HTML_TEMPLATE)
+def home(): return render_template_string(HTML_TEMPLATE)
 
-@app.route('/status/<username>')
-def get_status(username):
-    user = users_col.find_one({"username": username})
-    if not user: return jsonify({"exists": False})
-    user['_id'] = str(user['_id'])
-    user['exists'] = True
-    return jsonify(user)
+@app.route('/data/<username>')
+def get_user_data(username):
+    u = users_col.find_one({"username": username})
+    if not u: return jsonify({"found": False})
+    u['_id'] = str(u['_id'])
+    u['found'] = True
+    return jsonify(u)
 
-@app.route('/handle_bot', methods=['POST'])
-def handle_bot():
+@app.route('/manage', methods=['POST'])
+def manage_bot():
     req = request.json
     username = req['username']
     
     user = users_col.find_one({"username": username})
     if not user:
-        # إنشاء مستخدم جديد في قاعدة البيانات
         new_user = {
             "username": username, "token": req['token'], "base_stake": float(req['stake']),
             "current_stake": float(req['stake']), "take_profit": float(req['tp']),
             "is_running": False, "status": "WAITING", "wins": 0, "losses": 0,
-            "total_profit": 0.0, "consecutive_losses": 0, "active_contract": None, "check_time": 0
+            "total_profit": 0.0, "consecutive_losses": 0, "active_contract": None, 
+            "check_time": 0, "currency": "$"
         }
         user_id = users_col.insert_one(new_user).inserted_id
-        # تشغيل خيط معالجة خاص بهذا المستخدم
         Thread(target=user_bot_logic, args=(str(user_id),), daemon=True).start()
     
-    is_running = True if req['type'] == 'start' else False
+    running = True if req['action'] == 'start' else False
     users_col.update_one({"username": username}, {"$set": {
-        "is_running": is_running,
-        "token": req['token'],
-        "base_stake": float(req['stake']),
-        "take_profit": float(req['tp'])
+        "is_running": running, "token": req['token'], 
+        "base_stake": float(req['stake']), "take_profit": float(req['tp'])
     }})
-    return jsonify({"ok": True})
+    return jsonify({"status": "ok"})
 
-# عند تشغيل التطبيق، أعد تشغيل الخيوط لجميع المستخدمين الذين لديهم حسابات
-def restart_all_threads():
+def boot_threads():
+    # إعادة تشغيل الخيوط لجميع المستخدمين عند بدء السيرفر
     for user in users_col.find():
         Thread(target=user_bot_logic, args=(str(user['_id']),), daemon=True).start()
 
 if __name__ == "__main__":
-    restart_all_threads()
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    boot_threads()
+    app.run(host='0.0.0.0', port=5000)
