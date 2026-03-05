@@ -8,49 +8,49 @@ from flask import Flask, render_template_string, jsonify, request
 
 app = Flask(__name__)
 
-# --- Technical Config ---
+# --- الإعدادات الفنية ---
 PASSWORD = "KHOURYBOT"
 DERIV_WS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 
 def compute_logic(df):
-    """Direct Trend Following Logic"""
-    if len(df) < 60: return "NONE"
+    """منطق تتبع الاتجاه بناءً على شموع الـ 30 تيك"""
+    if len(df) < 55: return "NONE" # التأكد من وجود شموع كافية للـ EMA 50
     c = df['close']
     
-    # RSI 14 Calculation
+    # حساب RSI 14
     delta = c.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
     
-    # EMA 50 Calculation
+    # حساب EMA 50
     ema50 = c.ewm(span=50, adjust=False).mean()
     
     curr_rsi = rsi.iloc[-1]
     prev_rsi = rsi.iloc[-2]
-    older_rsi = rsi.iloc[-3]
     curr_price = c.iloc[-1]
     curr_ema = ema50.iloc[-1]
     
-    # --- TREND LOGIC ---
-    # CALL: RSI crosses 50 UP + Price is above EMA 50
-    if (older_rsi <= 50 or prev_rsi <= 50) and curr_rsi > 50 and curr_price > curr_ema:
+    # --- منطق الاتجاه المباشر ---
+    # صعود: RSI يخترق 50 للأعلى + السعر فوق المتوسط
+    if prev_rsi <= 50 and curr_rsi > 50 and curr_price > curr_ema:
         return "BUY"
     
-    # PUT: RSI crosses 50 DOWN + Price is below EMA 50
-    if (older_rsi >= 50 or prev_rsi >= 50) and curr_rsi < 50 and curr_price < curr_ema:
+    # هبوط: RSI يخترق 50 للأسفل + السعر تحت المتوسط
+    if prev_rsi >= 50 and curr_rsi < 50 and curr_price < curr_ema:
         return "SELL"
         
     return "NONE"
 
+# واجهة المستخدم (HTML/JS/CSS)
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>KHOURY V5 SNIPER</title>
+    <title>KHOURY 30-TICK ULTIMATE</title>
     <style>
         :root { --bg: #05080a; --card: #0d1117; --blue: #58a6ff; --green: #00ff88; --red: #ff3b3b; --gold: #ffae00; }
         body { background: var(--bg); color: white; font-family: 'Segoe UI', sans-serif; margin: 0; padding: 15px; display: flex; flex-direction: column; align-items: center; }
@@ -61,13 +61,13 @@ HTML_TEMPLATE = """
         .signal-box { 
             height: 320px; width: 100%; background: #161b22; border-radius: 25px; 
             display: flex; flex-direction: column; justify-content: center; align-items: center;
-            transition: 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275); border: 2px solid #21262d; 
+            transition: 0.5s; border: 2px solid #21262d; 
         }
         .buy-active { background: #064e3b !important; border-color: var(--green) !important; box-shadow: 0 0 50px rgba(0,255,136,0.3); }
         .sell-active { background: #7f1d1d !important; border-color: var(--red) !important; box-shadow: 0 0 50px rgba(255,59,59,0.3); }
         .sig-title { font-size: 55px; font-weight: 900; letter-spacing: 4px; }
         .entry-time { font-size: 22px; margin-top: 20px; background: #000; padding: 12px 25px; border-radius: 12px; color: #00d4ff; font-family: monospace; border: 1px solid #333; font-weight: bold; }
-        .lockdown { font-size: 16px; margin-top: 20px; color: var(--gold); font-weight: bold; letter-spacing: 1px; }
+        .lockdown { font-size: 16px; margin-top: 20px; color: var(--gold); font-weight: bold; }
         #login-screen { position:fixed; inset:0; background:var(--bg); z-index:2000; display:flex; flex-direction:column; justify-content:center; align-items:center; }
         input[type="password"] { padding: 15px; border-radius: 10px; border: 1px solid #333; background:#111; color:white; text-align:center; width: 260px; font-size: 18px; margin-bottom: 15px; }
         .btn { padding: 14px 60px; border-radius: 10px; border: none; background: var(--blue); color: black; font-weight: bold; cursor: pointer; font-size: 18px; }
@@ -75,14 +75,14 @@ HTML_TEMPLATE = """
 </head>
 <body>
     <div id="login-screen">
-        <h1 style="color:var(--blue); margin-bottom: 30px;">KHOURY SNIPER V5</h1>
+        <h1 style="color:var(--blue); margin-bottom: 30px;">KHOURY 30-TICK</h1>
         <input type="password" id="pass" placeholder="ACCESS CODE">
         <button class="btn" onclick="login()">ACTIVATE</button>
     </div>
 
     <div id="main-ui" style="display:none" class="container">
         <div class="setup-panel">
-            <label style="color: #8b949e; font-size: 14px; font-weight: bold;">SELECT TRADING ASSET</label>
+            <label style="color: #8b949e; font-size: 14px; font-weight: bold;">ASSET (30-TICK ANALYSIS)</label>
             <select id="asset-selector">
                 <option value="frxEURUSD">EUR / USD</option>
                 <option value="frxEURGBP">EUR / GBP</option>
@@ -102,9 +102,8 @@ HTML_TEMPLATE = """
             <div class="lockdown" id="lockdown" style="display:none">LOCKDOWN: 300s</div>
         </div>
         
-        <p style="text-align: center; color: #8b949e; margin-top: 25px; font-size: 14px; line-height: 1.6;">
-            <b>Analysis:</b> Second 00 | <b>Duration:</b> 5 MIN<br>
-            <b>Strategy:</b> Direct Trend Momentum
+        <p style="text-align: center; color: #8b949e; margin-top: 25px; font-size: 14px;">
+            <b>Candle:</b> 30 Ticks | <b>Duration:</b> 5 MIN | <b>Logic:</b> Direct Trend
         </p>
     </div>
 
@@ -152,7 +151,7 @@ HTML_TEMPLATE = """
                     
                     playSound(data.signal === "BUY");
                     isSleeping = true;
-                    sleepEnds = Date.now() + 300000; 
+                    sleepEnds = Date.now() + 300000; // 5 mins
                 }
             } catch(e) {}
         }
@@ -193,29 +192,38 @@ HTML_TEMPLATE = """
 """
 
 @app.route('/')
-def index(): return render_template_string(HTML_TEMPLATE)
+def index():
+    return render_template_string(HTML_TEMPLATE)
 
 @app.route('/scan', methods=['POST'])
 def scan():
     asset = request.json.get('asset')
     try:
         ws = websocket.create_connection(DERIV_WS_URL)
-        ws.send(json.dumps({"ticks_history": asset, "count": 1000, "end": "latest", "style": "ticks"}))
+        # سحب 3000 حركة سعر لضمان جودة شموع الـ 30 تيك
+        ws.send(json.dumps({"ticks_history": asset, "count": 3000, "end": "latest", "style": "ticks"}))
         data = json.loads(ws.recv())
         ws.close()
-        ticks = pd.DataFrame(data['history']['prices'], columns=['close'])
         
-        # 5-Tick Aggregation
+        prices = data['history']['prices']
+        df_ticks = pd.DataFrame(prices, columns=['close'])
+        
+        # تحويل الـ Ticks إلى شموع 30 تيك
         candles = []
-        for i in range(0, len(ticks), 5):
-            chunk = ticks.iloc[i:i+5]
-            if len(chunk) >= 5: candles.append({'close': chunk.iloc[-1]['close']})
+        for i in range(0, len(df_ticks), 30):
+            chunk = df_ticks.iloc[i:i+30]
+            if len(chunk) >= 30:
+                candles.append({'close': chunk.iloc[-1]['close']})
         
-        signal = compute_logic(pd.DataFrame(candles))
+        df_final = pd.DataFrame(candles)
+        signal = compute_logic(df_final)
+        
         return jsonify({"signal": signal})
-    except:
+    except Exception as e:
+        print(f"Error: {e}")
         return jsonify({"signal": "NONE"})
 
 if __name__ == "__main__":
+    # تشغيل السيرفر على البورت المتاح (5000 محلياً أو متغير السيرفر)
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
