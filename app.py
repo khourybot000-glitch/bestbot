@@ -1,91 +1,89 @@
-import os, json, websocket, datetime
+import os
+import json
+import websocket
+import datetime
 import pandas as pd
 import numpy as np
 from flask import Flask, render_template_string, jsonify, request
 
 app = Flask(__name__)
 
-# --- الإعدادات ---
+# --- Configuration ---
 PASSWORD = "KHOURYBOT"
 DERIV_WS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 
 def compute_logic(df):
-    """منطق RSI 50 Cross + EMA 50 على فريم 5 تيك"""
+    """Inverted Signal Logic for Reversals"""
     if len(df) < 60: return "NONE"
     c = df['close']
     
-    # حساب RSI 14
+    # RSI 14 Calculation
     delta = c.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
     
-    # حساب EMA 50
+    # EMA 50 Calculation
     ema50 = c.ewm(span=50, adjust=False).mean()
     
-    # قيم آخر 3 شموع (15 تيك)
     curr_rsi, prev_rsi, older_rsi = rsi.iloc[-1], rsi.iloc[-2], rsi.iloc[-3]
     curr_price, curr_ema = c.iloc[-1], ema50.iloc[-1]
     
-    # إشارة صعود: اختراق الـ 50 للأعلى + السعر فوق EMA 50
+    # --- Inverted Logic ---
+    # RSI crosses 50 UP + Price > EMA -> Predict Drop (SELL)
     if (older_rsi <= 50 or prev_rsi <= 50) and curr_rsi > 50 and curr_price > curr_ema:
-        return "BUY"
-    
-    # إشارة هبوط: اختراق الـ 50 للأسفل + السعر تحت EMA 50
-    if (older_rsi >= 50 or prev_rsi >= 50) and curr_rsi < 50 and curr_price < curr_ema:
         return "SELL"
+    
+    # RSI crosses 50 DOWN + Price < EMA -> Predict Rise (BUY)
+    if (older_rsi >= 50 or prev_rsi >= 50) and curr_rsi < 50 and curr_price < curr_ema:
+        return "BUY"
         
     return "NONE"
 
-def get_ohlc(prices, size):
-    candles = []
-    for i in range(0, len(prices), size):
-        chunk = prices.iloc[i:i+size]
-        if len(chunk) >= size:
-            candles.append({'close': chunk.iloc[-1]['close']})
-    return pd.DataFrame(candles)
-
 HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html lang="ar" dir="rtl">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>KHOURY PRE-ENTRY AI</title>
+    <title>KHOURY ZERO-SECOND PRO</title>
     <style>
-        :root { --bg: #05080a; --card: #0d1117; --blue: #58a6ff; --green: #00ff88; --red: #ff3b3b; }
-        body { background: var(--bg); color: white; font-family: 'Segoe UI', sans-serif; margin: 0; padding: 15px; }
-        .dashboard { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 15px; max-width: 1200px; margin: 20px auto; }
-        .pair-column { background: var(--card); border: 1px solid #30363d; border-radius: 20px; padding: 20px; text-align: center; }
-        .pair-header { font-size: 22px; font-weight: bold; color: var(--blue); margin-bottom: 5px; }
-        .countdown { font-size: 50px; font-weight: 900; color: #58a6ff; margin-bottom: 10px; font-family: monospace; }
+        :root { --bg: #05080a; --card: #0d1117; --blue: #58a6ff; --green: #00ff88; --red: #ff3b3b; --gold: #ffae00; }
+        body { background: var(--bg); color: white; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 15px; }
+        .dashboard { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 15px; max-width: 1200px; margin: 30px auto; }
+        .pair-column { background: var(--card); border: 1px solid #30363d; border-radius: 20px; padding: 25px; text-align: center; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
+        .pair-header { font-size: 26px; font-weight: bold; color: var(--blue); margin-bottom: 10px; border-bottom: 1px solid #222; padding-bottom: 15px; }
+        .countdown { font-size: 55px; font-weight: 900; color: #58a6ff; margin-bottom: 15px; font-family: 'Courier New', monospace; }
         .signal-box { 
-            height: 220px; width: 100%; background: #161b22; border-radius: 15px; 
+            height: 250px; width: 100%; background: #161b22; border-radius: 15px; 
             display: flex; flex-direction: column; justify-content: center; align-items: center;
-            transition: 0.4s; border: 2px solid #21262d; 
+            transition: 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); border: 2px solid #21262d; 
         }
         .buy-active { background: #064e3b !important; border-color: var(--green) !important; box-shadow: 0 0 30px rgba(0,255,136,0.3); }
         .sell-active { background: #7f1d1d !important; border-color: var(--red) !important; box-shadow: 0 0 30px rgba(255,59,59,0.3); }
-        .sig-title { font-size: 32px; font-weight: 900; text-transform: uppercase; }
-        .entry-time { font-size: 19px; margin-top: 15px; background: #000; padding: 10px 20px; border-radius: 10px; color: #00d4ff; font-family: monospace; border: 1px solid #333; font-weight: bold; }
-        .next-scan { font-size: 13px; margin-top: 12px; color: #8b949e; background: rgba(255,255,255,0.05); padding: 5px 10px; border-radius: 5px; }
+        .sig-title { font-size: 38px; font-weight: 900; letter-spacing: 2px; }
+        .entry-time { font-size: 19px; margin-top: 15px; background: #000; padding: 12px 20px; border-radius: 10px; color: #00d4ff; font-family: monospace; border: 1px solid #333; font-weight: bold; }
+        .cooldown-info { font-size: 14px; margin-top: 15px; color: var(--gold); font-weight: bold; text-transform: uppercase; }
+        
         #login-screen { position:fixed; inset:0; background:var(--bg); z-index:2000; display:flex; flex-direction:column; justify-content:center; align-items:center; }
-        input { padding: 15px; border-radius: 10px; border: 1px solid #333; background:#111; color:white; text-align:center; width: 250px; font-size: 18px; margin-bottom: 15px; }
-        .btn { padding: 12px 50px; border-radius: 10px; border: none; background: var(--blue); color: black; font-weight: bold; cursor: pointer; font-size: 16px; }
+        input { padding: 15px; border-radius: 10px; border: 1px solid #333; background:#111; color:white; text-align:center; width: 260px; font-size: 18px; margin-bottom: 15px; outline: none; }
+        input:focus { border-color: var(--blue); }
+        .btn-login { padding: 14px 60px; border-radius: 10px; border: none; background: var(--blue); color: black; font-weight: bold; cursor: pointer; font-size: 18px; transition: 0.2s; }
+        .btn-login:hover { opacity: 0.8; transform: scale(1.05); }
     </style>
 </head>
 <body>
 
     <div id="login-screen">
-        <h2 style="color:var(--blue); margin-bottom: 30px;">KHOURY SNIPER - V4 PRO</h2>
-        <input type="password" id="pass" placeholder="PASSWORD">
-        <button class="btn" onclick="login()">ACTIVATE SYSTEM</button>
+        <h1 style="color:var(--blue); margin-bottom: 30px; letter-spacing: 2px;">KHOURY AI SNIPER</h1>
+        <input type="password" id="pass" placeholder="ENTER ACCESS CODE">
+        <button class="btn-login" onclick="login()">ACTIVATE SYSTEM</button>
     </div>
 
     <div id="main-ui" style="display:none">
-        <div style="text-align:center; color:#8b949e; font-size:14px; margin-bottom:10px;">
-            التحليل عند الثانية :58 | الدخول مع بداية الدقيقة الجديدة :00
+        <div style="text-align:center; color:#8b949e; font-size:15px; margin-bottom:10px; font-weight: bold;">
+            ANALYSIS: SECOND 00 | ENTRY: NEXT MINUTE | LOGIC: INVERTED (REVERSAL)
         </div>
         
         <div class="dashboard">
@@ -95,7 +93,7 @@ HTML_TEMPLATE = """
                 <div class="signal-box" id="box-0">
                     <span class="sig-title" id="text-0">SCANNING</span>
                     <div class="entry-time" id="entry-0" style="display:none">ENTRY @ --:--:00</div>
-                    <div class="next-scan" id="wait-0" style="display:none">RESTING: 120s</div>
+                    <div class="cooldown-info" id="wait-0" style="display:none">COOLDOWN: 120s</div>
                 </div>
             </div>
 
@@ -105,7 +103,7 @@ HTML_TEMPLATE = """
                 <div class="signal-box" id="box-1">
                     <span class="sig-title" id="text-1">SCANNING</span>
                     <div class="entry-time" id="entry-1" style="display:none">ENTRY @ --:--:00</div>
-                    <div class="next-scan" id="wait-1" style="display:none">RESTING: 120s</div>
+                    <div class="cooldown-info" id="wait-1" style="display:none">COOLDOWN: 120s</div>
                 </div>
             </div>
 
@@ -115,7 +113,7 @@ HTML_TEMPLATE = """
                 <div class="signal-box" id="box-2">
                     <span class="sig-title" id="text-2">SCANNING</span>
                     <div class="entry-time" id="entry-2" style="display:none">ENTRY @ --:--:00</div>
-                    <div class="next-scan" id="wait-2" style="display:none">RESTING: 120s</div>
+                    <div class="cooldown-info" id="wait-2" style="display:none">COOLDOWN: 120s</div>
                 </div>
             </div>
         </div>
@@ -142,11 +140,13 @@ HTML_TEMPLATE = """
             if(document.getElementById('pass').value === "KHOURYBOT") {
                 document.getElementById('login-screen').style.display = 'none';
                 document.getElementById('main-ui').style.display = 'block';
-                setInterval(runEngine, 1000);
+                setInterval(run, 1000);
+            } else {
+                alert("Incorrect Password!");
             }
         }
 
-        async function triggerScan(i) {
+        async function trigger(i) {
             try {
                 const res = await fetch('/scan', {
                     method: 'POST',
@@ -156,7 +156,6 @@ HTML_TEMPLATE = """
                 const data = await res.json();
                 
                 if(data.signal !== "NONE") {
-                    // حساب وقت الدخول: الدقيقة القادمة عند الثانية 00
                     let now = new Date();
                     let entryDate = new Date(now.getTime() + 60000);
                     entryDate.setSeconds(0);
@@ -166,20 +165,20 @@ HTML_TEMPLATE = """
                     
                     playSound(data.signal === "BUY");
                     isSleeping[i] = true;
-                    sleepEnds[i] = Date.now() + 120000; // نوم دقيقتين
+                    sleepEnds[i] = Date.now() + 120000;
                 }
-            } catch(e) { console.error("Scan Error"); }
+            } catch(e) { console.error("API Error"); }
         }
 
-        function runEngine() {
+        function run() {
             const now = Date.now();
             const s = new Date().getSeconds();
-            const countdownValue = (60 - s) % 60;
+            const cd = (60 - s) % 60;
 
             for(let i=0; i<3; i++) {
-                document.getElementById(`count-${i}`).innerText = countdownValue.toString().padStart(2, '0');
+                document.getElementById(`count-${i}`).innerText = cd.toString().padStart(2, '0');
                 const box = document.getElementById(`box-${i}`);
-                const text = document.getElementById(`text-${i}`);
+                const text = document.getElementById( `text-${i}`);
                 const entryLabel = document.getElementById(`entry-${i}`);
                 const waitLabel = document.getElementById(`wait-${i}`);
 
@@ -200,9 +199,9 @@ HTML_TEMPLATE = """
                         waitLabel.innerText = "COOLDOWN: " + rem + "s";
                     }
                 }
-
-                // الفحص عند الثانية 58 لضمان جاهزية الإشارة قبل الدقيقة الجديدة بثانية
-                if(s === 58 && !isSleeping[i]) triggerScan(i);
+                
+                // Trigger Scan at Second 00
+                if(s === 0 && !isSleeping[i]) trigger(i);
             }
         }
     </script>
@@ -222,11 +221,20 @@ def scan():
         data = json.loads(ws.recv())
         ws.close()
         ticks = pd.DataFrame(data['history']['prices'], columns=['close'])
-        df_5t = get_ohlc(ticks, 5)
+        
+        # 5-Tick OHLC Logic
+        candles = []
+        for i in range(0, len(ticks), 5):
+            chunk = ticks.iloc[i:i+5]
+            if len(chunk) >= 5: candles.append({'close': chunk.iloc[-1]['close']})
+        df_5t = pd.DataFrame(candles)
+        
         signal = compute_logic(df_5t)
         return jsonify({"signal": signal})
     except:
         return jsonify({"signal": "NONE"})
 
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    # Dynamically fetch port for hosting providers
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
