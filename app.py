@@ -38,8 +38,8 @@ def compute_logic(ticks_list):
     first_5_down = first_5[-1] < first_5[0]
     last_5_up = last_5[-1] > last_5[0]
 
-    if is_60_bullish and first_5_up and last_5_down: return "PUT"
-    if is_60_bearish and first_5_down and last_5_up: return "CALL"
+    if is_60_bullish and first_5_up and last_5_down: return "CALL"
+    if is_60_bearish and first_5_down and last_5_up: return "PUT"
     return "NONE"
 
 def check_trade_status(user_id):
@@ -69,7 +69,7 @@ def user_loop(user_id):
             user = users_col.find_one({"_id": ObjectId(user_id)})
             if not user: break
             if user.get("active_contract"):
-                time.sleep(16)
+                time.sleep(40)
                 check_trade_status(user_id)
                 continue
             
@@ -88,7 +88,7 @@ def user_loop(user_id):
                     ws.send(json.dumps({"authorize": user['token']}))
                     auth = json.loads(ws.recv())
                     if "authorize" in auth:
-                        ws.send(json.dumps({"buy": 1, "price": user['current_stake'], "parameters": {"amount": user['current_stake'], "basis": "stake", "contract_type": signal, "currency": auth['authorize']['currency'], "duration": 5, "duration_unit": "t", "symbol": user['selected_asset']}}))
+                        ws.send(json.dumps({"buy": 1, "price": user['current_stake'], "parameters": {"amount": user['current_stake'], "basis": "stake", "contract_type": signal, "currency": auth['authorize']['currency'], "duration": 30, "duration_unit": "s", "symbol": user['selected_asset']}}))
                         trade_res = json.loads(ws.recv())
                         if "buy" in trade_res: users_col.update_one({"_id": ObjectId(user_id)}, {"$set": {"active_contract": trade_res["buy"]["contract_id"], "status": f"IN TRADE ({signal})"}} )
                     ws.close()
