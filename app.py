@@ -17,7 +17,7 @@ db = client['KHOURY_PRECISION_V7']
 users_col = db['users']
 DERIV_WS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 
-# --- المنطق ---
+# --- منطق التحليل والتداول ---
 def analyze_and_trade(user_id):
     try:
         user = users_col.find_one({"_id": ObjectId(user_id)})
@@ -32,7 +32,6 @@ def analyze_and_trade(user_id):
         prices = res['history']['prices']
         if len(prices) < 60: return
 
-        # المنطق المطلوب: 60 صاعدة، أول 5 من آخر 10 صاعدة، آخر 5 من آخر 10 هابطة
         is_60_bull = prices[-1] > prices[0]
         last_10 = prices[-10:]
         is_5_10_bull = last_10[4] > last_10[0]
@@ -71,7 +70,6 @@ def check_result_after_delay(user_id, contract_id):
         ws.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id}))
         res = json.loads(ws.recv())
         ws.close()
-        
         contract = res.get("proposal_open_contract")
         if contract and contract.get("is_sold"):
             profit = float(contract.get("profit", 0))
@@ -91,13 +89,12 @@ def scheduler():
 
 Thread(target=scheduler, daemon=True).start()
 
-# --- الواجهة الكاملة ---
+# --- واجهة المستخدم (HTML) ---
 HTML = """
 <!DOCTYPE html>
 <html>
 <head>
     <title>KHOURY V7</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
         body { background: #05080a; color: white; font-family: sans-serif; display: flex; justify-content: center; padding: 20px; }
         .card { background: #0d1117; padding: 25px; border-radius: 15px; border: 1px solid #30363d; width: 350px; text-align: center; }
@@ -110,17 +107,13 @@ HTML = """
 </head>
 <body>
     <div class="card">
-        <h3>KHOURY V7 (SYNC 0s)</h3>
+        <h3>KHOURY V7</h3>
         <input type="text" id="u" placeholder="Session Name">
         <input type="password" id="t" placeholder="API Token">
-        <select id="a">
-            <option value="R_100">Volatility 100</option>
-            <option value="R_75">Volatility 75</option>
-            <option value="1HZ100V">Volatility 100 (1s)</option>
-        </select>
+        <select id="a"><option value="R_100">Volatility 100</option><option value="R_75">Volatility 75</option></select>
         <div style="display:flex; gap:5px">
-            <input type="number" id="s" value="1.00" placeholder="Stake">
-            <input type="number" id="tp" value="5.00" placeholder="Target">
+            <input type="number" id="s" value="1.00">
+            <input type="number" id="tp" value="5.00">
         </div>
         <div id="stat" style="margin:15px 0; color:#f1e05a;">READY</div>
         <button id="btn" class="btn start" onclick="toggle()">START</button>
@@ -136,8 +129,10 @@ HTML = """
             const t = document.getElementById('t').value;
             const a = document.getElementById('a').value;
             const s = document.getElementById('s').value;
-            const tp = document.getElementById('tp').value;
-            await fetch('/manage', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({u, t, a, s, tp})});
+            const btn = document.getElementById('btn');
+            const action = btn.innerText === "START" ? "start" : "stop";
+            
+            await fetch('/manage', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({u, t, a, s, action})});
             location.reload();
         }
         setInterval(async () => {
@@ -146,7 +141,7 @@ HTML = """
             const res = await fetch('/data/' + u);
             const d = await res.json();
             if(d.found) {
-                document.getElementById('btn').innerText = "STOP & PURGE";
+                document.getElementById('btn').innerText = "STOP";
                 document.getElementById('btn').className = "btn stop";
                 document.getElementById('stat').innerText = d.status;
                 document.getElementById('win').innerText = d.wins;
@@ -158,6 +153,8 @@ HTML = """
 </body>
 </html>
 """
+
+
 
 @app.route('/')
 def home(): return render_template_string(HTML)
@@ -171,15 +168,18 @@ def get_data(u_name):
 @app.route('/manage', methods=['POST'])
 def manage():
     data = request.json
-    if users_col.find_one({"username": data['u']}):
+    if data['action'] == 'stop':
         users_col.delete_one({"username": data['u']})
     else:
-        users_col.insert_one({
-            "username": data['u'], "token": data['t'], "is_running": True, 
-            "selected_asset": data['a'], "base_stake": float(data['s']), 
-            "current_stake": float(data['s']), "total_profit": 0.0, 
-            "wins": 0, "losses": 0, "status": "WAITING"
-        })
+        # إذا لم يوجد المستخدم، سيقوم بإنشائه (Upsert)
+        users_col.update_one(
+            {"username": data['u']},
+            {"$set": {
+                "token": data['t'], "is_running": True, "selected_asset": data['a'],
+                "base_stake": float(data['s']), "current_stake": float(data['s']),
+                "total_profit": 0.0, "wins": 0, "losses": 0, "status": "WAITING"
+            }}, upsert=True
+        )
     return jsonify({"status": "ok"})
 
 if __name__ == "__main__":
