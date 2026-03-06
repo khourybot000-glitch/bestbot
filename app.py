@@ -67,11 +67,11 @@ def check_trade_status(user_id):
             else:
                 losses = user.get('consecutive_losses', 0) + 1
                 add_log(user_id, f"Loss! Martingale x19 Active")
-                if losses >= 2:
+                if losses >= 4:
                     add_log(user_id, "Stop Loss (2 Losses). Session Ended.")
                     users_col.delete_one({"_id": ObjectId(user_id)})
                     return
-                users_col.update_one({"_id": ObjectId(user_id)}, {"$set": {"active_contract": None, "total_profit": new_total, "losses": user.get('losses', 0) + 1, "consecutive_losses": losses, "current_stake": round(user['current_stake'] * 10, 2)}})
+                users_col.update_one({"_id": ObjectId(user_id)}, {"$set": {"active_contract": None, "total_profit": new_total, "losses": user.get('losses', 0) + 1, "consecutive_losses": losses, "current_stake": round(user['current_stake'] * 2.2, 2)}})
             
             if new_total >= user.get('take_profit', 9999):
                 add_log(user_id, "Target TP Reached!")
@@ -85,7 +85,7 @@ def user_loop(user_id):
             user = users_col.find_one({"_id": ObjectId(user_id)})
             if not user: break
             if user.get("active_contract"):
-                time.sleep(16); check_trade_status(user_id); continue
+                time.sleep(25); check_trade_status(user_id); continue
             
             if time.localtime().tm_sec == 30:
                 ws = websocket.create_connection(DERIV_WS_URL, timeout=10)
@@ -95,11 +95,11 @@ def user_loop(user_id):
                 if 'history' in res:
                     signal = compute_logic(res['history']['prices'])
                     if signal != "NONE":
-                        barrier = "-0.5" if signal == "CALL" else "+0.5"
+                        barrier = "-0.01" if signal == "CALL" else "+0.01"
                         ws = websocket.create_connection(DERIV_WS_URL)
                         ws.send(json.dumps({"authorize": user['token']}))
                         if "authorize" in json.loads(ws.recv()):
-                            ws.send(json.dumps({"buy": 1, "price": user['current_stake'], "parameters": {"amount": user['current_stake'], "basis": "stake", "contract_type": signal, "currency": "USD", "duration": 5, "duration_unit": "t", "symbol": user['selected_asset'], "barrier": barrier}}))
+                            ws.send(json.dumps({"buy": 1, "price": user['current_stake'], "parameters": {"amount": user['current_stake'], "basis": "stake", "contract_type": signal, "currency": "USD", "duration": 20, "duration_unit": "s", "symbol": user['selected_asset'], "barrier": barrier}}))
                             trade_res = json.loads(ws.recv())
                             if "buy" in trade_res:
                                 add_log(user_id, f"ENTERED {signal} (Trend & 5-Tick Match)")
