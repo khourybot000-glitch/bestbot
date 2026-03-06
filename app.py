@@ -13,12 +13,11 @@ app = Flask(__name__)
 # --- إعدادات MongoDB ---
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 client = MongoClient(MONGO_URI)
-db = client['KHOURY_V6_FIXED'] 
+db = client['KHOURY_V6_2_2'] 
 users_col = db['users']
 
 DERIV_WS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 
-# --- منطق التحليل (5 تيك) ---
 def compute_logic(df):
     if len(df) < 20: return "NONE"
     c = df['close']
@@ -30,11 +29,10 @@ def compute_logic(df):
     
     r_curr, p_curr, s_curr = rsi.iloc[-1], c.iloc[-1], sma.iloc[-1]
     
-    if r_curr > 70 and p_curr < s_curr: return "CALL" # Reversed to PUT
-    if r_curr < 30 and p_curr > s_curr: return "PUT"  # Reversed to CALL
+    if r_curr > 70 and p_curr < s_curr: return "CALL" 
+    if r_curr < 30 and p_curr > s_curr: return "PUT"
     return "NONE"
 
-# --- فحص وتحديث الصفقات (إصلاح مشكلة عدم ظهور النتيجة) ---
 def check_trade_status(user_id):
     try:
         user = users_col.find_one({"_id": ObjectId(user_id)})
@@ -67,30 +65,26 @@ def check_trade_status(user_id):
                     "total_profit": new_total,
                     "losses": user['losses'] + 1,
                     "consecutive_losses": user['consecutive_losses'] + 1,
-                    "current_stake": round(user['current_stake'] * 2.1, 2),
+                    "current_stake": round(user['current_stake'] * 2.2, 2), # تم ضبط المضاعفة على 2.2
                     "status": "LOSS - RETRYING"
                 }
             
-            # محو البيانات عند النهاية
             if update_data["consecutive_losses"] >= 4 or new_total >= user['take_profit']:
                 users_col.delete_one({"_id": ObjectId(user_id)})
             else:
                 users_col.update_one({"_id": ObjectId(user_id)}, {"$set": update_data})
-    except Exception as e:
-        print(f"Trade Sync Error: {e}")
+    except: pass
 
 def user_loop(user_id):
     while True:
         try:
             user = users_col.find_one({"_id": ObjectId(user_id)})
             if not user: break
-
             if user.get("active_contract"):
                 check_trade_status(user_id)
                 time.sleep(2)
                 continue
 
-            # التحليل الفني
             ws = websocket.create_connection(DERIV_WS_URL, timeout=10)
             ws.send(json.dumps({"ticks_history": user['selected_asset'], "count": 200, "end": "latest", "style": "ticks"}))
             res = json.loads(ws.recv())
@@ -101,8 +95,7 @@ def user_loop(user_id):
                 signal = compute_logic(ticks.iloc[::5])
                 
                 if signal != "NONE":
-                    side = "PUT" if signal == "CALL" else "CALL"
-                    # تنفيذ الصفقة
+                    side = "PUT" if signal == "PUT" else "CALL"
                     ws = websocket.create_connection(DERIV_WS_URL)
                     ws.send(json.dumps({"authorize": user['token']}))
                     auth = json.loads(ws.recv())
@@ -121,16 +114,14 @@ def user_loop(user_id):
                                 "status": f"IN TRADE ({side})"
                             }})
                     ws.close()
-            
             time.sleep(1)
         except: time.sleep(5)
 
-# --- واجهة المستخدم (HTML مصلح) ---
 HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>KHOURY V6 FIXED</title>
+    <title>KHOURY V6.2.2</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
         body { background: #05080a; color: white; font-family: sans-serif; display: flex; justify-content: center; padding: 20px; }
@@ -139,13 +130,13 @@ HTML = """
         .btn { width: 100%; padding: 15px; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; margin-top: 10px; }
         .start { background: #238636; color: white; }
         .stop { background: #da3633; color: white; }
-        .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 20px; }
-        .stat { background: #161b22; padding: 10px; border-radius: 8px; border: 1px solid #30363d; }
+        .stat-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 5px; margin-top: 20px; }
+        .stat { background: #161b22; padding: 8px; border-radius: 8px; border: 1px solid #30363d; font-size: 12px; }
     </style>
 </head>
 <body>
     <div class="card">
-        <h2 style="color:#58a6ff">KHOURY PRO V6</h2>
+        <h2 style="color:#58a6ff">KHOURY PRO V6.2.2</h2>
         <input type="text" id="u" placeholder="Session Name">
         <input type="password" id="t" placeholder="Deriv API Token">
         <select id="a">
@@ -160,8 +151,9 @@ HTML = """
         <div id="status" style="margin:15px 0; color:#f1e05a; font-weight:bold;">READY</div>
         <button id="btn" class="btn start" onclick="action()">START BOT</button>
         <div class="stat-grid">
-            <div class="stat">Wins: <b id="win">0</b></div>
-            <div class="stat">Profit: <b id="prof">0.00</b></div>
+            <div class="stat">W: <b id="win" style="color:#238636">0</b></div>
+            <div class="stat">L: <b id="loss" style="color:#da3633">0</b></div>
+            <div class="stat">P: <b id="prof" style="color:#58a6ff">0.00</b></div>
         </div>
     </div>
     <script>
@@ -170,34 +162,24 @@ HTML = """
             const token = document.getElementById('t').value;
             const btn = document.getElementById('btn');
             const type = btn.classList.contains('start') ? 'start' : 'stop';
-            
             await fetch('/manage', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    username: user, token: token, asset: document.getElementById('a').value,
-                    stake: document.getElementById('s').value, tp: document.getElementById('tp').value,
-                    action: type
-                })
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({username: user, token: token, asset: document.getElementById('a').value, stake: document.getElementById('s').value, tp: document.getElementById('tp').value, action: type})
             });
             if(type === 'stop') location.reload();
         }
-
         async function sync() {
             const user = document.getElementById('u').value;
             if(!user) return;
             const r = await fetch('/data/' + user);
             const d = await r.json();
-            const btn = document.getElementById('btn');
             if(d.found) {
-                btn.innerText = "STOP & PURGE";
-                btn.className = "btn stop";
+                document.getElementById('btn').innerText = "STOP & PURGE";
+                document.getElementById('btn').className = "btn stop";
                 document.getElementById('status').innerText = d.status;
                 document.getElementById('win').innerText = d.wins;
+                document.getElementById('loss').innerText = d.losses;
                 document.getElementById('prof').innerText = d.total_profit.toFixed(2);
-            } else {
-                btn.innerText = "START BOT";
-                btn.className = "btn start";
             }
         }
         setInterval(sync, 1000);
@@ -205,6 +187,8 @@ HTML = """
 </body>
 </html>
 """
+
+
 
 @app.route('/')
 def home(): return render_template_string(HTML)
@@ -221,7 +205,6 @@ def manage():
     if req['action'] == 'stop':
         users_col.delete_one({"username": req['username']})
         return jsonify({"s": "ok"})
-    
     if not users_col.find_one({"username": req['username']}):
         uid = users_col.insert_one({
             "username": req['username'], "token": req['token'], "selected_asset": req['asset'],
