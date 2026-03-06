@@ -17,21 +17,15 @@ users_col = db['users']
 
 DERIV_WS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 
-# --- Strategy Logic ---
+# --- Strategy: 30-Tick Trend Following ---
 def compute_logic(ticks_list):
     df = pd.DataFrame(ticks_list, columns=['price'])
-    if len(df) < 65: return "NONE"
+    if len(df) < 35: return "NONE"
     
-    last_60 = df['price'].iloc[-60:].values
-    is_60_bullish = last_60[-1] > last_60[0]
-    is_60_bearish = last_60[-1] < last_60[0]
-
-    last_5 = df['price'].iloc[-5:].values
-    last_5_down = last_5[-1] < last_5[0]
-    last_5_up = last_5[-1] > last_5[0]
-
-    if is_60_bullish and last_5_down: return "CALL"
-    if is_60_bearish and last_5_up: return "PUT"
+    last_30 = df['price'].iloc[-30:].values
+    # Trend: Current > Start of 30 ticks = Bullish
+    if last_30[-1] > last_30[0]: return "CALL"
+    if last_30[-1] < last_30[0]: return "PUT"
     return "NONE"
 
 # --- Trade Lifecycle ---
@@ -58,6 +52,7 @@ def check_trade_status(user_id):
                 losses = user.get('consecutive_losses', 0) + 1
                 update_data.update({"losses": user.get('losses', 0) + 1, "consecutive_losses": losses, "current_stake": round(user['current_stake'] * 2.2, 2)})
                 
+                # Auto-Stop if 4 losses or TP reached
                 if losses >= 4 or new_total >= user.get('take_profit', 9999):
                     users_col.delete_one({"_id": ObjectId(user_id)})
                     return
@@ -73,12 +68,14 @@ def user_loop(user_id):
                 time.sleep(16)
                 check_trade_status(user_id)
                 continue
-            if time.localtime().tm_sec != 0:
+            
+            # Analyze at 30th second only
+            if time.localtime().tm_sec != 30:
                 time.sleep(0.5)
                 continue
             
             ws = websocket.create_connection(DERIV_WS_URL, timeout=10)
-            ws.send(json.dumps({"ticks_history": user['selected_asset'], "count": 100, "end": "latest", "style": "ticks"}))
+            ws.send(json.dumps({"ticks_history": user['selected_asset'], "count": 50, "end": "latest", "style": "ticks"}))
             res = json.loads(ws.recv()); ws.close()
             
             if 'history' in res:
