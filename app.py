@@ -11,7 +11,6 @@ from bson.objectid import ObjectId
 app = Flask(__name__)
 
 # --- إعدادات MongoDB ---
-# تم استخدام الـ URI الخاص بك للاتصال بقاعدة البيانات
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 client = MongoClient(MONGO_URI)
 db = client['khoury_bot_v5_final']
@@ -19,69 +18,62 @@ users_col = db['users']
 
 DERIV_WS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 
-# --- منطق التحليل الفني (شمعة 5 تيك) ---
+# --- المنطق المطور (Strong Reverse) ---
 def compute_logic(df):
-    if len(df) < 20: return "NONE" 
+    if len(df) < 30: return "NONE" 
     c = df['close']
     
-    # حساب RSI 14
+    # RSI 14
     delta = c.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rsi = 100 - (100 / (1 + (gain / loss)))
     
-    # حساب EMA 20 لفلترة الاتجاه السريع
-    ema_fast = c.ewm(span=20, adjust=False).mean()
+    # EMA 20 & SMA 10 لفلترة الحركة
+    ema20 = c.ewm(span=20, adjust=False).mean()
+    sma10 = c.rolling(window=10).mean()
     
-    r_curr, r_prev1, r_prev2 = rsi.iloc[-1], rsi.iloc[-2], rsi.iloc[-3]
-    p_curr, e_curr = c.iloc[-1], ema_fast.iloc[-1]
+    r_curr = rsi.iloc[-1]
+    p_curr = c.iloc[-1]
     
-    # شروط الإشارة الأصلية
-    if ((r_prev1 <= 50 and r_curr > 50) or (r_prev2 <= 50 and r_prev1 > 50)) and p_curr > e_curr:
-        return "CALL"
-    if ((r_prev1 >= 50 and r_curr < 50) or (r_prev2 >= 50 and r_prev1 < 50)) and p_curr < e_curr:
-        return "PUT"
+    # إشارة صعود قوية (نحن سنعكسها لتصبح PUT)
+    # الشرط: RSI أعلى من 70 (تشبع شراء) والسعر بدأ ينزل تحت الـ SMA
+    if r_curr > 70 and p_curr < sma10.iloc[-1]:
+        return "CALL" # ستتحول لـ PUT
+        
+    # إشارة هبوط قوية (نحن سنعكسها لتصبح CALL)
+    # الشرط: RSI أقل من 30 (تشبع بيع) والسعر بدأ يصعد فوق الـ SMA
+    if r_curr < 30 and p_curr > sma10.iloc[-1]:
+        return "PUT" # ستتحول لـ CALL
+        
     return "NONE"
 
 def user_bot_logic(user_id):
     while True:
         try:
             user = users_col.find_one({"_id": ObjectId(user_id)})
-            if not user: break # الخروج من الحلقة إذا تم مسح المستخدم
-                
-            if not user.get("is_running"):
-                time.sleep(1)
-                continue
+            if not user: break
+            if not user.get("is_running") or user.get("active_contract"):
+                time.sleep(1); continue
 
-            if user.get("active_contract"):
-                check_and_update_trade(user_id)
-                time.sleep(1)
-                continue
-
-            # تحليل الزوج المختار بناءً على شمعة الـ 5 تيك
             scan_selected_asset(user_id, user.get("selected_asset"))
             time.sleep(0.5)
-        except:
-            time.sleep(2)
+        except: time.sleep(2)
 
 def scan_selected_asset(user_id, asset):
     try:
         ws = websocket.create_connection(DERIV_WS_URL)
-        # طلب 500 تيك للحصول على داتا كافية لشموع الـ 5 تيك
         ws.send(json.dumps({"ticks_history": asset, "count": 500, "end": "latest", "style": "ticks"}))
-        res = json.loads(ws.recv())
-        ws.close()
+        res = json.loads(ws.recv()); ws.close()
         
         ticks = pd.DataFrame(res['history']['prices'], columns=['close'])
-        # تجميع كل 5 تيكات في شمعة واحدة
-        candles = ticks.iloc[::5].copy()
+        candles = ticks.iloc[::5].copy() # شمعة 5 تيك
         
         signal = compute_logic(candles)
-        
         if signal != "NONE":
-            # --- عكس الإشارة هنا ---
-            reversed_side = "PUT" if signal == "CALL" else "CALL"
-            place_deriv_trade(user_id, asset, reversed_side)
+            # عكس الإشارة
+            side = "PUT" if signal == "CALL" else "CALL"
+            place_deriv_trade(user_id, asset, side)
     except: pass
 
 def place_deriv_trade(user_id, asset, side):
@@ -98,20 +90,16 @@ def place_deriv_trade(user_id, asset, side):
             "buy": 1, "price": stake,
             "parameters": {
                 "amount": stake, "basis": "stake", "contract_type": side,
-                "currency": currency, 
-                "duration": 10,       # مدة الصفقة 10 تيكات
-                "duration_unit": "t", 
-                "symbol": asset
+                "currency": currency, "duration": 10, "duration_unit": "t", "symbol": asset
             }
         }
         ws.send(json.dumps(trade_req))
-        res = json.loads(ws.recv())
-        ws.close()
+        res = json.loads(ws.recv()); ws.close()
 
         if "buy" in res:
             users_col.update_one({"_id": ObjectId(user_id)}, {"$set": {
                 "active_contract": res["buy"]["contract_id"],
-                "status": f"REVERSED ({asset})",
+                "status": f"STRONG REV ({asset})",
                 "currency": currency
             }})
     except: pass
@@ -124,46 +112,36 @@ def check_and_update_trade(user_id):
         ws.send(json.dumps({"authorize": user['token']}))
         ws.recv()
         ws.send(json.dumps({"proposal_open_contract": 1, "contract_id": user['active_contract']}))
-        res = json.loads(ws.recv())
-        ws.close()
+        res = json.loads(ws.recv()); ws.close()
 
         contract = res["proposal_open_contract"]
         if contract["is_sold"]:
             new_data = {"active_contract": None, "status": "WAITING"}
             if contract["status"] == "won":
-                new_data["total_profit"] = user["total_profit"] + contract["profit"]
-                new_data["wins"] = user["wins"] + 1
-                new_data["current_stake"] = round(user["base_stake"], 2)
-                new_data["consecutive_losses"] = 0
+                new_data.update({"total_profit": user["total_profit"] + contract["profit"], "wins": user["wins"] + 1, "current_stake": user["base_stake"], "consecutive_losses": 0})
             else:
-                new_data["total_profit"] = user["total_profit"] - user["current_stake"]
-                new_data["losses"] = user["losses"] + 1
-                new_data["consecutive_losses"] = user["consecutive_losses"] + 1
-                new_data["current_stake"] = round(user["current_stake"] * 2.2, 2)
+                new_data.update({"total_profit": user["total_profit"] - user["current_stake"], "losses": user["losses"] + 1, "consecutive_losses": user["consecutive_losses"] + 1, "current_stake": round(user["current_stake"] * 2.1, 2)})
             
-            # تدمير البيانات عند الوصول للحدود (أمان المستخدم)
             if new_data["consecutive_losses"] >= 4 or new_data.get("total_profit", 0) >= user["take_profit"]:
-                users_col.delete_one({"_id": ObjectId(user_id)})
-                return
+                users_col.delete_one({"_id": ObjectId(user_id)}); return
 
             users_col.update_one({"_id": ObjectId(user_id)}, {"$set": new_data})
     except: pass
 
-# --- واجهة المستخدم (HTML) ---
+# --- واجهة المستخدم ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>KHOURY REVERSE 5-TICKS</title>
+    <title>KHOURY STRONG REV</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        :root { --bg: #05080a; --card: #0d1117; --blue: #ff9f43; --green: #238636; --red: #da3633; }
-        body { background: var(--bg); color: white; font-family: 'Segoe UI', sans-serif; display: flex; justify-content: center; padding: 20px; }
-        .panel { background: var(--card); padding: 25px; border-radius: 20px; width: 100%; max-width: 400px; border: 1px solid #30363d; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
-        h2 { text-align: center; color: var(--blue); margin-bottom: 20px; font-size: 22px; }
-        input, select { width: 100%; padding: 12px; margin: 8px 0; background: #010409; color: #ff9f43; border: 1px solid #30363d; border-radius: 8px; box-sizing: border-box; }
-        .status-box { background: #161b22; padding: 15px; border-radius: 10px; text-align: center; margin: 15px 0; border: 1px solid #30363d; color: #f1e05a; font-weight: bold; font-size: 14px; }
-        .btn { width: 100%; padding: 15px; border: none; border-radius: 10px; font-weight: bold; cursor: pointer; margin-top: 10px; transition: 0.3s; }
+        :root { --bg: #05080a; --card: #0d1117; --blue: #58a6ff; --green: #238636; --red: #da3633; --gold: #f1e05a; }
+        body { background: var(--bg); color: white; font-family: sans-serif; display: flex; justify-content: center; padding: 20px; }
+        .panel { background: var(--card); padding: 25px; border-radius: 20px; width: 100%; max-width: 400px; border: 1px solid #30363d; box-shadow: 0 0 20px rgba(88, 166, 255, 0.1); }
+        input, select { width: 100%; padding: 12px; margin: 8px 0; background: #010409; color: var(--blue); border: 1px solid #30363d; border-radius: 8px; box-sizing: border-box; }
+        .status-box { background: #161b22; padding: 15px; border-radius: 10px; text-align: center; margin: 15px 0; border: 1px solid var(--gold); color: var(--gold); font-weight: bold; }
+        .btn { width: 100%; padding: 15px; border: none; border-radius: 10px; font-weight: bold; cursor: pointer; margin-top: 10px; }
         .start { background: var(--green); color: white; }
         .stop { background: var(--red); color: white; }
         .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 20px; }
@@ -172,62 +150,44 @@ HTML_TEMPLATE = """
 </head>
 <body>
     <div class="panel">
-        <h2>REVERSE 5-TICKS V5</h2>
+        <h2 style="text-align:center; color:var(--blue);">STRONG REVERSE V5</h2>
         <input type="text" id="user" placeholder="Session Name">
         <input type="password" id="token" placeholder="Deriv API Token">
-        
         <select id="asset">
             <option value="R_100">Volatility 100 Index</option>
             <option value="R_75">Volatility 75 Index</option>
-            <option value="R_50">Volatility 50 Index</option>
             <option value="R_10">Volatility 10 Index</option>
-            <option value="1HZ100V">Volatility 100 (1s) Index</option>
-            <option value="1HZ10V">Volatility 10 (1s) Index</option>
+            <option value="1HZ100V">Volatility 100 (1s)</option>
         </select>
-
         <div style="display:flex; gap:10px;">
             <input type="number" id="stake" placeholder="Stake" value="1.00">
-            <input type="number" id="tp" placeholder="Target" value="10.00">
+            <input type="number" id="tp" placeholder="Target" value="5.00">
         </div>
-        <div class="status-box" id="ui_status">MODE: REVERSED (5-TICKS)</div>
-        <button class="btn start" id="btnStart" onclick="handle('start')">START BOT</button>
-        <button class="btn stop" id="btnStop" onclick="handle('stop')" style="display:none;">STOP & PURGE DATA</button>
-        
+        <div class="status-box" id="ui_status">WAITING FOR ANALYTICS...</div>
+        <button class="btn start" id="btnStart" onclick="handle('start')">START SECURE SESSION</button>
+        <button class="btn stop" id="btnStop" onclick="handle('stop')" style="display:none;">STOP & PURGE</button>
         <div class="stats">
-            <div class="stat-card">Wins: <b id="ui_wins" style="color:var(--green);">0</b></div>
-            <div class="stat-card">Losses: <b id="ui_losses" style="color:var(--red);">0</b></div>
+            <div class="stat-card">Wins: <b id="ui_wins">0</b></div>
+            <div class="stat-card">Losses: <b id="ui_losses">0</b></div>
             <div class="stat-card" style="grid-column: span 2;">Profit: <b id="ui_profit" style="color:var(--blue); font-size:20px;">$ 0.00</b></div>
         </div>
     </div>
     <script>
         async function handle(type) {
-            const payload = {
-                username: document.getElementById('user').value,
-                token: document.getElementById('token').value,
-                asset: document.getElementById('asset').value,
-                stake: document.getElementById('stake').value,
-                tp: document.getElementById('tp').value,
-                action: type
-            };
-            if(!payload.username || !payload.token) return alert("Fill Name and Token");
+            const payload = { username: document.getElementById('user').value, token: document.getElementById('token').value, asset: document.getElementById('asset').value, stake: document.getElementById('stake').value, tp: document.getElementById('tp').value, action: type };
             await fetch('/manage', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
             if(type === 'stop') location.reload();
         }
         async function refresh() {
-            const user = document.getElementById('user').value;
-            if(!user) return;
-            const res = await fetch('/data/' + user);
-            const d = await res.json();
+            const user = document.getElementById('user').value; if(!user) return;
+            const res = await fetch('/data/' + user); const d = await res.json();
             if(d.found) {
-                document.getElementById('ui_status').innerText = "STATUS: " + d.status;
-                document.getElementById('ui_wins').innerText = d.wins;
-                document.getElementById('ui_losses').innerText = d.losses;
-                document.getElementById('ui_profit').innerText = (d.currency || "$") + " " + d.total_profit.toFixed(2);
-                document.getElementById('btnStart').style.display = "none";
-                document.getElementById('btnStop').style.display = "block";
+                document.getElementById('ui_status').innerText = d.status;
+                document.getElementById('ui_wins').innerText = d.wins; document.getElementById('ui_losses').innerText = d.losses;
+                document.getElementById('ui_profit').innerText = d.currency + " " + d.total_profit.toFixed(2);
+                document.getElementById('btnStart').style.display = "none"; document.getElementById('btnStop').style.display = "block";
             } else {
-                document.getElementById('btnStart').style.display = "block";
-                document.getElementById('btnStop').style.display = "none";
+                document.getElementById('btnStart').style.display = "block"; document.getElementById('btnStop').style.display = "none";
             }
         }
         setInterval(refresh, 1000);
@@ -243,26 +203,14 @@ def home(): return render_template_string(HTML_TEMPLATE)
 def get_user_data(username):
     u = users_col.find_one({"username": username})
     if not u: return jsonify({"found": False})
-    u['_id'] = str(u['_id']); u['found'] = True
-    return jsonify(u)
+    u['_id'] = str(u['_id']); u['found'] = True; return jsonify(u)
 
 @app.route('/manage', methods=['POST'])
 def manage_bot():
-    req = request.json
-    username = req['username']
-    if req['action'] == 'stop':
-        users_col.delete_one({"username": username})
-        return jsonify({"status": "deleted"})
-        
-    user = users_col.find_one({"username": username})
-    if not user:
-        new_user = {
-            "username": username, "token": req['token'], "selected_asset": req['asset'],
-            "base_stake": float(req['stake']), "current_stake": float(req['stake']),
-            "take_profit": float(req['tp']), "is_running": True, "status": "WAITING",
-            "wins": 0, "losses": 0, "total_profit": 0.0, "consecutive_losses": 0,
-            "active_contract": None, "currency": "$"
-        }
+    req = request.json; username = req['username']
+    if req['action'] == 'stop': users_col.delete_one({"username": username}); return jsonify({"status": "deleted"})
+    if not users_col.find_one({"username": username}):
+        new_user = {"username": username, "token": req['token'], "selected_asset": req['asset'], "base_stake": float(req['stake']), "current_stake": float(req['stake']), "take_profit": float(req['tp']), "is_running": True, "status": "WAITING", "wins": 0, "losses": 0, "total_profit": 0.0, "consecutive_losses": 0, "active_contract": None, "currency": "$"}
         user_id = users_col.insert_one(new_user).inserted_id
         Thread(target=user_bot_logic, args=(str(user_id),), daemon=True).start()
     return jsonify({"status": "running"})
