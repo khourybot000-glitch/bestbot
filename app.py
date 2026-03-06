@@ -17,6 +17,7 @@ db = client['KHOURY_PRECISION_V7']
 users_col = db['users']
 DERIV_WS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 
+# --- المنطق ---
 def analyze_and_trade(user_id):
     try:
         user = users_col.find_one({"_id": ObjectId(user_id)})
@@ -31,7 +32,7 @@ def analyze_and_trade(user_id):
         prices = res['history']['prices']
         if len(prices) < 60: return
 
-        # المنطق: 60 تيك صاعدة، أول 5 من آخر 10 صاعدة، آخر 5 من آخر 10 هابطة
+        # المنطق المطلوب: 60 صاعدة، أول 5 من آخر 10 صاعدة، آخر 5 من آخر 10 هابطة
         is_60_bull = prices[-1] > prices[0]
         last_10 = prices[-10:]
         is_5_10_bull = last_10[4] > last_10[0]
@@ -46,7 +47,6 @@ def execute_trade(user_id, user, side):
         ws = websocket.create_connection(DERIV_WS_URL)
         ws.send(json.dumps({"authorize": user['token']}))
         auth = json.loads(ws.recv())
-        
         ws.send(json.dumps({
             "buy": 1, "price": user['current_stake'],
             "parameters": {
@@ -56,11 +56,9 @@ def execute_trade(user_id, user, side):
         }))
         res = json.loads(ws.recv())
         ws.close()
-        
         if "buy" in res:
-            contract_id = res["buy"]["contract_id"]
             users_col.update_one({"_id": ObjectId(user_id)}, {"$set": {"status": "IN TRADE"}})
-            Thread(target=check_result_after_delay, args=(user_id, contract_id)).start()
+            Thread(target=check_result_after_delay, args=(user_id, res["buy"]["contract_id"])).start()
     except: pass
 
 def check_result_after_delay(user_id, contract_id):
@@ -93,12 +91,12 @@ def scheduler():
 
 Thread(target=scheduler, daemon=True).start()
 
-# --- واجهة المستخدم (القديمة الاحترافية) ---
+# --- الواجهة الكاملة ---
 HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>KHOURY PRECISION V7</title>
+    <title>KHOURY V7</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
         body { background: #05080a; color: white; font-family: sans-serif; display: flex; justify-content: center; padding: 20px; }
@@ -115,6 +113,15 @@ HTML = """
         <h3>KHOURY V7 (SYNC 0s)</h3>
         <input type="text" id="u" placeholder="Session Name">
         <input type="password" id="t" placeholder="API Token">
+        <select id="a">
+            <option value="R_100">Volatility 100</option>
+            <option value="R_75">Volatility 75</option>
+            <option value="1HZ100V">Volatility 100 (1s)</option>
+        </select>
+        <div style="display:flex; gap:5px">
+            <input type="number" id="s" value="1.00" placeholder="Stake">
+            <input type="number" id="tp" value="5.00" placeholder="Target">
+        </div>
         <div id="stat" style="margin:15px 0; color:#f1e05a;">READY</div>
         <button id="btn" class="btn start" onclick="toggle()">START</button>
         <div class="stat-grid">
@@ -127,7 +134,10 @@ HTML = """
         async function toggle() {
             const u = document.getElementById('u').value;
             const t = document.getElementById('t').value;
-            await fetch('/manage', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({u:u, t:t})});
+            const a = document.getElementById('a').value;
+            const s = document.getElementById('s').value;
+            const tp = document.getElementById('tp').value;
+            await fetch('/manage', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({u, t, a, s, tp})});
             location.reload();
         }
         setInterval(async () => {
@@ -149,7 +159,6 @@ HTML = """
 </html>
 """
 
-
 @app.route('/')
 def home(): return render_template_string(HTML)
 
@@ -165,7 +174,12 @@ def manage():
     if users_col.find_one({"username": data['u']}):
         users_col.delete_one({"username": data['u']})
     else:
-        users_col.insert_one({"username": data['u'], "token": data['t'], "is_running": True, "selected_asset": "R_100", "base_stake": 1.0, "current_stake": 1.0, "total_profit": 0.0, "wins": 0, "losses": 0, "status": "WAITING"})
+        users_col.insert_one({
+            "username": data['u'], "token": data['t'], "is_running": True, 
+            "selected_asset": data['a'], "base_stake": float(data['s']), 
+            "current_stake": float(data['s']), "total_profit": 0.0, 
+            "wins": 0, "losses": 0, "status": "WAITING"
+        })
     return jsonify({"status": "ok"})
 
 if __name__ == "__main__":
