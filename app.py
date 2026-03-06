@@ -33,13 +33,13 @@ def compute_logic(ticks_list):
     last_5 = last_10[5:]
     
     first_5_up = first_5[-1] > first_5[0]
-    last_5_down = last_5[-1] < last_5[0]
+    last_5_up = last_5[-1] > last_5[0]
     
     first_5_down = first_5[-1] < first_5[0]
-    last_5_up = last_5[-1] > last_5[0]
+    last_5_down = last_5[-1] < last_5[0]
 
-    if is_60_bullish and first_5_up and last_5_down: return "CALL"
-    if is_60_bearish and first_5_down and last_5_up: return "PUT"
+    if is_60_bullish and first_5_down and last_5_down: return "PUT"
+    if is_60_bearish and first_5_up and last_5_up: return "CALL"
     return "NONE"
 
 def check_trade_status(user_id):
