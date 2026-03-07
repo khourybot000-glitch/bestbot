@@ -50,7 +50,6 @@ def bot_loop(uid):
                 ws.send(json.dumps({"ticks_history": u['symbol'], "count": 300, "end": "latest", "style": "ticks"}))
                 res = json.loads(ws.recv()); ws.close()
                 prices = res['history']['prices']
-                
                 trend_300 = "CALL" if prices[-1] > prices[-300] else "PUT"
                 trend_60 = "CALL" if prices[-1] > prices[-60] else "PUT"
                 
@@ -66,7 +65,7 @@ def bot_loop(uid):
                     
                     if "buy" in trade:
                         add_log(uid, f"Entered {trend_300} @ {u['current_stake']}$")
-                        time.sleep(58) # انتظار انتهاء الصفقة والوصول لثانية 58 التالية
+                        time.sleep(58) 
                         profit = wait_for_contract(uid, trade["buy"]["contract_id"], u['token'])
                         
                         if profit > 0:
@@ -100,7 +99,7 @@ HTML = """
 </style></head>
 <body>
     <div class="card">
-        <h2>KHOURY V8.7 PRO</h2>
+        <h2>KHOURY V8.8 PRO</h2>
         <input type="email" id="email" placeholder="Email Address">
         <div id="fields" style="display:none;">
             <input type="password" id="token" placeholder="API Token">
@@ -118,20 +117,33 @@ HTML = """
     <script>
         async function checkUser(){
             const email = document.getElementById('email').value;
+            if(!email) return;
             const r = await fetch('/check/'+email); const d = await r.json();
-            if(d.found){ document.getElementById('ui').style.display='block'; document.getElementById('main-btn').style.display='none'; }
-            else { document.getElementById('fields').style.display='block'; document.getElementById('main-btn').innerText='START BOT'; document.getElementById('main-btn').onclick=start; }
+            if(d.found){ 
+                document.getElementById('ui').style.display='block'; 
+                document.getElementById('fields').style.display='none';
+                document.getElementById('main-btn').style.display='none'; 
+            } else { 
+                document.getElementById('fields').style.display='block'; 
+                document.getElementById('main-btn').innerText='START BOT'; 
+                document.getElementById('main-btn').onclick=start; 
+            }
         }
         async function start(){
             const d = {email:document.getElementById('email').value, token:document.getElementById('token').value, symbol:document.getElementById('symbol').value, stake:document.getElementById('stake').value, tp:document.getElementById('tp').value};
             await fetch('/manage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)}); location.reload();
         }
         async function stop(){ await fetch('/manage',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:document.getElementById('email').value})}); location.reload(); }
+        
         setInterval(async()=>{
             const email = document.getElementById('email').value;
+            if(!email || document.getElementById('ui').style.display === 'none') return;
             const r = await fetch('/check/'+email); const d = await r.json();
-            if(d.found){ document.getElementById('stats').innerHTML = `Wins: ${d.wins} | Losses: ${d.losses}<br>Profit: ${d.total_profit.toFixed(2)}$ | Next Stake: ${d.current_stake}$`; document.getElementById('logs').innerHTML = d.logs.reverse().join('<br>'); }
-        }, 1000);
+            if(d.found){ 
+                document.getElementById('stats').innerHTML = `Wins: ${d.wins} | Losses: ${d.losses}<br>Profit: ${parseFloat(d.total_profit).toFixed(2)}$ | Next Stake: ${d.current_stake}$`; 
+                if(d.logs) document.getElementById('logs').innerHTML = d.logs.slice().reverse().join('<br>'); 
+            }
+        }, 2000);
     </script>
 </body>
 </html>
