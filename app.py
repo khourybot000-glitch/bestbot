@@ -9,381 +9,260 @@ from bson.objectid import ObjectId
 
 app = Flask(__name__)
 
-# MongoDB
 MONGO_URI="mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 client=MongoClient(MONGO_URI)
-db=client["KHOURY_V16"]
+db=client["KHOURY_V19"]
 users=db["users"]
 
 DERIV="wss://blue.derivws.com/websockets/v3?app_id=16929"
 
-# ------------------ LOG ------------------
+# ---------------- LOG ----------------
 
 def log(uid,msg):
-
     t=datetime.now().strftime("%H:%M:%S")
-
     users.update_one(
         {"_id":ObjectId(uid)},
         {"$push":{"logs":{"$each":[f"[{t}] {msg}"],"$slice":-50}}}
     )
 
-# ------------------ STRATEGY ------------------
+# ---------------- STRATEGY ----------------
 
 def strategy(ticks):
-
-    if len(ticks)<15:
+    if len(ticks)<60:
         return "NONE"
-
-    candles=[]
-
-    for i in range(0,15,5):
-
-        part=ticks[i:i+5]
-
-        o=part[0]
-        c=part[-1]
-
-        candles.append((o,c))
-
-    diffs=[c-o for o,c in candles]
-
-    for i in range(1,3):
-
-        if abs(diffs[i])<0.2:
-            return "NONE"
-
-        if diffs[i]*diffs[i-1]>0:
-            return "NONE"
-
-    last=diffs[-1]
-
-    if last>0:
-        return "CALL"
-
-    if last<0:
+    first=ticks[:30]
+    second=ticks[30:]
+    first_diff=first[-1]-first[0]
+    second_diff=second[-1]-second[0]
+    if first_diff>0 and second_diff<0:
         return "PUT"
-
+    if first_diff<0 and second_diff>0:
+        return "CALL"
     return "NONE"
 
-# ------------------ CHECK RESULT ------------------
+# ---------------- CHECK RESULT ----------------
 
 def check(uid):
-
     u=users.find_one({"_id":ObjectId(uid)})
-
     if not u or not u.get("contract"):
         return
 
-    try:
+    # انتظار 10 ثواني قبل فحص النتيجة
+    time.sleep(10)
 
-        ws=websocket.create_connection(DERIV)
+    while True:
+        try:
+            ws=websocket.create_connection(DERIV)
+            ws.send(json.dumps({"authorize":u["token"]}))
+            ws.recv()
+            ws.send(json.dumps({
+                "proposal_open_contract":1,
+                "contract_id":u["contract"]
+            }))
+            r=json.loads(ws.recv())
+            ws.close()
+            c=r["proposal_open_contract"]
+            if not c["is_sold"]:
+                time.sleep(0.5)
+                continue
 
-        ws.send(json.dumps({"authorize":u["token"]}))
-        ws.recv()
+            profit=round(float(c["profit"]),2)
+            total=round(u["profit"]+profit,2)
 
-        ws.send(json.dumps({
-            "proposal_open_contract":1,
-            "contract_id":u["contract"]
-        }))
-
-        r=json.loads(ws.recv())
-        ws.close()
-
-        c=r["proposal_open_contract"]
-
-        if not c["is_sold"]:
-            return
-
-        profit=round(float(c["profit"]),2)
-
-        total=round(u["profit"]+profit,2)
-
-        if profit>0:
-
-            log(uid,f"WIN {profit}$")
-
-            users.update_one(
-
-                {"_id":ObjectId(uid)},
-
-                {"$set":{
-                    "contract":None,
-                    "profit":total,
-                    "wins":u["wins"]+1,
-                    "stake":round(u["base"],2),
-                    "loss_seq":0
-                }}
-
-            )
-
-        else:
-
-            loss_seq=u["loss_seq"]+1
-
-            stake=round(u["stake"]*10,2)
-
-            log(uid,f"LOSS next {stake}$")
-
-            users.update_one(
-
-                {"_id":ObjectId(uid)},
-
-                {"$set":{
-                    "contract":None,
-                    "stake":stake,
-                    "loss_seq":loss_seq
-                },
-                 "$inc":{"losses":1,"profit":profit}}
-
-            )
-
-            if loss_seq>=2:
-
+            if profit>0:
+                log(uid,f"WIN {profit}$")
                 users.update_one(
                     {"_id":ObjectId(uid)},
-                    {"$set":{"status":"stopped","reason":"2 losses"}}
+                    {"$set":{
+                        "contract":None,
+                        "profit":total,
+                        "wins":u["wins"]+1,
+                        "stake":round(u["base"],2),
+                        "loss_seq":0
+                    }}
                 )
+            else:
+                loss_seq=u["loss_seq"]+1
+                stake=round(u["stake"]*10,2)
+                log(uid,f"LOSS next {stake}$")
+                users.update_one(
+                    {"_id":ObjectId(uid)},
+                    {"$set":{
+                        "contract":None,
+                        "stake":stake,
+                        "loss_seq":loss_seq
+                    },
+                     "$inc":{"losses":1,"profit":profit}}
+                )
+                if loss_seq>=2:
+                    users.update_one(
+                        {"_id":ObjectId(uid)},
+                        {"$set":{"status":"stopped","reason":"2 losses"}}
+                    )
 
-        if total>=u["tp"]:
+            if total>=u["tp"]:
+                users.update_one(
+                    {"_id":ObjectId(uid)},
+                    {"$set":{"status":"stopped","reason":"TP reached"}}
+                )
+            break
 
+        except:
+            time.sleep(0.5)
+
+# ---------------- OPEN TRADE ----------------
+
+def open_trade(u,sig,uid):
+    try:
+        ws=websocket.create_connection(DERIV)
+        ws.send(json.dumps({"authorize":u["token"]}))
+        auth=json.loads(ws.recv())
+        cur=auth["authorize"]["currency"]
+        barrier=0.5 if sig=="PUT" else -0.5
+        ws.send(json.dumps({
+            "buy":1,
+            "price":round(u["stake"],2),
+            "parameters":{
+                "amount":round(u["stake"],2),
+                "basis":"stake",
+                "contract_type":sig,
+                "currency":cur,
+                "duration":5,
+                "duration_unit":"t",
+                "symbol":u["symbol"],
+                "barrier":barrier
+            }
+        }))
+        trade=json.loads(ws.recv())
+        ws.close()
+        if "buy" in trade:
+            cid=trade["buy"]["contract_id"]
+            log(uid,f"ENTER {sig} {u['stake']}$")
             users.update_one(
                 {"_id":ObjectId(uid)},
-                {"$set":{"status":"stopped","reason":"TP reached"}}
+                {"$set":{"contract":cid}}
             )
-
     except:
         pass
 
-# ------------------ BOT LOOP ------------------
+# ---------------- BOT LOOP ----------------
 
 def bot(uid):
-
+    last_trade_minute=-1
     while True:
-
         u=users.find_one({"_id":ObjectId(uid)})
-
         if not u or u["status"]!="running":
             break
 
+        # لا تفتح صفقة إذا هناك صفقة مفتوحة
+        if u.get("contract"):
+            check(uid)
+            time.sleep(0.5)
+            continue
+
         sec=time.localtime().tm_sec
+        minute=time.localtime().tm_min
 
-        if sec%10==0:
-
+        if sec==0 and minute!=last_trade_minute:
+            last_trade_minute=minute
             try:
-
                 ws=websocket.create_connection(DERIV)
-
                 ws.send(json.dumps({
                     "ticks_history":u["symbol"],
-                    "count":15,
+                    "count":60,
                     "end":"latest",
                     "style":"ticks"
                 }))
-
                 r=json.loads(ws.recv())
-
                 ws.close()
-
                 if "history" not in r:
                     continue
-
                 sig=strategy(r["history"]["prices"])
-
-                if sig=="NONE":
-                    continue
-
-                ws=websocket.create_connection(DERIV)
-
-                ws.send(json.dumps({"authorize":u["token"]}))
-                auth=json.loads(ws.recv())
-
-                cur=auth["authorize"]["currency"]
-
-                barrier=0.5 if sig=="PUT" else -0.5
-
-                ws.send(json.dumps({
-
-                    "buy":1,
-                    "price":round(u["stake"],2),
-
-                    "parameters":{
-
-                        "amount":round(u["stake"],2),
-                        "basis":"stake",
-                        "contract_type":sig,
-                        "currency":cur,
-                        "duration":5,
-                        "duration_unit":"t",
-                        "symbol":u["symbol"],
-                        "barrier":barrier
-                    }
-
-                }))
-
-                trade=json.loads(ws.recv())
-
-                ws.close()
-
-                if "buy" in trade:
-
-                    cid=trade["buy"]["contract_id"]
-
-                    log(uid,f"ENTER {sig}")
-
-                    users.update_one(
-                        {"_id":ObjectId(uid)},
-                        {"$set":{"contract":cid}}
-                    )
-
+                if sig!="NONE":
+                    open_trade(u,sig,uid)
             except:
                 pass
-
-            time.sleep(1)
-
         time.sleep(0.5)
-
         check(uid)
 
-# ------------------ RESUME ------------------
+# ---------------- RESUME ----------------
 
 def resume():
-
     for u in users.find({"status":"running"}):
-
         Thread(target=bot,args=(str(u["_id"]),),daemon=True).start()
 
-# ------------------ WEB ------------------
+# ---------------- WEB ----------------
 
 HTML="""
 <html>
 <body style='background:#0b0f14;color:white;font-family:sans-serif'>
-
 <h2>KHOURY BOT</h2>
-
 Email<br>
 <input id=email>
-
 <button onclick=login()>LOGIN</button>
 
 <div id=settings style="display:none">
-
-Token<br>
-<input id=token>
-
+Token<br><input id=token>
 Symbol<br>
 <select id=symbol>
 <option value=R_100>V100</option>
 <option value=R_75>V75</option>
 </select>
-
-Stake<br>
-<input id=stake value=1>
-
-TP<br>
-<input id=tp value=10>
-
+Stake<br><input id=stake value=1>
+TP<br><input id=tp value=10>
 <button onclick=start()>START</button>
-
 </div>
 
 <div id=stats style="display:none">
-
 <div id=reason style=color:red></div>
-
 <button onclick=stop()>STOP</button>
-
 <div id=s></div>
-
 <div id=l style="height:150px;overflow:auto;background:black"></div>
-
 <button onclick=news()>Start New Session</button>
-
 </div>
 
 <script>
-
 let email=""
-
 async function login(){
-
-email=document.getElementById("email").value
-
-let r=await fetch("/check/"+email)
-
-let d=await r.json()
-
-if(d.found){
-
-stats.style.display="block"
-
-}else{
-
-settings.style.display="block"
-
+    email=document.getElementById("email").value
+    let r=await fetch("/check/"+email)
+    let d=await r.json()
+    if(d.found){stats.style.display="block"}else{settings.style.display="block"}
 }
-
-}
-
 async function start(){
-
-let data={
-
-email:email,
-token:token.value,
-symbol:symbol.value,
-stake:parseFloat(stake.value),
-tp:parseFloat(tp.value)
-
+    let data={
+        email:email,
+        token:token.value,
+        symbol:symbol.value,
+        stake:parseFloat(stake.value),
+        tp:parseFloat(tp.value)
+    }
+    await fetch("/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)})
+    settings.style.display="none"
+    stats.style.display="block"
 }
-
-await fetch("/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)})
-
-settings.style.display="none"
-
-stats.style.display="block"
-
-}
-
 async function stop(){
-
-await fetch("/stop",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:email})})
-
+    await fetch("/stop",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:email})})
 }
-
 async function news(){
-
-await fetch("/reset",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:email})})
-
-location.reload()
-
+    await fetch("/reset",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:email})})
+    location.reload()
 }
-
 setInterval(async()=>{
-
-if(!email)return
-
-let r=await fetch("/check/"+email)
-
-let d=await r.json()
-
-if(!d.found)return
-
-s.innerHTML="Wins "+d.wins+" Losses "+d.losses+" Profit "+d.profit.toFixed(2)
-
-l.innerHTML=d.logs.reverse().join("<br>")
-
-reason.innerText=d.reason
-
+    if(!email)return
+    let r=await fetch("/check/"+email)
+    let d=await r.json()
+    if(!d.found)return
+    s.innerHTML="Wins "+d.wins+" Losses "+d.losses+" Profit "+d.profit.toFixed(2)
+    l.innerHTML=d.logs.reverse().join("<br>")
+    reason.innerText=d.reason
 },1000)
-
 </script>
-
 </body>
 </html>
 """
 
-# ------------------ ROUTES ------------------
+# ---------------- ROUTES ----------------
 
 @app.route("/")
 def home():
@@ -391,67 +270,46 @@ def home():
 
 @app.route("/check/<email>")
 def check_email(email):
-
     u=users.find_one({"email":email})
-
     if u:
-
         u["_id"]=str(u["_id"])
-
         return jsonify({"found":True,**u})
-
     return jsonify({"found":False})
 
 @app.route("/start",methods=["POST"])
 def start():
-
     d=request.json
-
     uid=users.insert_one({
-
         "email":d["email"],
         "token":d["token"],
         "symbol":d["symbol"],
         "base":round(d["stake"],2),
         "stake":round(d["stake"],2),
         "tp":round(d["tp"],2),
-
         "profit":0.0,
         "wins":0,
         "losses":0,
         "loss_seq":0,
-
         "contract":None,
         "logs":[],
         "status":"running",
         "reason":""
-
     }).inserted_id
-
     Thread(target=bot,args=(str(uid),),daemon=True).start()
-
     return jsonify({"ok":True})
 
 @app.route("/stop",methods=["POST"])
 def stop():
-
     email=request.json["email"]
-
     users.update_one({"email":email},{"$set":{"status":"stopped","reason":"manual stop"}})
-
     return jsonify({"ok":True})
 
 @app.route("/reset",methods=["POST"])
 def reset():
-
     email=request.json["email"]
-
     users.delete_one({"email":email})
-
     return jsonify({"ok":True})
 
 if __name__=="__main__":
-
     resume()
-
     app.run(host="0.0.0.0",port=5000)
