@@ -37,7 +37,7 @@ def compute_logic(ticks, last_signal):
         candles.append({"open": open_price, "close": close_price})
     diffs = [c["close"] - c["open"] for c in candles]
     for i in range(1, len(diffs)):
-        if abs(diffs[i]) < 0.5:
+        if abs(diffs[i]) < 0.3:
             return "NONE"
         if diffs[i] * diffs[i-1] > 0:
             return "NONE"
