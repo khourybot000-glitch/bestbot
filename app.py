@@ -11,7 +11,7 @@ app = Flask(__name__)
 
 MONGO_URI="mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 client=MongoClient(MONGO_URI)
-db=client["KHOURY_V23"]
+db=client["KHOURY_V24"]
 users=db["users"]
 
 DERIV="wss://blue.derivws.com/websockets/v3?app_id=16929"
@@ -118,7 +118,7 @@ def check(uid):
                     {"$set":{"contract":None,"stake":stake,"loss_seq":loss_seq},
                      "$inc":{"losses":1,"profit":profit}}
                 )
-                # فتح المضاعفة فورًا
+                # فتح المضاعفة فورا
                 open_trade(u,u["last_signal"],uid,stake_override=stake)
                 if loss_seq>=2:
                     users.update_one(
@@ -145,7 +145,12 @@ def bot(uid):
             check(uid)
             time.sleep(0.5)
             continue
-        # فتح صفقة جديدة فور ظهور إشارة مناسبة
+        # الانتظار للثانية 0 للتحليل
+        sec=time.localtime().tm_sec
+        if sec!=0:
+            time.sleep(0.5)
+            continue
+        # التحليل وجلب 60 تيك
         try:
             ws=websocket.create_connection(DERIV)
             ws.send(json.dumps({
@@ -176,7 +181,7 @@ def resume():
 HTML="""
 <html>
 <body style='background:#0b0f14;color:white;font-family:sans-serif'>
-<h2>KHOURY BOT V23</h2>
+<h2>KHOURY BOT V24</h2>
 Email<br>
 <input id=email>
 <button onclick=login()>LOGIN</button>
