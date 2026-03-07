@@ -12,7 +12,7 @@ app = Flask(__name__)
 # --- MongoDB ---
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 client = MongoClient(MONGO_URI)
-db = client['KHOURY_V14_LOSSES']
+db = client['KHOURY_V15_TP_LOSSES']
 users_col = db['users']
 
 DERIV_WS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
@@ -20,7 +20,10 @@ DERIV_WS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 # --- Logging ---
 def add_log(uid, msg):
     now = datetime.now().strftime("%H:%M:%S")
-    users_col.update_one({"_id": ObjectId(uid)}, {"$push": {"logs": {"$each": [f"[{now}] {msg}"], "$slice": -50}}})
+    users_col.update_one(
+        {"_id": ObjectId(uid)},
+        {"$push": {"logs": {"$each": [f"[{now}] {msg}"], "$slice": -50}}}
+    )
 
 # --- Strategy ---
 def compute_logic(ticks, last_signal):
@@ -64,34 +67,48 @@ def check_status(uid):
         ws.close()
         contract = res.get("proposal_open_contract")
         if contract and contract.get("is_sold"):
-            try:
-                profit = round(float(contract.get("profit", 0)), 2)
-            except:
-                profit = 0.00
+            profit = round(float(contract.get("profit", 0)), 2)
             total = round(user.get("total_profit", 0) + profit, 2)
             if profit > 0:
                 add_log(uid, f"WIN: +{profit}$")
-                users_col.update_one({"_id": ObjectId(uid)}, {"$set": {
-                    "active_contract": None,
-                    "total_profit": total,
-                    "wins": user.get("wins", 0) + 1,
-                    "current_stake": round(user["base_stake"], 2),
-                    "consecutive_losses": 0,
-                    "last_signal": None
-                }})
+                users_col.update_one(
+                    {"_id": ObjectId(uid)},
+                    {"$set": {
+                        "active_contract": None,
+                        "total_profit": total,
+                        "wins": user.get("wins", 0) + 1,
+                        "current_stake": round(user["base_stake"], 2),
+                        "consecutive_losses": 0,
+                        "last_signal": None
+                    }}
+                )
             else:
                 losses = user.get("consecutive_losses", 0) + 1
                 stake = round(user["current_stake"] * 10, 2)
                 add_log(uid, f"LOSS! Next Stake: {stake}$")
-                users_col.update_one({"_id": ObjectId(uid)}, {"$set": {
-                    "active_contract": None,
-                    "current_stake": stake,
-                    "consecutive_losses": losses,
-                    "last_signal": None
-                }, "$inc": {"losses": 1, "total_profit": profit}})
+                users_col.update_one(
+                    {"_id": ObjectId(uid)},
+                    {"$set": {
+                        "active_contract": None,
+                        "current_stake": stake,
+                        "consecutive_losses": losses,
+                        "last_signal": None
+                    },
+                     "$inc": {"losses": 1, "total_profit": profit}}
+                )
                 if losses >= 2:
-                    add_log(uid, "STOP AFTER 2 LOSSES")
-                    users_col.update_one({"_id": ObjectId(uid)}, {"$set": {"status": "stopped", "reason": "2 consecutive losses"}})
+                    add_log(uid, "STOP: 2 consecutive losses")
+                    users_col.update_one(
+                        {"_id": ObjectId(uid)},
+                        {"$set": {"status": "stopped", "reason": "2 consecutive losses"}}
+                    )
+            # تحقق من TP المستخدم
+            if total >= user.get("tp", 9999):
+                add_log(uid, "STOP: Take Profit reached")
+                users_col.update_one(
+                    {"_id": ObjectId(uid)},
+                    {"$set": {"status": "stopped", "reason": "Take Profit reached"}}
+                )
     except:
         pass
 
@@ -163,7 +180,7 @@ button{width:100%;padding:15px;border:none;border-radius:8px;font-weight:bold;ma
 </head>
 <body>
 <div class="card">
-<h2>KHOURY V14</h2>
+<h2>KHOURY V15</h2>
 <div id="loginDiv">
 <input id="email" placeholder="Email">
 <button onclick="login()">LOGIN</button>
@@ -175,7 +192,8 @@ button{width:100%;padding:15px;border:none;border-radius:8px;font-weight:bold;ma
 <option value="R_100">Volatility 100</option>
 <option value="R_75">Volatility 75</option>
 </select>
-<input id="stake" type="number" value="1">
+<input id="stake" type="number" value="1" step="0.01" placeholder="Initial Stake">
+<input id="tp" type="number" value="10" step="0.01" placeholder="Take Profit">
 <button onclick="startSession()">START</button>
 </div>
 
@@ -207,16 +225,17 @@ async function login(){
     }
 }
 async function startSession(){
-    let d={
-        email:email,
-        token:document.getElementById("token").value,
-        symbol:document.getElementById("symbol").value,
-        stake:parseFloat(document.getElementById("stake").value)
+    let d = {
+        email: email,
+        token: document.getElementById("token").value,
+        symbol: document.getElementById("symbol").value,
+        stake: parseFloat(document.getElementById("stake").value),
+        tp: parseFloat(document.getElementById("tp").value)
     }
-    await fetch("/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(d)})
-    running=true
-    document.getElementById("settingsDiv").style.display="none"
-    document.getElementById("statsDiv").style.display="block"
+    await fetch("/start", {method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(d)});
+    running = true;
+    document.getElementById("settingsDiv").style.display = "none";
+    document.getElementById("statsDiv").style.display = "block";
 }
 async function stopSession(){
     await fetch("/stop",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:email})})
@@ -253,15 +272,12 @@ setInterval(async()=>{
 
 # --- Routes ---
 @app.route("/")
-def home():
-    return render_template_string(HTML)
+def home(): return render_template_string(HTML)
 
 @app.route("/check/<email>")
 def check(email):
     u = users_col.find_one({"email": email})
-    if u:
-        u["_id"] = str(u["_id"])
-        return jsonify({"found": True, **u})
+    if u: u["_id"] = str(u["_id"]); return jsonify({"found": True, **u})
     return jsonify({"found": False})
 
 @app.route("/start", methods=["POST"])
@@ -283,11 +299,12 @@ def start():
             "logs": [],
             "status": "running",
             "reason": "",
-            "last_signal": None
+            "last_signal": None,
+            "tp": round(float(d["tp"]),2)
         }).inserted_id
         Thread(target=user_loop, args=(str(uid),), daemon=True).start()
     else:
-        users_col.update_one({"email": d["email"]}, {"$set": {"status": "running"}})
+        users_col.update_one({"email": d["email"]}, {"$set": {"status": "running", "tp": round(float(d["tp"]),2)}})
         Thread(target=user_loop, args=(str(u["_id"]),), daemon=True).start()
     return jsonify({"ok": True})
 
@@ -303,7 +320,7 @@ def reset():
     users_col.delete_one({"email": email})
     return jsonify({"ok": True})
 
-# --- Resume Sessions ---
+# --- Run App ---
 if __name__ == "__main__":
     resume_sessions()
     app.run(host="0.0.0.0", port=5000)
