@@ -11,13 +11,12 @@ app = Flask(__name__)
 
 MONGO_URI="mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 client=MongoClient(MONGO_URI)
-db=client["KHOURY_V19"]
+db=client["KHOURY_V20"]
 users=db["users"]
 
 DERIV="wss://blue.derivws.com/websockets/v3?app_id=16929"
 
 # ---------------- LOG ----------------
-
 def log(uid,msg):
     t=datetime.now().strftime("%H:%M:%S")
     users.update_one(
@@ -26,7 +25,6 @@ def log(uid,msg):
     )
 
 # ---------------- STRATEGY ----------------
-
 def strategy(ticks):
     if len(ticks)<60:
         return "NONE"
@@ -35,83 +33,12 @@ def strategy(ticks):
     first_diff=first[-1]-first[0]
     second_diff=second[-1]-second[0]
     if first_diff>0 and second_diff<0:
-        return "PUT"
-    if first_diff<0 and second_diff>0:
         return "CALL"
+    if first_diff<0 and second_diff>0:
+        return "PUT"
     return "NONE"
 
-# ---------------- CHECK RESULT ----------------
-
-def check(uid):
-    u=users.find_one({"_id":ObjectId(uid)})
-    if not u or not u.get("contract"):
-        return
-
-    # انتظار 10 ثواني قبل فحص النتيجة
-    time.sleep(10)
-
-    while True:
-        try:
-            ws=websocket.create_connection(DERIV)
-            ws.send(json.dumps({"authorize":u["token"]}))
-            ws.recv()
-            ws.send(json.dumps({
-                "proposal_open_contract":1,
-                "contract_id":u["contract"]
-            }))
-            r=json.loads(ws.recv())
-            ws.close()
-            c=r["proposal_open_contract"]
-            if not c["is_sold"]:
-                time.sleep(0.5)
-                continue
-
-            profit=round(float(c["profit"]),2)
-            total=round(u["profit"]+profit,2)
-
-            if profit>0:
-                log(uid,f"WIN {profit}$")
-                users.update_one(
-                    {"_id":ObjectId(uid)},
-                    {"$set":{
-                        "contract":None,
-                        "profit":total,
-                        "wins":u["wins"]+1,
-                        "stake":round(u["base"],2),
-                        "loss_seq":0
-                    }}
-                )
-            else:
-                loss_seq=u["loss_seq"]+1
-                stake=round(u["stake"]*10,2)
-                log(uid,f"LOSS next {stake}$")
-                users.update_one(
-                    {"_id":ObjectId(uid)},
-                    {"$set":{
-                        "contract":None,
-                        "stake":stake,
-                        "loss_seq":loss_seq
-                    },
-                     "$inc":{"losses":1,"profit":profit}}
-                )
-                if loss_seq>=2:
-                    users.update_one(
-                        {"_id":ObjectId(uid)},
-                        {"$set":{"status":"stopped","reason":"2 losses"}}
-                    )
-
-            if total>=u["tp"]:
-                users.update_one(
-                    {"_id":ObjectId(uid)},
-                    {"$set":{"status":"stopped","reason":"TP reached"}}
-                )
-            break
-
-        except:
-            time.sleep(0.5)
-
 # ---------------- OPEN TRADE ----------------
-
 def open_trade(u,sig,uid):
     try:
         ws=websocket.create_connection(DERIV)
@@ -145,58 +72,110 @@ def open_trade(u,sig,uid):
     except:
         pass
 
-# ---------------- BOT LOOP ----------------
+# ---------------- CHECK RESULT ----------------
+def check(uid):
+    u=users.find_one({"_id":ObjectId(uid)})
+    if not u or not u.get("contract"):
+        return
+    while True:
+        try:
+            ws=websocket.create_connection(DERIV)
+            ws.send(json.dumps({"authorize":u["token"]}))
+            ws.recv()
+            ws.send(json.dumps({
+                "proposal_open_contract":1,
+                "contract_id":u["contract"]
+            }))
+            r=json.loads(ws.recv())
+            ws.close()
+            c=r["proposal_open_contract"]
+            if not c["is_sold"]:
+                time.sleep(0.5)
+                continue
+            profit=round(float(c["profit"]),2)
+            total=round(u["profit"]+profit,2)
+            if profit>0:
+                log(uid,f"WIN {profit}$")
+                users.update_one(
+                    {"_id":ObjectId(uid)},
+                    {"$set":{
+                        "contract":None,
+                        "profit":total,
+                        "wins":u["wins"]+1,
+                        "stake":round(u["base"],2),
+                        "loss_seq":0
+                    }}
+                )
+            else:
+                # المضاعفة فوراً بعد الخسارة
+                loss_seq=u["loss_seq"]+1
+                stake=round(u["stake"]*10,2)
+                log(uid,f"LOSS next {stake}$")
+                users.update_one(
+                    {"_id":ObjectId(uid)},
+                    {"$set":{
+                        "contract":None,
+                        "stake":stake,
+                        "loss_seq":loss_seq
+                    },
+                     "$inc":{"losses":1,"profit":profit}}
+                )
+                if loss_seq>=2:
+                    users.update_one(
+                        {"_id":ObjectId(uid)},
+                        {"$set":{"status":"stopped","reason":"2 losses"}}
+                    )
+            if total>=u["tp"]:
+                users.update_one(
+                    {"_id":ObjectId(uid)},
+                    {"$set":{"status":"stopped","reason":"TP reached"}}
+                )
+            break
+        except:
+            time.sleep(0.5)
 
+# ---------------- BOT LOOP ----------------
 def bot(uid):
-    last_trade_minute=-1
     while True:
         u=users.find_one({"_id":ObjectId(uid)})
         if not u or u["status"]!="running":
             break
-
-        # لا تفتح صفقة إذا هناك صفقة مفتوحة
+        # تحقق دائم للصفقة المفتوحة
         if u.get("contract"):
-            check(uid)
+            check(uid)  # هذا يشمل فتح المضاعفة فوراً بعد الخسارة
             time.sleep(0.5)
             continue
-
-        sec=time.localtime().tm_sec
-        minute=time.localtime().tm_min
-
-        if sec==0 and minute!=last_trade_minute:
-            last_trade_minute=minute
-            try:
-                ws=websocket.create_connection(DERIV)
-                ws.send(json.dumps({
-                    "ticks_history":u["symbol"],
-                    "count":60,
-                    "end":"latest",
-                    "style":"ticks"
-                }))
-                r=json.loads(ws.recv())
-                ws.close()
-                if "history" not in r:
-                    continue
-                sig=strategy(r["history"]["prices"])
-                if sig!="NONE":
-                    open_trade(u,sig,uid)
-            except:
-                pass
+        # فتح صفقة جديدة إذا لا توجد صفقة حالية
+        try:
+            ws=websocket.create_connection(DERIV)
+            ws.send(json.dumps({
+                "ticks_history":u["symbol"],
+                "count":60,
+                "end":"latest",
+                "style":"ticks"
+            }))
+            r=json.loads(ws.recv())
+            ws.close()
+            if "history" not in r:
+                time.sleep(0.5)
+                continue
+            sig=strategy(r["history"]["prices"])
+            if sig!="NONE":
+                open_trade(u,sig,str(u["_id"]))
+        except:
+            time.sleep(0.5)
         time.sleep(0.5)
-        check(uid)
 
 # ---------------- RESUME ----------------
-
 def resume():
     for u in users.find({"status":"running"}):
         Thread(target=bot,args=(str(u["_id"]),),daemon=True).start()
 
 # ---------------- WEB ----------------
-
 HTML="""
 <html>
 <body style='background:#0b0f14;color:white;font-family:sans-serif'>
-<h2>KHOURY BOT</h2>
+<h2>KHOURY BOT V20</h2>
 Email<br>
 <input id=email>
 <button onclick=login()>LOGIN</button>
@@ -263,7 +242,6 @@ setInterval(async()=>{
 """
 
 # ---------------- ROUTES ----------------
-
 @app.route("/")
 def home():
     return render_template_string(HTML)
