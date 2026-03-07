@@ -49,13 +49,13 @@ def bot_loop(uid):
                     ws.send(json.dumps({"authorize": u['token']}))
                     ws.send(json.dumps({"buy": 1, "price": u['current_stake'], "parameters": {
                         "amount": u['current_stake'], "basis": "stake", "contract_type": signal, 
-                        "currency": curr, "duration": 1, "duration_unit": "m", "symbol": u['symbol']
+                        "currency": curr, "duration": 54, "duration_unit": "s", "symbol": u['symbol']
                     }}))
                     trade = json.loads(ws.recv()); ws.close()
                     
                     if "buy" in trade:
                         add_log(uid, f"Entered {signal} @ {u['current_stake']}$")
-                        time.sleep(56) # انتظار نتيجة الصفقة
+                        time.sleep(58) # انتظار نتيجة الصفقة
                         # ملاحظة: يمكنك إضافة دالة التحقق من النتيجة هنا لتحديث الميزانية
                 time.sleep(2)
             time.sleep(0.5)
