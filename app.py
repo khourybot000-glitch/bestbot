@@ -12,7 +12,7 @@ app = Flask(__name__)
 # --- MongoDB ---
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 client = MongoClient(MONGO_URI)
-db = client['KHOURY_V11']
+db = client['KHOURY_V12']
 users_col = db['users']
 
 DERIV_WS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
@@ -22,16 +22,17 @@ def add_log(uid,msg):
     now=datetime.now().strftime("%H:%M:%S")
     users_col.update_one({"_id":ObjectId(uid)},{"$push":{"logs":{"$each":[f"[{now}] {msg}"],"$slice":-30}}})
 
-# --- Strategy ---
+# --- Strategy with flipped signals ---
 def compute_logic(ticks):
     if len(ticks)<240:
         return "NONE"
     start=ticks[0]
     end=ticks[-1]
+    # ⚡ flipped signals
     if end>start:
-        return "PUT"
-    elif end<start:
         return "CALL"
+    elif end<start:
+        return "PUT"
     return "NONE"
 
 # --- Check Trade Result ---
@@ -53,7 +54,10 @@ def check_status(uid):
 
     contract=res.get("proposal_open_contract")
     if contract and contract.get("is_sold"):
-        profit=float(contract.get("profit",0))
+        try:
+            profit=float(contract.get("profit",0))
+        except:
+            profit=0
         total=user.get("total_profit",0)+profit
 
         if profit>0:
@@ -202,13 +206,11 @@ async function login(){
     let d=await r.json()
 
     if(d.found && d.status=="running"){
-        // جلسة شغالة ➜ الإحصائيات
         document.getElementById("loginDiv").style.display="none"
         document.getElementById("settingsDiv").style.display="none"
         document.getElementById("statsDiv").style.display="block"
         running=true
     }else{
-        // جلسة جديدة ➜ الإعدادات
         document.getElementById("loginDiv").style.display="none"
         document.getElementById("settingsDiv").style.display="block"
         running=false
@@ -237,7 +239,6 @@ async function toggle(){
 }
 
 async function toggleStats(){
-    // Stop من شاشة الإحصائيات
     await fetch("/stop",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:currentEmail})})
     running=false
     document.getElementById("statsDiv").style.display="none"
