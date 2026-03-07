@@ -11,7 +11,7 @@ app = Flask(__name__)
 
 MONGO_URI="mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 client=MongoClient(MONGO_URI)
-db=client["KHOURY_V20"]
+db=client["KHOURY_V23"]
 users=db["users"]
 
 DERIV="wss://blue.derivws.com/websockets/v3?app_id=16929"
@@ -39,20 +39,23 @@ def strategy(ticks):
     return "NONE"
 
 # ---------------- OPEN TRADE ----------------
-def open_trade(u,sig,uid):
+def open_trade(u,sig,uid,stake_override=None):
     try:
         ws=websocket.create_connection(DERIV)
         ws.send(json.dumps({"authorize":u["token"]}))
         auth=json.loads(ws.recv())
         cur=auth["authorize"]["currency"]
-        barrier=0.5 if sig=="PUT" else -0.5
+        # عكس الإشارة
+        sig_opp="PUT" if sig=="CALL" else "CALL"
+        barrier=0.5 if sig_opp=="PUT" else -0.5
+        stake_amount=round(stake_override if stake_override else u["stake"],2)
         ws.send(json.dumps({
             "buy":1,
-            "price":round(u["stake"],2),
+            "price":stake_amount,
             "parameters":{
-                "amount":round(u["stake"],2),
+                "amount":stake_amount,
                 "basis":"stake",
-                "contract_type":sig,
+                "contract_type":sig_opp,
                 "currency":cur,
                 "duration":5,
                 "duration_unit":"t",
@@ -64,10 +67,10 @@ def open_trade(u,sig,uid):
         ws.close()
         if "buy" in trade:
             cid=trade["buy"]["contract_id"]
-            log(uid,f"ENTER {sig} {u['stake']}$")
+            log(uid,f"ENTER {sig_opp} {stake_amount}$")
             users.update_one(
                 {"_id":ObjectId(uid)},
-                {"$set":{"contract":cid}}
+                {"$set":{"contract":cid,"last_signal":sig}}
             )
     except:
         pass
@@ -107,19 +110,16 @@ def check(uid):
                     }}
                 )
             else:
-                # المضاعفة فوراً بعد الخسارة
                 loss_seq=u["loss_seq"]+1
                 stake=round(u["stake"]*10,2)
-                log(uid,f"LOSS next {stake}$")
+                log(uid,f"LOSS next {stake}$ (auto-martingale)")
                 users.update_one(
                     {"_id":ObjectId(uid)},
-                    {"$set":{
-                        "contract":None,
-                        "stake":stake,
-                        "loss_seq":loss_seq
-                    },
+                    {"$set":{"contract":None,"stake":stake,"loss_seq":loss_seq},
                      "$inc":{"losses":1,"profit":profit}}
                 )
+                # فتح المضاعفة فورًا
+                open_trade(u,u["last_signal"],uid,stake_override=stake)
                 if loss_seq>=2:
                     users.update_one(
                         {"_id":ObjectId(uid)},
@@ -140,12 +140,12 @@ def bot(uid):
         u=users.find_one({"_id":ObjectId(uid)})
         if not u or u["status"]!="running":
             break
-        # تحقق دائم للصفقة المفتوحة
+        # متابعة الصفقة المفتوحة
         if u.get("contract"):
-            check(uid)  # هذا يشمل فتح المضاعفة فوراً بعد الخسارة
+            check(uid)
             time.sleep(0.5)
             continue
-        # فتح صفقة جديدة إذا لا توجد صفقة حالية
+        # فتح صفقة جديدة فور ظهور إشارة مناسبة
         try:
             ws=websocket.create_connection(DERIV)
             ws.send(json.dumps({
@@ -161,7 +161,8 @@ def bot(uid):
                 continue
             sig=strategy(r["history"]["prices"])
             if sig!="NONE":
-                open_trade(u,sig,str(u["_id"]))
+                users.update_one({"_id":ObjectId(uid)},{"$set":{"last_signal":sig}})
+                open_trade(u,sig,uid)
         except:
             time.sleep(0.5)
         time.sleep(0.5)
@@ -175,7 +176,7 @@ def resume():
 HTML="""
 <html>
 <body style='background:#0b0f14;color:white;font-family:sans-serif'>
-<h2>KHOURY BOT V20</h2>
+<h2>KHOURY BOT V23</h2>
 Email<br>
 <input id=email>
 <button onclick=login()>LOGIN</button>
@@ -269,6 +270,7 @@ def start():
         "losses":0,
         "loss_seq":0,
         "contract":None,
+        "last_signal":None,
         "logs":[],
         "status":"running",
         "reason":""
