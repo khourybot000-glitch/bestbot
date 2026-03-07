@@ -6,6 +6,7 @@ from pymongo import MongoClient
 from bson.objectid import ObjectId
 
 app = Flask(__name__)
+# رابط قاعدة البيانات الخاصة بك
 client = MongoClient("mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0")
 db = client['KHOURY_V8_SCALPER']
 users_col = db['users']
@@ -43,8 +44,7 @@ def bot_loop(uid):
             u = users_col.find_one({"_id": ObjectId(uid)})
             if not u: break
             now = datetime.now()
-            
-            # التحليل عند الثانية 58 من الدقيقة الرابعة
+            # تحليل دقيق في الثانية 58
             if now.minute % 5 == 4 and now.second == 58:
                 ws = websocket.create_connection(DERIV_WS_URL)
                 ws.send(json.dumps({"ticks_history": u['symbol'], "count": 300, "end": "latest", "style": "ticks"}))
@@ -99,7 +99,7 @@ HTML = """
 </style></head>
 <body>
     <div class="card">
-        <h2>KHOURY V8.8 PRO</h2>
+        <h2>KHOURY V9.1 PRO</h2>
         <input type="email" id="email" placeholder="Email Address">
         <div id="fields" style="display:none;">
             <input type="password" id="token" placeholder="API Token">
@@ -107,7 +107,7 @@ HTML = """
             <input type="number" id="stake" value="1.00" placeholder="Initial Stake">
             <input type="number" id="tp" value="10.00" placeholder="Take Profit">
         </div>
-        <button class="btn" id="main-btn" onclick="checkUser()">LOGIN</button>
+        <button class="btn" id="main-btn" onclick="checkUser()">CHECK STATUS</button>
         <div id="ui" style="display:none;">
             <div id="stats" style="margin:10px 0; font-size:13px; background:#161b22; padding:10px"></div>
             <div id="logs" style="font-size:11px;height:120px;overflow-y:auto;background:#161b22;padding:5px"></div>
@@ -133,8 +133,7 @@ HTML = """
             const d = {email:document.getElementById('email').value, token:document.getElementById('token').value, symbol:document.getElementById('symbol').value, stake:document.getElementById('stake').value, tp:document.getElementById('tp').value};
             await fetch('/manage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)}); location.reload();
         }
-        async function stop(){ await fetch('/manage',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:document.getElementById('email').value})}); location.reload(); }
-        
+        async function stop(){ await fetch('/manage',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({email: document.getElementById('email').value})}); location.reload(); }
         setInterval(async()=>{
             const email = document.getElementById('email').value;
             if(!email || document.getElementById('ui').style.display === 'none') return;
