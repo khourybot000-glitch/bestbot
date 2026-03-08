@@ -24,7 +24,6 @@ def log(uid,msg):
 
 # --- Strategy ---
 def strategy(ticks):
-def strategy(ticks):
 
     if len(ticks) < 30:
         return "NONE", 0
