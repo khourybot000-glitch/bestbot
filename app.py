@@ -33,11 +33,11 @@ def strategy(ticks):
 
     # صعود
     if diff > 0:
-        return "CALL",0.5
+        return "CALL",-0.5
 
     # هبوط
     if diff < 0:
-        return "PUT",-0.5
+        return "PUT",0.5
 
     return "NONE",0
 
