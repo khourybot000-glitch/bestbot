@@ -37,7 +37,7 @@ def strategy(ticks):
 
     # السوق هابط
     if close_price < open_price:
-        return "PUT", 0.5
+        return "PUT", +0.5
 
     return "NONE", 0
 
