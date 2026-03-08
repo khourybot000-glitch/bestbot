@@ -24,21 +24,23 @@ def log(uid,msg):
 
 # --- Strategy ---
 def strategy(ticks):
+def strategy(ticks):
 
     if len(ticks) < 30:
-        return "NONE",0
+        return "NONE", 0
 
-    diff = ticks[-1] - ticks[0]
+    open_price = ticks[0]
+    close_price = ticks[-1]
 
-    # صعود
-    if diff > 0:
-        return "CALL",-0.5
+    # السوق صاعد
+    if close_price > open_price:
+        return "CALL", -0.5
 
-    # هبوط
-    if diff < 0:
-        return "PUT",0.5
+    # السوق هابط
+    if close_price < open_price:
+        return "PUT", 0.5
 
-    return "NONE",0
+    return "NONE", 0
 
 # --- Check Result ---
 def check(uid):
@@ -63,7 +65,7 @@ def check(uid):
         else:
             # فورية مضاعفة بعد خسارة
             loss_seq=u["loss_seq"]+1
-            new_stake=round(u["stake"]*10,2)
+            new_stake=round(u["stake"]*14,2)
             log(uid,f"LOSS next stake {new_stake}$")
             users.update_one({"_id":ObjectId(uid)},{"$set":{"contract":None,"stake":new_stake,"loss_seq":loss_seq},"$inc":{"losses":1,"profit":profit}})
             if loss_seq>=2:
