@@ -1,4 +1,3 @@
-
 import json
 import websocket
 import time
@@ -85,7 +84,7 @@ def bot(uid):
         if sec==30: # تحليل عند الثانية 30
             try:
                 ws=websocket.create_connection(DERIV_WS)
-                ws.send(json.dumps({"ticks_history":u["symbol"],"count":60,"end":"latest","style":"ticks"}))
+                ws.send(json.dumps({"ticks_history":u["symbol"],"count":30,"end":"latest","style":"ticks"}))
                 r=json.loads(ws.recv())
                 ws.close()
                 if "history" not in r:
