@@ -25,24 +25,19 @@ def log(uid,msg):
 
 # --- Strategy ---
 def strategy(ticks):
-    if len(ticks)<60:
-        return "NONE"
 
-    first30 = ticks[:30]
-    second30 = ticks[30:60]
+    if len(ticks) < 30:
+        return "NONE",0
 
-    first_diff = first30[-1]-first30[0]
-    second_diff = second30[-1]-second30[0]
+    diff = ticks[-1] - ticks[0]
 
-    if abs(first_diff)<0.3 or abs(second_diff)<0.3:
-        return "NONE"
+    # صعود
+    if diff > 0:
+        return "CALL",0.5
 
-    # First rising, second falling -> PUT
-    if second_diff<0:
-        return "PUT",0.5
-    # First falling, second rising -> CALL
-    if second_diff>0:
-        return "CALL",-0.5
+    # هبوط
+    if diff < 0:
+        return "PUT",-0.5
 
     return "NONE",0
 
