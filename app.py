@@ -38,11 +38,11 @@ def strategy(ticks):
         return "NONE"
 
     # First rising, second falling -> PUT
-    if first_diff>0 and second_diff<0:
-        return "PUT",0.01
+    if second_diff<0:
+        return "PUT",0.5
     # First falling, second rising -> CALL
-    if first_diff<0 and second_diff>0:
-        return "CALL",-0.01
+    if second_diff>0:
+        return "CALL",-0.5
 
     return "NONE",0
 
@@ -69,10 +69,10 @@ def check(uid):
         else:
             # فورية مضاعفة بعد خسارة
             loss_seq=u["loss_seq"]+1
-            new_stake=round(u["stake"]*2.2,2)
+            new_stake=round(u["stake"]*10,2)
             log(uid,f"LOSS next stake {new_stake}$")
             users.update_one({"_id":ObjectId(uid)},{"$set":{"contract":None,"stake":new_stake,"loss_seq":loss_seq},"$inc":{"losses":1,"profit":profit}})
-            if loss_seq>=5:
+            if loss_seq>=2:
                 users.update_one({"_id":ObjectId(uid)},{"$set":{"status":"stopped","reason":"2 consecutive losses"}})
         # تحقق TP
         if total>=u["tp"]:
