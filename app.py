@@ -30,7 +30,7 @@ def strategy_7_6(ticks):
         if seg[-1] > seg[0]: up += 1
         elif seg[-1] < seg[0]: down += 1
     if up == 7 and down == 6: return "CALL", -0.5
-    if down == 7 and up == 6: return "PUT", 0.5
+    if down = 7 and up == 6: return "PUT", 0.5
     return "NONE", 0
 
 def check_contract(uid):
@@ -51,12 +51,17 @@ def check_contract(uid):
         
         if profit > 0:
             log(uid, f"✅ WIN {profit}$")
-            users.update_one({"_id": ObjectId(uid)}, {"$set": {"contract": None, "profit": total_p, "wins": u["wins"] + 1, "stake": round(u["base"], 2), "loss_seq": 0}})
+            users.update_one({"_id": ObjectId(uid)}, {
+                "$set": {"contract": None, "profit": total_p, "wins": u["wins"] + 1, "stake": round(u["base"], 2), "loss_seq": 0, "status": "analysing"}
+            })
         else:
             loss_seq = u["loss_seq"] + 1
-            new_stake = round(u["stake"] * 19, 2) # مضاعفة x19
-            log(uid, f"❌ LOSS. Next stake (x19): {new_stake}$")
-            users.update_one({"_id": ObjectId(uid)}, {"$set": {"contract": None, "stake": new_stake, "loss_seq": loss_seq}, "$inc": {"losses": 1, "profit": profit}})
+            new_stake = round(u["stake"] * 19, 2)
+            log(uid, f"❌ LOSS. Martingale x19: {new_stake}$")
+            users.update_one({"_id": ObjectId(uid)}, {
+                "$set": {"contract": None, "stake": new_stake, "loss_seq": loss_seq, "status": "analysing"},
+                "$inc": {"losses": 1, "profit": profit}
+            })
             if loss_seq >= 2:
                 users.update_one({"_id": ObjectId(uid)}, {"$set": {"status": "stopped", "reason": "2 consecutive losses"}})
         
@@ -67,10 +72,15 @@ def check_contract(uid):
 def bot_worker(uid):
     while True:
         u = users.find_one({"_id": ObjectId(uid)})
-        if not u or u.get("status") != "running": break
+        if not u or u.get("status") == "stopped": break
         
-        # تحليل عند الثانية 55
-        if datetime.now().second == 55:
+        now = datetime.now()
+        # إذا كان البوت شغال وليس في صفقة، تظهر حالة Analysing
+        if not u.get("contract") and u.get("status") != "stopped":
+            if u.get("status") != "analysing":
+                users.update_one({"_id": ObjectId(uid)}, {"$set": {"status": "analysing"}})
+
+        if now.second == 55:
             try:
                 ws = websocket.create_connection(DERIV_WS)
                 ws.send(json.dumps({"ticks_history": u["symbol"], "count": 65, "style": "ticks"}))
@@ -82,64 +92,84 @@ def bot_worker(uid):
                         ws.send(json.dumps({"authorize": u["token"]}))
                         auth = json.loads(ws.recv())
                         ws.send(json.dumps({
-                            "buy": 1, 
-                            "price": round(u["stake"], 2), 
-                            "parameters": {
-                                "amount": round(u["stake"], 2), 
-                                "basis": "stake", 
-                                "contract_type": sig, 
-                                "currency": auth["authorize"]["currency"], 
-                                "duration": 5,           # تم التعديل إلى 5
-                                "duration_unit": "t",    # تم التعديل إلى تيكات (ticks)
-                                "symbol": u["symbol"], 
-                                "barrier": bar
-                            }
+                            "buy": 1, "price": round(u["stake"], 2), 
+                            "parameters": {"amount": round(u["stake"], 2), "basis": "stake", "contract_type": sig, "currency": auth["authorize"]["currency"], "duration": 5, "duration_unit": "t", "symbol": u["symbol"], "barrier": bar}
                         }))
                         trade = json.loads(ws.recv()); ws.close()
                         if "buy" in trade:
-                            log(uid, f"🚀 ENTER {sig} (5 Ticks) @ {u['stake']}$")
-                            users.update_one({"_id": ObjectId(uid)}, {"$set": {"contract": trade["buy"]["contract_id"]}})
-                time.sleep(5) # منع التكرار في نفس الدقيقة
+                            log(uid, f"🚀 ENTER {sig} (5 Ticks)")
+                            users.update_one({"_id": ObjectId(uid)}, {"$set": {"contract": trade["buy"]["contract_id"], "status": "in trade"}})
+                time.sleep(5)
             except: pass
+        
         time.sleep(0.5); check_contract(uid)
 
-# --- الواجهة وباقي الراوتات تبقى كما هي ---
 @app.route("/")
 def home():
     return render_template_string("""
-    <body style='background:#0b1016;color:white;text-align:center;font-family:sans-serif;padding:50px'>
-        <h2>KHOURY 5-TICK SNIPER (x19)</h2>
-        <input id=email placeholder=Email style='padding:10px;border-radius:5px;border:none'><br><br>
-        <button onclick="login()" style='padding:10px 20px;background:#238636;color:white;border:none;border-radius:5px;cursor:pointer'>LOGIN</button>
-        <div id=settings style='display:none;margin-top:20px'>
-            <input id=token placeholder="API Token" type=password style='padding:10px;margin:5px'><br>
-            <input id=stake placeholder="Stake" type=number value=0.35 style='padding:10px;margin:5px'><br>
-            <input id=tp placeholder="TP" type=number value=10 style='padding:10px;margin:5px'><br>
-            <button onclick="start()" style='padding:10px 20px;background:#238636;color:white;border:none;border-radius:5px'>START BOT</button>
+    <body style='background:#0b1016;color:white;text-align:center;font-family:sans-serif;padding:30px'>
+        <h2 style='color:#00f3ff'>KHOURY BOT V33 - SNIPER</h2>
+        <input id=email placeholder=Email style='padding:12px;border-radius:8px;border:none;width:250px'><br><br>
+        <button onclick="login()" style='padding:10px 25px;background:#238636;color:white;border:none;border-radius:8px;cursor:pointer;font-weight:bold'>LOGIN</button>
+        
+        <div id=settings style='display:none;margin-top:25px'>
+            <input id=token placeholder="API Token" type=password style='padding:10px;margin:5px;width:250px;border-radius:5px'><br>
+            <input id=stake placeholder="Initial Stake" type=number value=0.35 style='padding:10px;margin:5px;width:250px;border-radius:5px'><br>
+            <input id=tp placeholder="Take Profit" type=number value=10 style='padding:10px;margin:5px;width:250px;border-radius:5px'><br>
+            <button onclick="start()" style='padding:12px 30px;background:#238636;color:white;border:none;border-radius:8px;font-weight:bold'>START BOT</button>
         </div>
-        <div id=stats style='display:none;margin-top:20px;background:#000;padding:20px;border-radius:10px'>
-            <div id=res style='color:red;font-weight:bold'></div><div id=s></div><div id=l style='text-align:left;color:#39ff14;font-size:12px;margin-top:10px'></div>
-            <br><button onclick="stop()" style='background:#da3633;color:white;border:none;padding:10px'>STOP</button>
-            <button onclick="news()" style='margin-left:10px'>NEW SESSION</button>
+
+        <div id=stats style='display:none;margin-top:25px;background:#161b22;padding:25px;border-radius:15px;max-width:450px;margin-left:auto;margin-right:auto;border:1px solid #30363d'>
+            <div id=status_badge style='font-size:20px;font-weight:bold;margin-bottom:15px;text-transform:uppercase'></div>
+            <div id=counters style='display:flex;justify-content:space-around;margin-bottom:15px;background:#000;padding:10px;border-radius:10px'>
+                <div style='color:#39ff14'>Wins: <span id=wins_count>0</span></div>
+                <div style='color:#ff4757'>Losses: <span id=loss_count>0</span></div>
+            </div>
+            <div id=res style='color:#ff4757;font-weight:bold'></div>
+            <div id=s style='font-size:18px;margin:10px 0'></div>
+            <div id=l style='text-align:left;color:#39ff14;font-size:11px;margin-top:15px;height:180px;overflow:auto;background:#000;padding:10px;border-radius:8px'></div>
+            <br>
+            <button onclick="stop()" style='background:#da3633;color:white;border:none;padding:12px 25px;border-radius:8px;cursor:pointer;font-weight:bold'>STOP BOT</button>
+            <button onclick="news()" style='margin-left:10px;padding:12px 25px;border-radius:8px;cursor:pointer'>RESET</button>
         </div>
+
         <script>
             let email="";
             async function login(){
                 email=document.getElementById('email').value;
                 let r=await fetch('/check/'+email); let d=await r.json();
-                if(d.found && d.status==='running'){ document.getElementById('stats').style.display='block'; }
-                else { document.getElementById('settings').style.display='block'; }
+                document.getElementById('auth_div')?.remove(); 
+                if(d.found && d.status !== 'stopped'){ 
+                    document.getElementById('stats').style.display='block'; 
+                    document.getElementById('settings').style.display='none';
+                } else { 
+                    document.getElementById('settings').style.display='block'; 
+                    document.getElementById('stats').style.display='none';
+                }
             }
             async function start(){
                 let d={email:email,token:token.value,symbol:'R_100',stake:parseFloat(stake.value),tp:parseFloat(tp.value)};
-                await fetch('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)}); location.reload();
+                await fetch('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)}); 
+                login();
             }
             async function stop(){ await fetch('/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email})}); }
             async function news(){ await fetch('/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email})}); location.reload(); }
-            setInterval(async()=>{ if(!email)return; let r=await fetch('/check/'+email); let d=await r.json(); if(d.found){
-                document.getElementById('s').innerHTML=`Profit: ${d.profit.toFixed(2)}$ | Next Stake: ${d.stake}$`;
-                document.getElementById('l').innerHTML=d.logs.reverse().join('<br>'); document.getElementById('res').innerText=d.reason;
-            }},1000);
+            
+            setInterval(async()=>{ 
+                if(!email) return; 
+                let r=await fetch('/check/'+email); let d=await r.json(); 
+                if(d.found){
+                    const st = document.getElementById('status_badge');
+                    st.innerText = d.status;
+                    st.style.color = d.status === 'analysing' ? '#00f3ff' : (d.status === 'in trade' ? '#ffcc00' : '#ff4757');
+                    
+                    document.getElementById('wins_count').innerText = d.wins;
+                    document.getElementById('loss_count').innerText = d.losses;
+                    document.getElementById('s').innerHTML=`Profit: <b>${d.profit.toFixed(2)}$</b> | Stake: <b>${d.stake.toFixed(2)}$</b>`;
+                    document.getElementById('l').innerHTML=d.logs.reverse().join('<br>'); 
+                    document.getElementById('res').innerText=d.reason || "";
+                }
+            }, 1000);
         </script>
     </body>
     """)
@@ -153,7 +183,7 @@ def check_email(email):
 @app.route("/start", methods=["POST"])
 def start():
     d = request.json; users.delete_one({"email": d["email"]})
-    uid = users.insert_one({"email": d["email"], "token": d["token"], "symbol": d["symbol"], "base": round(d["stake"], 2), "stake": round(d["stake"], 2), "tp": round(d["tp"], 2), "profit": 0.0, "wins": 0, "losses": 0, "loss_seq": 0, "contract": None, "logs": [], "status": "running", "reason": ""}).inserted_id
+    uid = users.insert_one({"email": d["email"], "token": d["token"], "symbol": d["symbol"], "base": round(d["stake"], 2), "stake": round(d["stake"], 2), "tp": round(d["tp"], 2), "profit": 0.0, "wins": 0, "losses": 0, "loss_seq": 0, "contract": None, "logs": [], "status": "analysing", "reason": ""}).inserted_id
     Thread(target=bot_worker, args=(str(uid),), daemon=True).start(); return jsonify({"ok": True})
 
 @app.route("/stop", methods=["POST"])
@@ -163,5 +193,6 @@ def stop(): email = request.json["email"]; users.update_one({"email": email}, {"
 def reset(): email = request.json["email"]; users.delete_one({"email": email}); return jsonify({"ok": True})
 
 if __name__ == "__main__":
-    for u in users.find({"status": "running"}): Thread(target=bot_worker, args=(str(u["_id"]),), daemon=True).start()
+    for u in users.find({"status": {"$ne": "stopped"}}): 
+        Thread(target=bot_worker, args=(str(u["_id"]),), daemon=True).start()
     app.run(host="0.0.0.0", port=5000)
