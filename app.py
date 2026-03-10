@@ -110,7 +110,7 @@ def perform_ultra_analysis(ticks, asset_id):
 
     final_score = max(score_call, score_put)
     
-    if final_score >= 95:
+    if final_score >= 70:
         direction = "CALL 🟢" if score_call > score_put else "PUT 🔴"
         bot_config.update({
             "isSignal": True, 
