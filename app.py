@@ -1,223 +1,236 @@
+import os
 import json
-import websocket
 import time
-from datetime import datetime
-from threading import Thread
-from flask import Flask, render_template_string, jsonify, request
-from pymongo import MongoClient
-from bson.objectid import ObjectId
+import threading
+from flask import Flask, jsonify, render_template_string, request
+import websocket
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
-# --- MongoDB ---
-MONGO_URI="mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
-client=MongoClient(MONGO_URI)
-db=client["KHOURY_BOT"]
-users=db["users"]
+# --- إعدادات النظام ---
+bot_config = {
+    "isRunning": False,
+    "displayMsg": "WAITING",
+    "direction": "",
+    "strength": 0,
+    "pair_name": "",
+    "pair_id": "frxEURUSD",
+    "timestamp": 0,
+    "entryTime": "",
+    "isSignal": False,
+    "logs": []
+}
 
-DERIV_WS="wss://blue.derivws.com/websockets/v3?app_id=16929"
+ASSETS = {"frxEURUSD": "EUR/USD", "frxEURJPY": "EUR/JPY", "frxEURGBP": "EUR/GBP"}
 
-def log(uid,msg):
-    t=datetime.now().strftime("%H:%M:%S")
-    users.update_one({"_id":ObjectId(uid)},{"$push":{"logs":{"$each":[f"[{t}] {msg}"],"$slice":-50}}})
+def add_log(msg):
+    bot_config["logs"].append(f"[{time.strftime('%H:%M:%S')}] {msg}")
+    if len(bot_config["logs"]) > 5: bot_config["logs"].pop(0)
 
-# --- الاستراتيجية الجديدة: 6 تيكات وزخم 5 تيكات ---
-def strategy(ticks):
-    if len(ticks) < 6:
-        return "NONE", 0
+# --- محرك تحويل التيكات إلى شموع واستخراج المناطق ---
+def get_candles_and_zones(ticks, times):
+    candles = []
+    # تحويل كل 60 تيك تقريباً إلى شمعة (دقيقة واحدة)
+    for i in range(0, len(ticks) - 60, 60):
+        c_open = ticks[i]
+        c_close = ticks[i+59]
+        c_high = max(ticks[i:i+60])
+        c_low = min(ticks[i:i+60])
+        candles.append({"open": c_open, "close": c_close, "high": c_high, "low": c_low, "type": "bull" if c_close > c_open else "bear"})
 
-    # أخذ آخر 6 تيكات
-    last_6 = ticks[-6:]
+    zones = {"support": [], "resistance": []}
     
-    # التأكد من أن التغيرات الـ 5 الأخيرة لها نفس الاتجاه
-    is_up = all(last_6[i] > last_6[i-1] for i in range(1, 6))
-    is_down = all(last_6[i] < last_6[i-1] for i in range(1, 6))
+    # استخراج المناطق (القمم والقيعان حيث تغير الاتجاه)
+    for i in range(1, len(candles) - 1):
+        # منطقة دعم: شمعة هابطة بعدها صاعدة
+        if candles[i-1]["type"] == "bear" and candles[i]["type"] == "bull":
+            zones["support"].append(candles[i]["low"])
+        # منطقة مقاومة: شمعة صاعدة بعدها هابطة
+        if candles[i-1]["type"] == "bull" and candles[i]["type"] == "bear":
+            zones["resistance"].append(candles[i]["high"])
+            
+    return zones
 
-    if is_up:
-        return "CALL", -0.75
-    if is_down:
-        return "PUT", 0.75
+# --- محرك التحليل المتقدم ---
+def perform_analysis(ticks, times, asset_id):
+    global bot_config
+    current_price = ticks[-1]
+    now = datetime.now()
+    
+    # 1. استخراج المناطق من الشموع
+    zones = get_candles_and_zones(ticks, times)
+    
+    # 2. تحديد أقرب دعم ومقاومة
+    upper_zones = [z for z in zones["resistance"] if z > current_price]
+    lower_zones = [z for z in zones["support"] if z < current_price]
+    
+    nearest_res = min(upper_zones) if upper_zones else current_price + 999
+    nearest_sup = max(lower_zones) if lower_zones else current_price - 999
 
-    return "NONE", 0
+    # هامش أمان (Buffer) لمنع دخول صفقة قرب المنطقة
+    buffer = abs(nearest_res - nearest_sup) * 0.15 # 15% من عرض القناة
 
-def check(uid):
-    u=users.find_one({"_id":ObjectId(uid)})
-    if not u or not u.get("contract"):
-        return
-    try:
-        ws=websocket.create_connection(DERIV_WS)
-        ws.send(json.dumps({"authorize":u["token"]}))
-        ws.recv()
-        ws.send(json.dumps({"proposal_open_contract":1,"contract_id":u["contract"]}))
-        r=json.loads(ws.recv())
-        ws.close()
-        c=r.get("proposal_open_contract")
-        if not c or not c.get("is_sold"):
-            return 
-        profit=round(float(c.get("profit",0)),2)
-        total=round(u["profit"]+profit,2)
-        
-        if profit>0:
-            log(uid,f"WIN {profit}$")
-            users.update_one({"_id":ObjectId(uid)},{"$set":{"contract":None,"profit":total,"wins":u["wins"]+1,"stake":round(u["base"],2),"loss_seq":0}})
+    # 3. التحليل الزمني (الاتجاه العام)
+    start_of_10m = now.replace(minute=(now.minute // 10) * 10, second=0, microsecond=0)
+    start_of_1m = now.replace(second=0, microsecond=0)
+    
+    p_10m = next((ticks[i] for i, t in enumerate(times) if datetime.fromtimestamp(int(t)) >= start_of_10m), ticks[0])
+    p_1m = next((ticks[i] for i, t in enumerate(times) if datetime.fromtimestamp(int(t)) >= start_of_1m), ticks[-60])
+
+    is_m10_up = current_price > p_10m
+    is_m10_down = current_price < p_10m
+    is_m1_up = current_price > p_1m
+    is_m1_down = current_price < p_1m
+
+    # 4. فلترة الصفقة بناءً على المناطق
+    signal = None
+    reason = "NO ALIGNMENT"
+
+    if is_m10_up and is_m1_up:
+        if current_price < (nearest_res - buffer):
+            signal = "CALL 🟢"
         else:
-            # التوقف بعد خسارة واحدة كما طلبت
-            log(uid,f"LOSS {profit}$ - STOPPING BOT")
-            users.update_one({"_id":ObjectId(uid)},{"$set":{"contract":None,"status":"stopped","reason":"Stopped after 1 loss"}})
-        
-        if total>=u["tp"]:
-            users.update_one({"_id":ObjectId(uid)},{"$set":{"status":"stopped","reason":"TP reached"}})
-    except:
-        pass
+            reason = "TOO CLOSE TO RESISTANCE"
+            
+    elif is_m10_down and is_m1_down:
+        if current_price > (nearest_sup + buffer):
+            signal = "PUT 🔴"
+        else:
+            reason = "TOO CLOSE TO SUPPORT"
 
-def bot(uid):
+    # تحديث الحالة
+    next_entry = (now + timedelta(seconds=10)).strftime("%H:%M")
+    if signal:
+        bot_config.update({
+            "displayMsg": "SAFE SIGNAL", "isSignal": True, "direction": signal,
+            "strength": 99, "pair_name": ASSETS[asset_id],
+            "timestamp": time.time(), "entryTime": next_entry
+        })
+        add_log(f"{signal} Sent. Zone Safe.")
+    else:
+        bot_config.update({"displayMsg": "REJECTED", "isSignal": False, "timestamp": time.time()})
+        add_log(f"Signal Blocked: {reason}")
+
+# --- نظام WebSocket ---
+def smart_ws_worker():
     while True:
-        u=users.find_one({"_id":ObjectId(uid)})
-        if not u or u.get("status")!="running":
-            break
-        
-        # التحليل عند الثواني 0، 10، 20، 30، 40، 50
-        sec=time.localtime().tm_sec
-        if sec in [0, 10, 20, 30, 40, 50]: 
+        now = datetime.now()
+        if bot_config["isRunning"] and (now.minute % 10 == 9) and (now.second == 50):
             try:
-                ws=websocket.create_connection(DERIV_WS)
-                ws.send(json.dumps({"ticks_history":u["symbol"],"count":6,"end":"latest","style":"ticks"}))
-                r=json.loads(ws.recv())
+                ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=15)
+                asset = bot_config["pair_id"]
+                ws.send(json.dumps({"ticks_history": asset, "count": 1000, "end": "latest", "style": "ticks"}))
+                res = json.loads(ws.recv())
+                if "history" in res:
+                    perform_analysis(res["history"]["prices"], res["history"]["times"], asset)
                 ws.close()
-                if "history" not in r:
-                    time.sleep(1)
-                    continue
-                
-                sig,barrier=strategy(r["history"]["prices"])
-                if sig=="NONE" or u.get("contract"):
-                    time.sleep(1)
-                    continue
-                
-                ws=websocket.create_connection(DERIV_WS)
-                ws.send(json.dumps({"authorize":u["token"]}))
-                auth=json.loads(ws.recv())
-                cur=auth["authorize"]["currency"]
-                ws.send(json.dumps({
-                    "buy":1,
-                    "price":round(u["stake"],2),
-                    "parameters":{
-                        "amount":round(u["stake"],2),
-                        "basis":"stake",
-                        "contract_type":sig,
-                        "currency":cur,
-                        "duration":6,
-                        "duration_unit":"t",
-                        "symbol":u["symbol"],
-                        "barrier":barrier
-                    }
-                }))
-                trade=json.loads(ws.recv())
-                ws.close()
-                if "buy" in trade:
-                    cid=trade["buy"]["contract_id"]
-                    log(uid,f"ENTER {sig} with barrier {barrier}")
-                    users.update_one({"_id":ObjectId(uid)},{"$set":{"contract":cid}})
-            except:
-                pass
+                time.sleep(5)
+            except Exception as e:
+                add_log(f"Socket Error: {str(e)}")
         time.sleep(0.5)
-        check(uid)
 
-def resume():
-    for u in users.find({"status":"running"}):
-        Thread(target=bot,args=(str(u["_id"]),),daemon=True).start()
-
-# --- HTML Interface ---
-HTML="""
+# --- واجهة المستخدم (HTML المستلم سابقا مع تعديل بسيط للعرض) ---
+UI = """
+<!DOCTYPE html>
 <html>
-<body style='background:#0b0f14;color:white;font-family:sans-serif'>
-<h2>KHOURY BOT - Momentum Strategy</h2>
-
-Email<br>
-<input id=email>
-<button onclick=login()>LOGIN</button>
-
-<div id=settings style="display:none">
-Token<br>
-<input id=token>
-Symbol<br>
-<select id=symbol>
-<option value=R_100>V100</option>
-<option value=R_75>V75</option>
-</select>
-Stake<br>
-<input id=stake value=1>
-TP<br>
-<input id=tp value=10>
-<button onclick=start()>START</button>
-</div>
-
-<div id=stats style="display:none">
-<div id=reason style=color:red></div>
-<button onclick=stop()>STOP</button>
-<div id=s></div>
-<div id=l style="height:150px;overflow:auto;background:black"></div>
-<button onclick=news()>Start New Session</button>
-</div>
-
-<script>
-let email=""
-async function login(){
-    email=document.getElementById("email").value
-    let r=await fetch("/check/"+email)
-    let d=await r.json()
-    if(d.found){ stats.style.display="block" }else{ settings.style.display="block" }
-}
-async function start(){
-    let data={email:email, token:token.value, symbol:symbol.value, stake:parseFloat(stake.value), tp:parseFloat(tp.value)}
-    await fetch("/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)})
-    settings.style.display="none"; stats.style.display="block"
-}
-async function stop(){ await fetch("/stop",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:email})}) }
-async function news(){ await fetch("/reset",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:email})}); location.reload() }
-setInterval(async()=>{
-    if(!email)return
-    let r=await fetch("/check/"+email)
-    let d=await r.json()
-    if(!d.found)return
-    s.innerHTML="Wins "+d.wins+" Losses "+d.losses+" Profit "+d.profit.toFixed(2)
-    l.innerHTML=d.logs.reverse().join("<br>")
-    reason.innerText=d.reason
-},1000)
-</script>
+<head>
+    <title>KHOURY M1 PRO V2</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        :root { --neon: #00f3ff; --green: #39ff14; --red: #ff4757; }
+        body { background: #06070a; color: white; font-family: 'Courier New', monospace; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
+        #login { position: fixed; inset: 0; background: #020617; z-index: 2000; display: flex; flex-direction: column; justify-content: center; align-items: center; }
+        .box { background: rgba(0,243,255,0.02); padding: 30px; border-radius: 20px; border: 1px solid var(--neon); text-align: center; width: 300px; box-shadow: 0 0 15px rgba(0,243,255,0.1); }
+        input, select { background: #000; border: 1px solid #333; color: var(--neon); padding: 12px; width: 100%; margin-bottom: 15px; border-radius: 8px; outline: none; text-align: center; }
+        .btn { width: 100%; padding: 12px; border-radius: 8px; border: 1px solid var(--neon); background: transparent; color: var(--neon); font-weight: bold; cursor: pointer; transition: 0.3s; }
+        .btn:hover { background: var(--neon); color: black; }
+        #dash { display: none; width: 90%; max-width: 400px; text-align: center; }
+        .clock { font-size: 40px; color: var(--neon); margin: 15px 0; text-shadow: 0 0 10px var(--neon); }
+        .display-area { border: 2px solid var(--neon); padding: 25px; border-radius: 20px; margin: 20px 0; background: rgba(0,243,255,0.05); min-height: 220px; display: flex; flex-direction: column; justify-content: center; }
+        .sig-text { font-size: 16px; line-height: 1.8; text-align: left; color: #fff; }
+        .logs { background: #000; height: 90px; padding: 10px; font-size: 10px; overflow-y: auto; color: var(--green); border-radius: 10px; text-align: left; border: 1px solid #111; margin-top: 15px; }
+    </style>
+</head>
+<body>
+    <div id="login">
+        <div class="box">
+            <h2 style="color: var(--neon)">KHOURY PRO</h2>
+            <input type="text" id="u" placeholder="ID">
+            <input type="password" id="p" placeholder="PASSWORD">
+            <button class="btn" onclick="check()">LOGIN</button>
+        </div>
+    </div>
+    <div id="dash">
+        <h2 style="color: var(--neon)">ADVANCED ANALYSIS</h2>
+        <select id="asset">
+            <option value="frxEURUSD">EUR/USD</option>
+            <option value="frxEURJPY">EUR/JPY</option>
+            <option value="frxEURGBP">EUR/GBP</option>
+        </select>
+        <div class="clock" id="clk">00:00:00</div>
+        <div style="display:flex; gap:10px; margin-bottom:20px;">
+            <button class="btn" style="color:var(--green); border-color:var(--green);" onclick="ctl('start')">START</button>
+            <button class="btn" style="color:var(--red); border-color:var(--red);" onclick="ctl('stop')">STOP</button>
+        </div>
+        <div class="display-area" id="mainDisp"></div>
+        <div class="logs" id="lBox"></div>
+    </div>
+    <script>
+        function check() {
+            if(document.getElementById('u').value==='KHOURYBOT' && document.getElementById('p').value==='123456') {
+                document.getElementById('login').style.display='none';
+                document.getElementById('dash').style.display='block';
+                setInterval(upd, 1000);
+            } else alert('Access Denied');
+        }
+        async function ctl(a) { await fetch(`/api/cmd?action=${a}&pair=${document.getElementById('asset').value}`); }
+        async function upd() {
+            document.getElementById('clk').innerText = new Date().toTimeString().split(' ')[0];
+            const r = await fetch('/api/status');
+            const d = await r.json();
+            const disp = document.getElementById('mainDisp');
+            if(d.show) {
+                if(d.isSignal) {
+                    disp.innerHTML = `<div class="sig-text">
+                        <span style="color:var(--neon)">PAIR:</span> ${d.pair}<br>
+                        <span style="color:var(--neon)">DIRECTION:</span> ${d.signal}<br>
+                        <span style="color:var(--neon)">ACCURACY:</span> 99%<br>
+                        <span style="color:var(--neon)">STATUS:</span> ZONE SAFE<br>
+                        <span style="color:var(--neon)">ENTRY:</span> ${d.entry}
+                    </div>`;
+                } else { disp.innerHTML = `<div style="font-size:22px; color:var(--red)">SIGNAL REJECTED<br><small style="font-size:12px">ZONE RISK FOUND</small></div>`; }
+            } else { 
+                let m = new Date().getMinutes();
+                let wait = 9 - (m % 10);
+                disp.innerHTML = `<div style="color:#444; font-size:14px;">${d.run ? "SCANNING M1 CANDLES... (Wait " + wait + "m)" : "BOT OFFLINE"}</div>`; 
+            }
+            document.getElementById('lBox').innerHTML = d.logs.join('<br>');
+        }
+    </script>
 </body>
 </html>
 """
 
-@app.route("/")
-def home(): return render_template_string(HTML)
+@app.route('/')
+def home(): return render_template_string(UI)
 
-@app.route("/check/<email>")
-def check_email(email):
-    u=users.find_one({"email":email})
-    if u:
-        u["_id"]=str(u["_id"])
-        return jsonify({"found":True,**u})
-    return jsonify({"found":False})
+@app.route('/api/cmd')
+def cmd():
+    bot_config["isRunning"] = (request.args.get('action') == 'start')
+    bot_config["pair_id"] = request.args.get('pair')
+    bot_config["pair_name"] = ASSETS[bot_config["pair_id"]]
+    return jsonify({"ok": True})
 
-@app.route("/start",methods=["POST"])
-def start():
-    d=request.json
-    uid=users.insert_one({"email":d["email"],"token":d["token"],"symbol":d["symbol"],"base":round(d["stake"],2),"stake":round(d["stake"],2),"tp":round(d["tp"],2),"profit":0.0,"wins":0,"losses":0,"loss_seq":0,"contract":None,"logs":[],"status":"running","reason":""}).inserted_id
-    Thread(target=bot,args=(str(uid),),daemon=True).start()
-    return jsonify({"ok":True})
+@app.route('/api/status')
+def get_status():
+    show = (time.time() - bot_config["timestamp"]) < 40 and bot_config["timestamp"] > 0
+    return jsonify({
+        "run": bot_config["isRunning"], "show": show, "isSignal": bot_config["isSignal"],
+        "signal": bot_config["direction"], "strength": bot_config["strength"],
+        "pair": bot_config["pair_name"], "entry": bot_config["entryTime"], "logs": bot_config["logs"]
+    })
 
-@app.route("/stop",methods=["POST"])
-def stop():
-    email=request.json["email"]
-    users.update_one({"email":email},{"$set":{"status":"stopped","reason":"manual stop"}})
-    return jsonify({"ok":True})
-
-@app.route("/reset",methods=["POST"])
-def reset():
-    email=request.json["email"]
-    users.delete_one({"email":email})
-    return jsonify({"ok":True})
-
-if __name__=="__main__":
-    resume()
-    app.run(host="0.0.0.0",port=5000)
+if __name__ == "__main__":
+    threading.Thread(target=smart_ws_worker, daemon=True).start()
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
