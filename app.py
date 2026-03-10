@@ -5,188 +5,146 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-# إعدادات البوت
 bot_config = {
-    "isRunning": False, 
-    "isSignal": False, 
-    "direction": "", 
-    "rsi_curr": 50.0,
-    "rsi_prev": 50.0,
-    "pair_id": "R_100", 
-    "pair_name": "Volatility 100",
-    "timestamp": 0, 
-    "logs": ["SYSTEM READY - V23"]
+    "isRunning": False, "isSignal": False, "direction": "", 
+    "rsi_val": 50.0, "ema_val": 0.0, "pair_id": "R_100", 
+    "pair_name": "Volatility 100", "timestamp": 0, "logs": ["V25 | EMA 200 + RSI 5-TICK"]
 }
 
-ASSETS = {
-    "R_100": "Volatility 100", 
-    "frxEURUSD": "EUR/USD", 
-    "frxEURJPY": "EUR/JPY"
-}
+ASSETS = {"R_100": "Volatility 100", "frxEURUSD": "EUR/USD"}
 
 def add_log(msg):
     bot_config["logs"].append(f"[{time.strftime('%H:%M:%S')}] {msg}")
     if len(bot_config["logs"]) > 5: bot_config["logs"].pop(0)
 
-# --- محرك حساب RSI لفترة 20 ---
-def calculate_rsi_series(prices, period=20):
-    if len(prices) < period + 1: return [50] * len(prices)
+# --- حساب RSI ---
+def get_rsi(prices, period=20):
+    if len(prices) < period + 1: return 50
     deltas = np.diff(prices)
-    up = deltas.copy()
-    down = deltas.copy()
-    up[up < 0] = 0
-    down[down > 0] = 0
-    
-    # المتوسط الأول (Simple Moving Average)
-    avg_gain = np.mean(up[:period])
-    avg_loss = np.abs(np.mean(down[:period]))
-    
-    rsi = []
-    # التنعيم بطريقة ويلدر (Wilder's Smoothing)
-    for i in range(period, len(deltas)):
-        if i == period:
-            current_gain, current_loss = avg_gain, avg_loss
-        else:
-            current_gain = (avg_gain * (period - 1) + up[i]) / period
-            current_loss = (avg_loss * (period - 1) + np.abs(down[i])) / period
-            avg_gain, avg_loss = current_gain, current_loss
-            
-        rs = current_gain / current_loss if current_loss != 0 else 100
-        rsi.append(100 - (100 / (1 + rs)))
-    return rsi
+    up = deltas.clip(min=0)
+    down = -deltas.clip(max=0)
+    ema_up = up[-period:].mean()
+    ema_down = down[-period:].mean()
+    if ema_down == 0: return 100
+    rs = ema_up / ema_down
+    return 100 - (100 / (1 + rs))
 
-# --- تحليل التقاطع (Crossover Logic) ---
-def analyze_rsi_logic(ticks, asset_id):
+# --- حساب EMA ---
+def get_ema(prices, period=200):
+    if len(prices) < period: return prices[-1]
+    multiplier = 2 / (period + 1)
+    ema = sum(prices[:period]) / period
+    for price in prices[period:]:
+        ema = (price - ema) * multiplier + ema
+    return ema
+
+def analyze_v25(ticks, asset_id):
     try:
-        # تحويل 1200 تيك إلى 20 شمعة (كل 60 تيك شمعة)
-        candles = []
-        for i in range(0, len(ticks), 60):
-            segment = ticks[i:i+60]
-            if len(segment) > 0:
-                candles.append(segment[-1]) # سعر الإغلاق للشمعة
+        # 1. تحويل التيكات لشموع (كل 5 تيكات شمعة واحدة)
+        candles = [ticks[i:i+5][-1] for i in range(0, len(ticks), 5)]
+        if len(candles) < 205: return
+
+        # الشمعة الأخيرة (5 تيك)
+        current_minute_ticks = ticks[-5:]
+        open_p = current_minute_ticks[0]
+        close_p = current_minute_ticks[-1]
+
+        # حساب EMA 200 على الشموع
+        ema_200 = get_ema(candles, 200)
         
-        if len(candles) < 21: return
+        # حساب RSI عند الافتتاح والاغلاق (للشمعة الـ 5 تيك الأخيرة)
+        rsi_open = get_rsi(candles[:-1] + [open_p], 20)
+        rsi_close = get_rsi(candles[:-1] + [close_p], 20)
 
-        # حساب قيم RSI للشموع
-        rsi_values = calculate_rsi_series(candles, 20)
-        rsi_p = rsi_values[-2] # RSI الشمعة 19
-        rsi_c = rsi_values[-1] # RSI الشمعة 20 (الحالية)
+        bot_config["rsi_val"] = round(rsi_close, 2)
+        bot_config["ema_val"] = round(ema_200, 4)
 
-        bot_config["rsi_curr"] = round(rsi_c, 2)
-        bot_config["rsi_prev"] = round(rsi_p, 2)
-
-        is_signal = False
+        is_sig = False
         direction = ""
 
-        # شرط الاختراق (Cross)
-        if rsi_p < 50 and rsi_c >= 50:
+        # شرط الصعود: فوق EMA + اختراق RSI 50 للأعلى
+        if close_p > ema_200 and rsi_open < 50 and rsi_close >= 50:
             direction = "CALL 🟢"
-            is_signal = True
-        elif rsi_p > 50 and rsi_c <= 50:
+            is_sig = True
+        # شرط الهبوط: تحت EMA + اختراق RSI 50 للأسفل
+        elif close_p < ema_200 and rsi_open > 50 and rsi_close <= 50:
             direction = "PUT 🔴"
-            is_signal = True
+            is_sig = True
 
-        if is_signal:
-            bot_config.update({
-                "direction": direction, "isSignal": True,
-                "timestamp": time.time(), "pair_name": ASSETS.get(asset_id, "Unknown")
-            })
-            add_log(f"ALERT: {direction} (Cross 50)")
+        if is_sig:
+            bot_config.update({"direction": direction, "isSignal": True, "timestamp": time.time()})
+            add_log(f"SIGNAL: {direction} (Trend Match)")
         else:
             bot_config["isSignal"] = False
-            add_log(f"Check: RSI {bot_config['rsi_curr']}")
+            trend = "UP" if close_p > ema_200 else "DOWN"
+            add_log(f"Trend: {trend} | RSI: {bot_config['rsi_val']}")
 
-    except Exception as e: add_log("Calc Error")
+    except Exception as e: add_log(f"Error")
 
-# --- الخادم الخلفي (Worker) ---
 def sniper_worker():
     while True:
         try:
-            now = datetime.now()
-            # جلب البيانات عند الثانية 50 من كل دقيقة
-            if bot_config["isRunning"] and now.second == 50:
+            # بما أن الشمعة 5 تيكات، سنقوم بالتحليل كل 5 ثواني تقريباً بدلاً من دقيقة
+            if bot_config["isRunning"]:
                 ws = websocket.create_connection("wss://ws.binaryws.com/websockets/v3?app_id=1089", timeout=10)
-                # طلب تيكات تكفي لـ 20 شمعة وأكثر للدقة
-                ws.send(json.dumps({"ticks_history": bot_config["pair_id"], "count": 1300, "style": "ticks"}))
+                # نحتاج 210 شمعة * 5 تيكات = 1050 تيك
+                ws.send(json.dumps({"ticks_history": bot_config["pair_id"], "count": 1100, "style": "ticks"}))
                 res = json.loads(ws.recv())
                 if "history" in res:
-                    analyze_rsi_logic(res["history"]["prices"], bot_config["pair_id"])
+                    analyze_v25(res["history"]["prices"], bot_config["pair_id"])
                 ws.close()
-                time.sleep(5) 
+                time.sleep(4) # فحص كل 4-5 ثواني لملاحقة شموع الـ 5 تيك
         except: time.sleep(1)
-        time.sleep(0.5)
+        time.sleep(1)
 
-# --- واجهة المستخدم (UI) ---
 UI = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>KHOURY RSI V23</title>
+    <title>KHOURY V25 SCALPER</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        body { background: #06080a; color: #00f3ff; font-family: 'Segoe UI', Tahoma, sans-serif; text-align: center; padding: 15px; }
-        .card { border: 2px solid #00f3ff; padding: 25px; border-radius: 25px; max-width: 400px; margin: auto; background: #0a0e14; box-shadow: 0 0 25px rgba(0,243,255,0.2); }
-        .rsi-display { display: flex; justify-content: space-around; margin: 15px 0; font-size: 14px; color: #aaa; }
-        .rsi-val { color: #fff; font-weight: bold; font-family: monospace; }
-        .signal-box { min-height: 150px; border-top: 1px solid #222; margin-top: 20px; display: flex; flex-direction: column; justify-content: center; }
-        .btn { padding: 15px; width: 46%; border: 1px solid #00f3ff; background: transparent; color: #00f3ff; border-radius: 12px; cursor: pointer; font-weight: bold; transition: 0.3s; }
-        .btn:active { transform: scale(0.95); background: #00f3ff; color: #000; }
-        .logs { background: #000; height: 100px; padding: 10px; font-size: 11px; overflow-y: auto; color: #39ff14; border-radius: 10px; text-align: left; margin-top: 20px; border: 1px solid #1a1a1a; }
-        select { width: 100%; padding: 12px; background: #000; color: #00f3ff; border: 1px solid #333; margin-bottom: 20px; border-radius: 10px; outline: none; }
+        body { background: #05070a; color: #00f3ff; font-family: monospace; text-align: center; padding: 15px; }
+        .card { border: 2px solid #00f3ff; padding: 20px; border-radius: 20px; max-width: 380px; margin: auto; background: #0a0e14; }
+        .data-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 15px 0; font-size: 12px; }
+        .val { color: #fff; font-weight: bold; }
+        .signal { font-size: 40px; color: #39ff14; font-weight: bold; margin: 15px 0; min-height: 60px; }
+        .btn { padding: 12px; width: 45%; border: 1px solid #00f3ff; background: transparent; color: #00f3ff; border-radius: 10px; cursor: pointer; }
+        .logs { background: #000; height: 100px; padding: 10px; font-size: 11px; overflow-y: auto; color: #39ff14; border-radius: 8px; text-align: left; border: 1px solid #1a1a1a; }
     </style>
 </head>
 <body>
     <div class="card">
-        <h2 style="margin-top:0;">RSI CROSS V23</h2>
-        <select id="asset">
+        <h3>SCALPER V25 (5-TICK)</h3>
+        <select id="asset" style="width:100%; padding:10px; background:#000; color:#00f3ff; margin-bottom:15px; border-radius:8px;">
             <option value="R_100">Volatility 100 Index</option>
-            <option value="frxEURUSD">EUR/USD (Forex)</option>
+            <option value="frxEURUSD">EUR/USD</option>
         </select>
-        <div id="clk" style="font-size: 38px; margin-bottom: 20px; font-family: monospace; font-weight: bold;">00:00:00</div>
         
-        <div style="display:flex; justify-content: space-between;">
-            <button class="btn" onclick="send('start')" style="border-color:#39ff14; color:#39ff14;">START BOT</button>
-            <button class="btn" onclick="send('stop')" style="border-color:#ff4757; color:#ff4757;">STOP BOT</button>
+        <div class="data-grid">
+            <div>EMA 200: <span class="val" id="ev">--</span></div>
+            <div>RSI (20): <span class="val" id="rv">--</span></div>
         </div>
 
-        <div class="rsi-display">
-            <div>Prev RSI: <span id="p_rsi" class="rsi-val">--</span></div>
-            <div>Curr RSI: <span id="c_rsi" class="rsi-val">--</span></div>
-        </div>
+        <button class="btn" onclick="send('start')" style="border-color:#39ff14;">START</button>
+        <button class="btn" onclick="send('stop')" style="border-color:#ff4757;">STOP</button>
 
-        <div class="signal-box" id="disp">READY</div>
+        <div class="signal" id="sig">...</div>
         <div class="logs" id="lBox"></div>
     </div>
-
     <script>
-        async function send(a) { 
-            const pair = document.getElementById('asset').value;
-            await fetch(`/api/cmd?action=${a}&pair=${pair}`); 
-        }
-
+        async function send(a) { await fetch(`/api/cmd?action=${a}&pair=${document.getElementById('asset').value}`); }
         setInterval(async () => {
-            document.getElementById('clk').innerText = new Date().toLocaleTimeString('en-GB');
-            try {
-                const r = await fetch('/api/status');
-                const d = await r.json();
-                
-                document.getElementById('p_rsi').innerText = d.p_rsi;
-                document.getElementById('c_rsi').innerText = d.c_rsi;
-                
-                const disp = document.getElementById('disp');
-                if(d.run) {
-                    if(d.show && d.isSig) {
-                        disp.innerHTML = `<h3 style="margin:0; color:#00f3ff;">${d.pair}</h3>
-                                         <b style="font-size:45px; color:#fff;">${d.sig}</b>
-                                         <div style="color:#39ff14; font-weight:bold; margin-top:5px;">50-LEVEL CROSSOVER!</div>`;
-                    } else {
-                        disp.innerHTML = "<div style='color:#555; font-size:18px;'>WAITING FOR CROSS...<br><small>Analyzing 20 Candles</small></div>";
-                    }
-                } else {
-                    disp.innerHTML = "<span style='color:#444'>SYSTEM OFFLINE</span>";
-                }
-                document.getElementById('lBox').innerHTML = d.logs.join('<br>');
-            } catch(e) {}
+            const r = await fetch('/api/status');
+            const d = await r.json();
+            document.getElementById('ev').innerText = d.ema;
+            document.getElementById('rv').innerText = d.rsi;
+            const s = document.getElementById('sig');
+            if(d.run) {
+                if(d.show && d.isSig) { s.innerHTML = d.sig_dir; }
+                else { s.innerHTML = "<span style='color:#333'>SCANNING</span>"; }
+            } else { s.innerHTML = "OFFLINE"; }
+            document.getElementById('lBox').innerHTML = d.logs.join('<br>');
         }, 1000);
     </script>
 </body>
@@ -204,12 +162,11 @@ def cmd():
 
 @app.route('/api/status')
 def get_status():
-    show = (time.time() - bot_config["timestamp"]) < 30 and bot_config["timestamp"] > 0
+    show = (time.time() - bot_config["timestamp"]) < 10 # الإشارة تختفي أسرع لأن الشموع سريعة
     return jsonify({
-        "run": bot_config["isRunning"], "show": show, 
-        "isSig": bot_config["isSignal"], "sig": bot_config["direction"],
-        "p_rsi": bot_config["rsi_prev"], "c_rsi": bot_config["rsi_curr"],
-        "pair": bot_config["pair_name"], "logs": bot_config["logs"]
+        "run": bot_config["isRunning"], "show": show, "isSig": bot_config["isSignal"],
+        "sig_dir": bot_config["direction"], "rsi": bot_config["rsi_val"], 
+        "ema": bot_config["ema_val"], "logs": bot_config["logs"]
     })
 
 if __name__ == "__main__":
