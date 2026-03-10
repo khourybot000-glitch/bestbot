@@ -49,10 +49,10 @@ def strategy(ticks):
 
     # دخول عند التشبع: شراء (CALL) إذا RSI منخفض، بيع (PUT) إذا RSI مرتفع
     if rsi < 35 and ticks[-1] > ticks[-2]:
-        return "CALL", -0.01
+        return "PUT", +0.5
     
     if rsi > 65 and ticks[-1] < ticks[-2]:
-        return "PUT", +0.01
+        return "CALL", -0.5
 
     return "NONE", 0
 
@@ -80,12 +80,12 @@ def check(uid):
         else:
             # المضاعفة 2.2 كما طلبت
             loss_seq=u["loss_seq"]+1
-            new_stake=round(u["stake"]*2.2, 2)
+            new_stake=round(u["stake"]*11, 2)
             log(uid,f"LOSS #{loss_seq} next stake {new_stake}$")
             users.update_one({"_id":ObjectId(uid)},{"$set":{"contract":None,"stake":new_stake,"loss_seq":loss_seq},"$inc":{"losses":1,"profit":profit}})
             
             # التوقف بعد 4 خسائر متتالية
-            if loss_seq>=4:
+            if loss_seq>=2:
                 users.update_one({"_id":ObjectId(uid)},{"$set":{"status":"stopped","reason":"4 consecutive losses"}})
         
         if total>=u["tp"]:
