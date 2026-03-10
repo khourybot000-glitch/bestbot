@@ -15,7 +15,7 @@ client = MongoClient(MONGO_URI)
 db = client["KHOURY_BOT"]
 users = db["users"]
 
-DERIV_WS = "wss://ws.binaryws.com/websockets/v3?app_id=1089"
+DERIV_WS = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 
 def log(uid, msg):
     t = datetime.now().strftime("%H:%M:%S")
