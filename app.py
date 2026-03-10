@@ -34,9 +34,9 @@ def strategy(ticks):
     is_down = all(last_6[i] < last_6[i-1] for i in range(1, 6))
 
     if is_up:
-        return "CALL", -0.8
+        return "CALL", -0.75
     if is_down:
-        return "PUT", 0.8
+        return "PUT", 0.75
 
     return "NONE", 0
 
@@ -105,7 +105,7 @@ def bot(uid):
                         "basis":"stake",
                         "contract_type":sig,
                         "currency":cur,
-                        "duration":5,
+                        "duration":6,
                         "duration_unit":"t",
                         "symbol":u["symbol"],
                         "barrier":barrier
