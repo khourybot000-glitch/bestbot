@@ -1,5 +1,4 @@
 import os, json, time, threading, websocket
-import numpy as np
 from flask import Flask, jsonify, render_template_string, request
 from datetime import datetime
 
@@ -7,127 +6,114 @@ app = Flask(__name__)
 
 bot_config = {
     "isRunning": False, "isSignal": False, "direction": "", 
-    "rsi_val": 50.0, "ema_val": 0.0, "pair_id": "R_100", 
-    "pair_name": "Volatility 100", "timestamp": 0, "logs": ["V25 | EMA 200 + RSI 5-TICK"]
+    "up_count": 0, "down_count": 0, "pair_id": "R_100", 
+    "pair_name": "Volatility 100", "timestamp": 0, "logs": ["V27 | PRECISE 7/6 SNIPER"]
 }
 
-ASSETS = {"R_100": "Volatility 100", "frxEURUSD": "EUR/USD"}
+ASSETS = {"R_100": "Volatility 100", "frxEURUSD": "EUR/USD", "frxEURJPY": "EUR/JPY"}
 
 def add_log(msg):
     bot_config["logs"].append(f"[{time.strftime('%H:%M:%S')}] {msg}")
     if len(bot_config["logs"]) > 5: bot_config["logs"].pop(0)
 
-# --- حساب RSI ---
-def get_rsi(prices, period=20):
-    if len(prices) < period + 1: return 50
-    deltas = np.diff(prices)
-    up = deltas.clip(min=0)
-    down = -deltas.clip(max=0)
-    ema_up = up[-period:].mean()
-    ema_down = down[-period:].mean()
-    if ema_down == 0: return 100
-    rs = ema_up / ema_down
-    return 100 - (100 / (1 + rs))
-
-# --- حساب EMA ---
-def get_ema(prices, period=200):
-    if len(prices) < period: return prices[-1]
-    multiplier = 2 / (period + 1)
-    ema = sum(prices[:period]) / period
-    for price in prices[period:]:
-        ema = (price - ema) * multiplier + ema
-    return ema
-
-def analyze_v25(ticks, asset_id):
+def analyze_v27_precise(ticks):
     try:
-        # 1. تحويل التيكات لشموع (كل 5 تيكات شمعة واحدة)
-        candles = [ticks[i:i+5][-1] for i in range(0, len(ticks), 5)]
-        if len(candles) < 205: return
-
-        # الشمعة الأخيرة (5 تيك)
-        current_minute_ticks = ticks[-5:]
-        open_p = current_minute_ticks[0]
-        close_p = current_minute_ticks[-1]
-
-        # حساب EMA 200 على الشموع
-        ema_200 = get_ema(candles, 200)
+        if len(ticks) < 65: return
+        # نأخذ آخر 65 تيك لضمان تحليل 13 شمعة كاملة
+        target_ticks = ticks[-65:]
         
-        # حساب RSI عند الافتتاح والاغلاق (للشمعة الـ 5 تيك الأخيرة)
-        rsi_open = get_rsi(candles[:-1] + [open_p], 20)
-        rsi_close = get_rsi(candles[:-1] + [close_p], 20)
-
-        bot_config["rsi_val"] = round(rsi_close, 2)
-        bot_config["ema_val"] = round(ema_200, 4)
-
+        up_candles = 0
+        down_candles = 0
+        
+        # تقسيم الـ 65 تيك إلى 13 شمعة
+        for i in range(0, 65, 5):
+            segment = target_ticks[i:i+5]
+            if len(segment) < 2: continue
+            
+            open_p = segment[0]
+            close_p = segment[-1]
+            
+            if close_p > open_p: up_candles += 1
+            elif close_p < open_p: down_candles += 1
+        
+        bot_config["up_count"] = up_candles
+        bot_config["down_count"] = down_candles
+        
         is_sig = False
         direction = ""
 
-        # شرط الصعود: فوق EMA + اختراق RSI 50 للأعلى
-        if close_p > ema_200 and rsi_open < 50 and rsi_close >= 50:
+        # المنطق الصارم: 7 مقابل 6 بالضبط
+        if up_candles == 7 and down_candles == 6:
             direction = "CALL 🟢"
             is_sig = True
-        # شرط الهبوط: تحت EMA + اختراق RSI 50 للأسفل
-        elif close_p < ema_200 and rsi_open > 50 and rsi_close <= 50:
+        elif down_candles == 7 and up_candles == 6:
             direction = "PUT 🔴"
             is_sig = True
 
         if is_sig:
             bot_config.update({"direction": direction, "isSignal": True, "timestamp": time.time()})
-            add_log(f"SIGNAL: {direction} (Trend Match)")
+            add_log(f"TARGET HIT: {direction} (7 vs 6)")
         else:
             bot_config["isSignal"] = False
-            trend = "UP" if close_p > ema_200 else "DOWN"
-            add_log(f"Trend: {trend} | RSI: {bot_config['rsi_val']}")
+            add_log(f"Scan: U:{up_candles} D:{down_candles} (No Match)")
 
-    except Exception as e: add_log(f"Error")
+    except Exception as e: add_log("Logic Error")
 
 def sniper_worker():
     while True:
         try:
-            # بما أن الشمعة 5 تيكات، سنقوم بالتحليل كل 5 ثواني تقريباً بدلاً من دقيقة
-            if bot_config["isRunning"]:
+            now = datetime.now()
+            if bot_config["isRunning"] and now.second == 55:
                 ws = websocket.create_connection("wss://ws.binaryws.com/websockets/v3?app_id=1089", timeout=10)
-                # نحتاج 210 شمعة * 5 تيكات = 1050 تيك
-                ws.send(json.dumps({"ticks_history": bot_config["pair_id"], "count": 1100, "style": "ticks"}))
+                ws.send(json.dumps({"ticks_history": bot_config["pair_id"], "count": 70, "style": "ticks"}))
                 res = json.loads(ws.recv())
                 if "history" in res:
-                    analyze_v25(res["history"]["prices"], bot_config["pair_id"])
+                    analyze_v27_precise(res["history"]["prices"])
                 ws.close()
-                time.sleep(4) # فحص كل 4-5 ثواني لملاحقة شموع الـ 5 تيك
+                time.sleep(10)
         except: time.sleep(1)
-        time.sleep(1)
+        time.sleep(0.5)
 
 UI = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>KHOURY V25 SCALPER</title>
+    <title>KHOURY V27 PRECISE</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        body { background: #05070a; color: #00f3ff; font-family: monospace; text-align: center; padding: 15px; }
-        .card { border: 2px solid #00f3ff; padding: 20px; border-radius: 20px; max-width: 380px; margin: auto; background: #0a0e14; }
-        .data-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 15px 0; font-size: 12px; }
-        .val { color: #fff; font-weight: bold; }
-        .signal { font-size: 40px; color: #39ff14; font-weight: bold; margin: 15px 0; min-height: 60px; }
-        .btn { padding: 12px; width: 45%; border: 1px solid #00f3ff; background: transparent; color: #00f3ff; border-radius: 10px; cursor: pointer; }
-        .logs { background: #000; height: 100px; padding: 10px; font-size: 11px; overflow-y: auto; color: #39ff14; border-radius: 8px; text-align: left; border: 1px solid #1a1a1a; }
+        body { background: #040508; color: #00f3ff; font-family: 'Segoe UI', sans-serif; text-align: center; padding: 15px; }
+        .card { border: 2px solid #00f3ff; padding: 25px; border-radius: 30px; max-width: 380px; margin: auto; background: #0a0e14; box-shadow: 0 0 30px #00f3ff22; }
+        .counter-grid { display: flex; justify-content: center; gap: 20px; margin: 20px 0; }
+        .num-box { background: #000; border: 1px solid #333; padding: 10px 20px; border-radius: 15px; }
+        .val { display: block; font-size: 28px; font-weight: bold; }
+        .signal { font-size: 48px; min-height: 70px; margin: 20px 0; font-weight: 900; letter-spacing: 2px; }
+        .btn { padding: 15px; width: 45%; border: 1px solid #00f3ff; background: transparent; color: #00f3ff; border-radius: 12px; cursor: pointer; font-weight: bold; }
+        .logs { background: #000; height: 100px; padding: 10px; font-size: 11px; overflow-y: auto; color: #39ff14; border-radius: 10px; text-align: left; border: 1px solid #1a1a1a; margin-top: 15px; }
     </style>
 </head>
 <body>
     <div class="card">
-        <h3>SCALPER V25 (5-TICK)</h3>
-        <select id="asset" style="width:100%; padding:10px; background:#000; color:#00f3ff; margin-bottom:15px; border-radius:8px;">
+        <h2 style="margin:0;">PRECISE SNIPER</h2>
+        <p style="font-size:11px; color:#555;">13 CANDLES (5-TICK EACH)</p>
+        
+        <select id="asset" style="width:100%; padding:12px; background:#000; color:#00f3ff; border-radius:10px; margin:15px 0;">
             <option value="R_100">Volatility 100 Index</option>
             <option value="frxEURUSD">EUR/USD</option>
         </select>
-        
-        <div class="data-grid">
-            <div>EMA 200: <span class="val" id="ev">--</span></div>
-            <div>RSI (20): <span class="val" id="rv">--</span></div>
+
+        <div class="counter-grid">
+            <div class="num-box" style="border-color:#39ff14;">
+                <span style="font-size:10px; color:#39ff14;">GREEN</span>
+                <span class="val" id="upC">0</span>
+            </div>
+            <div class="num-box" style="border-color:#ff4757;">
+                <span style="font-size:10px; color:#ff4757;">RED</span>
+                <span class="val" id="dnC">0</span>
+            </div>
         </div>
 
-        <button class="btn" onclick="send('start')" style="border-color:#39ff14;">START</button>
-        <button class="btn" onclick="send('stop')" style="border-color:#ff4757;">STOP</button>
+        <button class="btn" onclick="send('start')" style="color:#39ff14; border-color:#39ff14;">START</button>
+        <button class="btn" onclick="send('stop')" style="color:#ff4757; border-color:#ff4757;">STOP</button>
 
         <div class="signal" id="sig">...</div>
         <div class="logs" id="lBox"></div>
@@ -137,12 +123,12 @@ UI = """
         setInterval(async () => {
             const r = await fetch('/api/status');
             const d = await r.json();
-            document.getElementById('ev').innerText = d.ema;
-            document.getElementById('rv').innerText = d.rsi;
+            document.getElementById('upC').innerText = d.up;
+            document.getElementById('dnC').innerText = d.down;
             const s = document.getElementById('sig');
             if(d.run) {
-                if(d.show && d.isSig) { s.innerHTML = d.sig_dir; }
-                else { s.innerHTML = "<span style='color:#333'>SCANNING</span>"; }
+                if(d.show && d.isSig) { s.innerHTML = d.sig_dir; s.style.color = d.sig_dir.includes('🟢') ? '#39ff14' : '#ff4757'; }
+                else { s.innerHTML = "<span style='color:#222'>READY</span>"; }
             } else { s.innerHTML = "OFFLINE"; }
             document.getElementById('lBox').innerHTML = d.logs.join('<br>');
         }, 1000);
@@ -162,11 +148,11 @@ def cmd():
 
 @app.route('/api/status')
 def get_status():
-    show = (time.time() - bot_config["timestamp"]) < 10 # الإشارة تختفي أسرع لأن الشموع سريعة
+    show = (time.time() - bot_config["timestamp"]) < 30
     return jsonify({
         "run": bot_config["isRunning"], "show": show, "isSig": bot_config["isSignal"],
-        "sig_dir": bot_config["direction"], "rsi": bot_config["rsi_val"], 
-        "ema": bot_config["ema_val"], "logs": bot_config["logs"]
+        "sig_dir": bot_config["direction"], "up": bot_config["up_count"], 
+        "down": bot_config["down_count"], "logs": bot_config["logs"]
     })
 
 if __name__ == "__main__":
