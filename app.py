@@ -22,22 +22,37 @@ def log(uid,msg):
     t=datetime.now().strftime("%H:%M:%S")
     users.update_one({"_id":ObjectId(uid)},{"$push":{"logs":{"$each":[f"[{t}] {msg}"],"$slice":-50}}})
 
-# --- Strategy ---
+# --- Strategy (RSI + Momentum) ---
 def strategy(ticks):
-
-    if len(ticks) < 30:
+    if len(ticks) < 14:
         return "NONE", 0
 
-    open_price = ticks[0]
-    close_price = ticks[-1]
+    gains = []
+    losses = []
+    for i in range(1, len(ticks)):
+        diff = ticks[i] - ticks[i-1]
+        if diff >= 0:
+            gains.append(diff)
+            losses.append(0)
+        else:
+            gains.append(0)
+            losses.append(abs(diff))
 
-    # السوق صاعد
-    if close_price > open_price:
-        return "CALL", -0.5
+    avg_gain = sum(gains[-14:]) / 14
+    avg_loss = sum(losses[-14:]) / 14
+    
+    if avg_loss == 0: 
+        rsi = 100
+    else:
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
 
-    # السوق هابط
-    if close_price < open_price:
-        return "PUT", +0.5
+    # دخول عند التشبع: شراء (CALL) إذا RSI منخفض، بيع (PUT) إذا RSI مرتفع
+    if rsi < 35 and ticks[-1] > ticks[-2]:
+        return "CALL", -0.01
+    
+    if rsi > 65 and ticks[-1] < ticks[-2]:
+        return "PUT", +0.01
 
     return "NONE", 0
 
@@ -55,21 +70,24 @@ def check(uid):
         ws.close()
         c=r.get("proposal_open_contract")
         if not c or not c.get("is_sold"):
-            return # الصفقة لم تنتهي بعد
+            return 
         profit=round(float(c.get("profit",0)),2)
         total=round(u["profit"]+profit,2)
+        
         if profit>0:
             log(uid,f"WIN {profit}$")
             users.update_one({"_id":ObjectId(uid)},{"$set":{"contract":None,"profit":total,"wins":u["wins"]+1,"stake":round(u["base"],2),"loss_seq":0}})
         else:
-            # فورية مضاعفة بعد خسارة
+            # المضاعفة 2.2 كما طلبت
             loss_seq=u["loss_seq"]+1
-            new_stake=round(u["stake"]*14,2)
-            log(uid,f"LOSS next stake {new_stake}$")
+            new_stake=round(u["stake"]*2.2, 2)
+            log(uid,f"LOSS #{loss_seq} next stake {new_stake}$")
             users.update_one({"_id":ObjectId(uid)},{"$set":{"contract":None,"stake":new_stake,"loss_seq":loss_seq},"$inc":{"losses":1,"profit":profit}})
-            if loss_seq>=2:
-                users.update_one({"_id":ObjectId(uid)},{"$set":{"status":"stopped","reason":"2 consecutive losses"}})
-        # تحقق TP
+            
+            # التوقف بعد 4 خسائر متتالية
+            if loss_seq>=4:
+                users.update_one({"_id":ObjectId(uid)},{"$set":{"status":"stopped","reason":"4 consecutive losses"}})
+        
         if total>=u["tp"]:
             users.update_one({"_id":ObjectId(uid)},{"$set":{"status":"stopped","reason":"TP reached"}})
     except:
@@ -82,7 +100,8 @@ def bot(uid):
         if not u or u.get("status")!="running":
             break
         sec=time.localtime().tm_sec
-        if sec==30: # تحليل عند الثانية 30
+        # التحليل عند الثانية 30 تماماً كما في كودك الأصلي
+        if sec==30: 
             try:
                 ws=websocket.create_connection(DERIV_WS)
                 ws.send(json.dumps({"ticks_history":u["symbol"],"count":30,"end":"latest","style":"ticks"}))
@@ -95,7 +114,7 @@ def bot(uid):
                 if sig=="NONE" or u.get("contract"):
                     time.sleep(1)
                     continue
-                # الدخول
+                
                 ws=websocket.create_connection(DERIV_WS)
                 ws.send(json.dumps({"authorize":u["token"]}))
                 auth=json.loads(ws.recv())
@@ -130,7 +149,7 @@ def resume():
     for u in users.find({"status":"running"}):
         Thread(target=bot,args=(str(u["_id"]),),daemon=True).start()
 
-# --- Web Interface ---
+# --- Web Interface (التصميم الأصلي) ---
 HTML="""
 <html>
 <body style='background:#0b0f14;color:white;font-family:sans-serif'>
