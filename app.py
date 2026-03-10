@@ -85,7 +85,7 @@ def bot_worker(uid):
             if u.get("status") != "analysing":
                 users.update_one({"_id": ObjectId(uid)}, {"$set": {"status": "analysing"}})
 
-        if now.second == 55:
+        if time.localtime().tm_sec in [0, 10, 20, 30, 40, 50]:
             try:
                 ws = websocket.create_connection(DERIV_WS)
                 ws.send(json.dumps({"ticks_history": u["symbol"], "count": 65, "style": "ticks"}))
