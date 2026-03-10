@@ -101,7 +101,7 @@ def bot(uid):
             break
         sec=time.localtime().tm_sec
         # التحليل عند الثانية 30 تماماً كما في كودك الأصلي
-        if sec==30: 
+        if sec % 5 == 0: 
             try:
                 ws=websocket.create_connection(DERIV_WS)
                 ws.send(json.dumps({"ticks_history":u["symbol"],"count":30,"end":"latest","style":"ticks"}))
