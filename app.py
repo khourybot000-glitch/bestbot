@@ -1,160 +1,167 @@
-import os, json, time, threading, websocket
-from flask import Flask, jsonify, render_template_string, request
+import json
+import websocket
+import time
 from datetime import datetime
+from threading import Thread
+from flask import Flask, render_template_string, jsonify, request
+from pymongo import MongoClient
+from bson.objectid import ObjectId
 
 app = Flask(__name__)
 
-bot_config = {
-    "isRunning": False, "isSignal": False, "direction": "", 
-    "up_count": 0, "down_count": 0, "pair_id": "R_100", 
-    "pair_name": "Volatility 100", "timestamp": 0, "logs": ["V27 | PRECISE 7/6 SNIPER"]
-}
+# --- MongoDB Configuration ---
+MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
+client = MongoClient(MONGO_URI)
+db = client["KHOURY_BOT"]
+users = db["users"]
 
-ASSETS = {"R_100": "Volatility 100", "frxEURUSD": "EUR/USD", "frxEURJPY": "EUR/JPY"}
+DERIV_WS = "wss://ws.binaryws.com/websockets/v3?app_id=1089"
 
-def add_log(msg):
-    bot_config["logs"].append(f"[{time.strftime('%H:%M:%S')}] {msg}")
-    if len(bot_config["logs"]) > 5: bot_config["logs"].pop(0)
+def log(uid, msg):
+    t = datetime.now().strftime("%H:%M:%S")
+    users.update_one({"_id": ObjectId(uid)}, {"$push": {"logs": {"$each": [f"[{t}] {msg}"], "$slice": -50}}})
 
-def analyze_v27_precise(ticks):
+def strategy_7_6(ticks):
+    if len(ticks) < 65: return "NONE", 0
+    up, down = 0, 0
+    for i in range(0, 65, 5):
+        seg = ticks[i:i+5]
+        if len(seg) < 2: continue
+        if seg[-1] > seg[0]: up += 1
+        elif seg[-1] < seg[0]: down += 1
+    if up == 7 and down == 6: return "CALL", -0.5
+    if down == 7 and up == 6: return "PUT", 0.5
+    return "NONE", 0
+
+def check_contract(uid):
+    u = users.find_one({"_id": ObjectId(uid)})
+    if not u or not u.get("contract"): return
     try:
-        if len(ticks) < 65: return
-        # نأخذ آخر 65 تيك لضمان تحليل 13 شمعة كاملة
-        target_ticks = ticks[-65:]
+        ws = websocket.create_connection(DERIV_WS)
+        ws.send(json.dumps({"authorize": u["token"]}))
+        ws.recv()
+        ws.send(json.dumps({"proposal_open_contract": 1, "contract_id": u["contract"]}))
+        r = json.loads(ws.recv())
+        ws.close()
+        c = r.get("proposal_open_contract")
+        if not c or not c.get("is_sold"): return
         
-        up_candles = 0
-        down_candles = 0
+        profit = round(float(c.get("profit", 0)), 2)
+        total_p = round(u["profit"] + profit, 2)
         
-        # تقسيم الـ 65 تيك إلى 13 شمعة
-        for i in range(0, 65, 5):
-            segment = target_ticks[i:i+5]
-            if len(segment) < 2: continue
-            
-            open_p = segment[0]
-            close_p = segment[-1]
-            
-            if close_p > open_p: up_candles += 1
-            elif close_p < open_p: down_candles += 1
-        
-        bot_config["up_count"] = up_candles
-        bot_config["down_count"] = down_candles
-        
-        is_sig = False
-        direction = ""
-
-        # المنطق الصارم: 7 مقابل 6 بالضبط
-        if up_candles == 7 and down_candles == 6:
-            direction = "CALL 🟢"
-            is_sig = True
-        elif down_candles == 7 and up_candles == 6:
-            direction = "PUT 🔴"
-            is_sig = True
-
-        if is_sig:
-            bot_config.update({"direction": direction, "isSignal": True, "timestamp": time.time()})
-            add_log(f"TARGET HIT: {direction} (7 vs 6)")
+        if profit > 0:
+            log(uid, f"✅ WIN {profit}$")
+            users.update_one({"_id": ObjectId(uid)}, {"$set": {"contract": None, "profit": total_p, "wins": u["wins"] + 1, "stake": round(u["base"], 2), "loss_seq": 0}})
         else:
-            bot_config["isSignal"] = False
-            add_log(f"Scan: U:{up_candles} D:{down_candles} (No Match)")
-
-    except Exception as e: add_log("Logic Error")
-
-def sniper_worker():
-    while True:
-        try:
-            now = datetime.now()
-            if bot_config["isRunning"] and now.second == 55:
-                ws = websocket.create_connection("wss://ws.binaryws.com/websockets/v3?app_id=1089", timeout=10)
-                ws.send(json.dumps({"ticks_history": bot_config["pair_id"], "count": 70, "style": "ticks"}))
-                res = json.loads(ws.recv())
-                if "history" in res:
-                    analyze_v27_precise(res["history"]["prices"])
-                ws.close()
-                time.sleep(10)
-        except: time.sleep(1)
-        time.sleep(0.5)
-
-UI = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>KHOURY V27 PRECISE</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-        body { background: #040508; color: #00f3ff; font-family: 'Segoe UI', sans-serif; text-align: center; padding: 15px; }
-        .card { border: 2px solid #00f3ff; padding: 25px; border-radius: 30px; max-width: 380px; margin: auto; background: #0a0e14; box-shadow: 0 0 30px #00f3ff22; }
-        .counter-grid { display: flex; justify-content: center; gap: 20px; margin: 20px 0; }
-        .num-box { background: #000; border: 1px solid #333; padding: 10px 20px; border-radius: 15px; }
-        .val { display: block; font-size: 28px; font-weight: bold; }
-        .signal { font-size: 48px; min-height: 70px; margin: 20px 0; font-weight: 900; letter-spacing: 2px; }
-        .btn { padding: 15px; width: 45%; border: 1px solid #00f3ff; background: transparent; color: #00f3ff; border-radius: 12px; cursor: pointer; font-weight: bold; }
-        .logs { background: #000; height: 100px; padding: 10px; font-size: 11px; overflow-y: auto; color: #39ff14; border-radius: 10px; text-align: left; border: 1px solid #1a1a1a; margin-top: 15px; }
-    </style>
-</head>
-<body>
-    <div class="card">
-        <h2 style="margin:0;">PRECISE SNIPER</h2>
-        <p style="font-size:11px; color:#555;">13 CANDLES (5-TICK EACH)</p>
+            loss_seq = u["loss_seq"] + 1
+            new_stake = round(u["stake"] * 19, 2) # مضاعفة x19
+            log(uid, f"❌ LOSS. Next stake (x19): {new_stake}$")
+            users.update_one({"_id": ObjectId(uid)}, {"$set": {"contract": None, "stake": new_stake, "loss_seq": loss_seq}, "$inc": {"losses": 1, "profit": profit}})
+            if loss_seq >= 2:
+                users.update_one({"_id": ObjectId(uid)}, {"$set": {"status": "stopped", "reason": "2 consecutive losses"}})
         
-        <select id="asset" style="width:100%; padding:12px; background:#000; color:#00f3ff; border-radius:10px; margin:15px 0;">
-            <option value="R_100">Volatility 100 Index</option>
-            <option value="frxEURUSD">EUR/USD</option>
-        </select>
+        if total_p >= u["tp"]:
+            users.update_one({"_id": ObjectId(uid)}, {"$set": {"status": "stopped", "reason": "Target TP reached"}})
+    except: pass
 
-        <div class="counter-grid">
-            <div class="num-box" style="border-color:#39ff14;">
-                <span style="font-size:10px; color:#39ff14;">GREEN</span>
-                <span class="val" id="upC">0</span>
-            </div>
-            <div class="num-box" style="border-color:#ff4757;">
-                <span style="font-size:10px; color:#ff4757;">RED</span>
-                <span class="val" id="dnC">0</span>
-            </div>
+def bot_worker(uid):
+    while True:
+        u = users.find_one({"_id": ObjectId(uid)})
+        if not u or u.get("status") != "running": break
+        
+        # تحليل عند الثانية 55
+        if datetime.now().second == 55:
+            try:
+                ws = websocket.create_connection(DERIV_WS)
+                ws.send(json.dumps({"ticks_history": u["symbol"], "count": 65, "style": "ticks"}))
+                r = json.loads(ws.recv()); ws.close()
+                if "history" in r:
+                    sig, bar = strategy_7_6(r["history"]["prices"])
+                    if sig != "NONE" and not u.get("contract"):
+                        ws = websocket.create_connection(DERIV_WS)
+                        ws.send(json.dumps({"authorize": u["token"]}))
+                        auth = json.loads(ws.recv())
+                        ws.send(json.dumps({
+                            "buy": 1, 
+                            "price": round(u["stake"], 2), 
+                            "parameters": {
+                                "amount": round(u["stake"], 2), 
+                                "basis": "stake", 
+                                "contract_type": sig, 
+                                "currency": auth["authorize"]["currency"], 
+                                "duration": 5,           # تم التعديل إلى 5
+                                "duration_unit": "t",    # تم التعديل إلى تيكات (ticks)
+                                "symbol": u["symbol"], 
+                                "barrier": bar
+                            }
+                        }))
+                        trade = json.loads(ws.recv()); ws.close()
+                        if "buy" in trade:
+                            log(uid, f"🚀 ENTER {sig} (5 Ticks) @ {u['stake']}$")
+                            users.update_one({"_id": ObjectId(uid)}, {"$set": {"contract": trade["buy"]["contract_id"]}})
+                time.sleep(5) # منع التكرار في نفس الدقيقة
+            except: pass
+        time.sleep(0.5); check_contract(uid)
+
+# --- الواجهة وباقي الراوتات تبقى كما هي ---
+@app.route("/")
+def home():
+    return render_template_string("""
+    <body style='background:#0b1016;color:white;text-align:center;font-family:sans-serif;padding:50px'>
+        <h2>KHOURY 5-TICK SNIPER (x19)</h2>
+        <input id=email placeholder=Email style='padding:10px;border-radius:5px;border:none'><br><br>
+        <button onclick="login()" style='padding:10px 20px;background:#238636;color:white;border:none;border-radius:5px;cursor:pointer'>LOGIN</button>
+        <div id=settings style='display:none;margin-top:20px'>
+            <input id=token placeholder="API Token" type=password style='padding:10px;margin:5px'><br>
+            <input id=stake placeholder="Stake" type=number value=0.35 style='padding:10px;margin:5px'><br>
+            <input id=tp placeholder="TP" type=number value=10 style='padding:10px;margin:5px'><br>
+            <button onclick="start()" style='padding:10px 20px;background:#238636;color:white;border:none;border-radius:5px'>START BOT</button>
         </div>
+        <div id=stats style='display:none;margin-top:20px;background:#000;padding:20px;border-radius:10px'>
+            <div id=res style='color:red;font-weight:bold'></div><div id=s></div><div id=l style='text-align:left;color:#39ff14;font-size:12px;margin-top:10px'></div>
+            <br><button onclick="stop()" style='background:#da3633;color:white;border:none;padding:10px'>STOP</button>
+            <button onclick="news()" style='margin-left:10px'>NEW SESSION</button>
+        </div>
+        <script>
+            let email="";
+            async function login(){
+                email=document.getElementById('email').value;
+                let r=await fetch('/check/'+email); let d=await r.json();
+                if(d.found && d.status==='running'){ document.getElementById('stats').style.display='block'; }
+                else { document.getElementById('settings').style.display='block'; }
+            }
+            async function start(){
+                let d={email:email,token:token.value,symbol:'R_100',stake:parseFloat(stake.value),tp:parseFloat(tp.value)};
+                await fetch('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)}); location.reload();
+            }
+            async function stop(){ await fetch('/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email})}); }
+            async function news(){ await fetch('/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email})}); location.reload(); }
+            setInterval(async()=>{ if(!email)return; let r=await fetch('/check/'+email); let d=await r.json(); if(d.found){
+                document.getElementById('s').innerHTML=`Profit: ${d.profit.toFixed(2)}$ | Next Stake: ${d.stake}$`;
+                document.getElementById('l').innerHTML=d.logs.reverse().join('<br>'); document.getElementById('res').innerText=d.reason;
+            }},1000);
+        </script>
+    </body>
+    """)
 
-        <button class="btn" onclick="send('start')" style="color:#39ff14; border-color:#39ff14;">START</button>
-        <button class="btn" onclick="send('stop')" style="color:#ff4757; border-color:#ff4757;">STOP</button>
+@app.route("/check/<email>")
+def check_email(email):
+    u = users.find_one({"email": email})
+    if u: u["_id"]=str(u["_id"]); return jsonify({"found": True, **u})
+    return jsonify({"found": False})
 
-        <div class="signal" id="sig">...</div>
-        <div class="logs" id="lBox"></div>
-    </div>
-    <script>
-        async function send(a) { await fetch(`/api/cmd?action=${a}&pair=${document.getElementById('asset').value}`); }
-        setInterval(async () => {
-            const r = await fetch('/api/status');
-            const d = await r.json();
-            document.getElementById('upC').innerText = d.up;
-            document.getElementById('dnC').innerText = d.down;
-            const s = document.getElementById('sig');
-            if(d.run) {
-                if(d.show && d.isSig) { s.innerHTML = d.sig_dir; s.style.color = d.sig_dir.includes('🟢') ? '#39ff14' : '#ff4757'; }
-                else { s.innerHTML = "<span style='color:#222'>READY</span>"; }
-            } else { s.innerHTML = "OFFLINE"; }
-            document.getElementById('lBox').innerHTML = d.logs.join('<br>');
-        }, 1000);
-    </script>
-</body>
-</html>
-"""
+@app.route("/start", methods=["POST"])
+def start():
+    d = request.json; users.delete_one({"email": d["email"]})
+    uid = users.insert_one({"email": d["email"], "token": d["token"], "symbol": d["symbol"], "base": round(d["stake"], 2), "stake": round(d["stake"], 2), "tp": round(d["tp"], 2), "profit": 0.0, "wins": 0, "losses": 0, "loss_seq": 0, "contract": None, "logs": [], "status": "running", "reason": ""}).inserted_id
+    Thread(target=bot_worker, args=(str(uid),), daemon=True).start(); return jsonify({"ok": True})
 
-@app.route('/')
-def home(): return render_template_string(UI)
+@app.route("/stop", methods=["POST"])
+def stop(): email = request.json["email"]; users.update_one({"email": email}, {"$set": {"status": "stopped", "reason": "Manual Stop"}}); return jsonify({"ok": True})
 
-@app.route('/api/cmd')
-def cmd():
-    bot_config["isRunning"] = (request.args.get('action') == 'start')
-    bot_config["pair_id"] = request.args.get('pair')
-    return jsonify({"ok": True})
-
-@app.route('/api/status')
-def get_status():
-    show = (time.time() - bot_config["timestamp"]) < 30
-    return jsonify({
-        "run": bot_config["isRunning"], "show": show, "isSig": bot_config["isSignal"],
-        "sig_dir": bot_config["direction"], "up": bot_config["up_count"], 
-        "down": bot_config["down_count"], "logs": bot_config["logs"]
-    })
+@app.route("/reset", methods=["POST"])
+def reset(): email = request.json["email"]; users.delete_one({"email": email}); return jsonify({"ok": True})
 
 if __name__ == "__main__":
-    threading.Thread(target=sniper_worker, daemon=True).start()
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
+    for u in users.find({"status": "running"}): Thread(target=bot_worker, args=(str(u["_id"]),), daemon=True).start()
+    app.run(host="0.0.0.0", port=5000)
