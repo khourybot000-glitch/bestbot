@@ -4,131 +4,151 @@ from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
+# --- إعدادات النظام المحدثة ---
 bot_config = {
-    "isRunning": False, "isSignal": False, "direction": "", 
-    "win_rate": 0, "pair_id": "frxEURUSD", "timestamp": 0, 
-    "entryTime": "", "logs": ["SYSTEM READY"]
+    "isRunning": False,
+    "direction": "",
+    "win_rate": 0,
+    "pair_id": "frxEURUSD",
+    "pair_name": "EUR/USD",
+    "timestamp": 0,
+    "entryTime": "",
+    "isSignal": False,
+    "logs": []
 }
+
+ASSETS = {"frxEURUSD": "EUR/USD", "frxEURJPY": "EUR/JPY", "frxEURGBP": "EUR/GBP"}
 
 def add_log(msg):
     bot_config["logs"].append(f"[{time.strftime('%H:%M:%S')}] {msg}")
-    if len(bot_config["logs"]) > 6: bot_config["logs"].pop(0)
+    if len(bot_config["logs"]) > 5: bot_config["logs"].pop(0)
 
-# --- محرك التحليل الاحترافي ---
-def perform_analysis(ticks):
+# --- محرك التحليل (الـ 50 مؤشر + 1200 تيك) ---
+def perform_analysis(ticks, asset_id):
+    global bot_config
     try:
-        # جلب آخر 1200 تيك كما طلبت
-        prices = ticks[-1200:]
+        prices = ticks[-1200:] # جلب 1200 تيك كما طلبت
         curr = prices[-1]
         
-        # تصويت الـ 50 مؤشر (حساب تقاطع السعر مع 50 متوسط مختلف)
-        c_votes = sum(1 for i in range(10, 60) if curr > (sum(prices[-i:]) / i))
+        # تصويت الـ 50 مؤشر (حساب التقاطعات السعرية)
+        c_votes = sum(1 for i in range(5, 55) if curr > (sum(prices[-i:]) / i))
         p_votes = 50 - c_votes
         
         # حساب نسبة النجاح (Win Rate)
-        if c_votes >= p_votes:
-            bot_config["direction"] = "CALL 🟢"
-            bot_config["win_rate"] = (c_votes / 50 * 100)
-        else:
-            bot_config["direction"] = "PUT 🔴"
-            bot_config["win_rate"] = (p_votes / 50 * 100)
-
-        bot_config["isSignal"] = True
-        bot_config["timestamp"] = time.time()
-        # وقت الدخول يكون الدقيقة القادمة (الثانية 00)
-        bot_config["entryTime"] = (datetime.now() + timedelta(minutes=1)).strftime("%H:%M:00")
+        win_pct = (max(c_votes, p_votes) / 50) * 100
         
-        add_log(f"SIGNAL READY: {bot_config['direction']} ({bot_config['win_rate']:.1f}%)")
+        # تحديد الاتجاه
+        direction = "CALL 🟢" if c_votes >= p_votes else "PUT 🔴"
+        
+        # تحديث البيانات (الإشارة تظهر دائماً كما طلبت)
+        bot_config.update({
+            "isSignal": True,
+            "direction": direction,
+            "win_rate": win_pct,
+            "pair_name": ASSETS[asset_id],
+            "timestamp": time.time(),
+            "entryTime": (datetime.now() + timedelta(minutes=1)).strftime("%H:%M:00")
+        })
+        add_log(f"Signal Generated: {direction} ({win_pct}%)")
     except Exception as e:
         add_log(f"Analysis Error: {str(e)}")
 
-# --- نظام الاتصال المتقطع (عند الثانية 50 فقط) ---
-def ws_worker():
+# --- نظام WebSocket المطور (اتصال عند الثانية 50 وقطع فوراً) ---
+def smart_ws_worker():
     while True:
         try:
             now = datetime.now()
-            # الاتصال يبدأ فقط عند الثانية 50
+            # التعديل: يتصل كل دقيقة عند الثانية 50 (بدلاً من كل 10 دقائق)
             if bot_config["isRunning"] and now.second == 50:
-                add_log("CONNECTING (SEC 50)...")
+                add_log("Connecting to Market...")
+                # استخدام نفس طريقة الاتصال الناجحة في كودك القديم
+                ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=15)
+                asset = bot_config["pair_id"]
                 
-                # فتح الاتصال
-                ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=1089", timeout=10)
-                
-                # طلب 1200 تيك
+                # طلب 1200 تيك كما طلبت
                 ws.send(json.dumps({
-                    "ticks_history": bot_config["pair_id"], 
+                    "ticks_history": asset, 
                     "count": 1200, 
                     "end": "latest", 
                     "style": "ticks"
                 }))
                 
-                data = json.loads(ws.recv())
+                res = json.loads(ws.recv())
+                if "history" in res:
+                    perform_analysis(res["history"]["prices"], asset)
                 
-                if "history" in data:
-                    perform_analysis(data["history"]["prices"])
-                    add_log("DATA ANALYZED & DISCONNECTED.")
-                
-                # قطع الاتصال فوراً بعد جلب البيانات
-                ws.close()
-                
-                # الانتظار لضمان عدم تكرار الاتصال في نفس الدقيقة
-                time.sleep(10) 
+                ws.close() # قطع الاتصال فوراً
+                add_log("Data Received & Connection Closed.")
+                time.sleep(5) # منع التكرار في نفس الثانية
         except Exception as e:
-            add_log("Conn Error: Retrying next minute")
+            add_log(f"Socket Error: {str(e)}")
         time.sleep(0.5)
 
+# --- الواجهة (نفس تصميمك المفضل مع عرض نسبة النجاح) ---
 UI = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>KHOURY SNIPER V7</title>
+    <title>KHOURY SNIPER V9</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        body { background: #06070a; color: #00f3ff; font-family: 'Courier New', monospace; text-align: center; padding: 10px; }
-        .card { border: 2px solid #00f3ff; border-radius: 20px; padding: 20px; background: rgba(0,243,255,0.05); max-width: 400px; margin: auto; box-shadow: 0 0 15px #00f3ff44; }
-        .btn { padding: 12px; width: 48%; border: 1px solid #00f3ff; background: transparent; color: #00f3ff; border-radius: 10px; font-weight: bold; cursor: pointer; }
-        .win-display { font-size: 35px; color: #39ff14; font-weight: bold; margin: 10px 0; }
-        .logs { background: #000; height: 120px; overflow-y: auto; text-align: left; padding: 10px; color: #39ff14; font-size: 11px; margin-top: 15px; border-top: 1px solid #222; }
+        :root { --neon: #00f3ff; --green: #39ff14; --red: #ff4757; }
+        body { background: #06070a; color: white; font-family: 'Courier New', monospace; text-align: center; padding: 15px; }
+        .box { border: 2px solid var(--neon); padding: 25px; border-radius: 20px; background: rgba(0,243,255,0.05); max-width: 400px; margin: auto; }
+        .btn { padding: 12px; width: 45%; border: 1px solid var(--neon); background: transparent; color: var(--neon); font-weight: bold; cursor: pointer; border-radius: 10px; }
+        .win-display { font-size: 40px; color: var(--green); margin: 10px 0; font-weight: bold; text-shadow: 0 0 10px var(--green); }
+        .logs { background: #000; height: 100px; padding: 10px; font-size: 10px; overflow-y: auto; color: var(--green); border-radius: 10px; text-align: left; border: 1px solid #111; margin-top: 15px; }
     </style>
 </head>
 <body>
-    <div class="card">
-        <h2>SNIPER V7 (50-IND)</h2>
-        <select id="asset" style="width:100%; padding:10px; background:#000; color:#00f3ff; border:1px solid #00f3ff; margin-bottom:10px;">
-            <option value="frxEURUSD">EUR/USD</option>
-            <option value="frxEURJPY">EUR/JPY</option>
-            <option value="frxGBPUSD">GBP/USD</option>
-        </select>
-        <div id="clk" style="font-size: 40px; margin: 15px; font-weight: bold;">00:00:00</div>
-        <button class="btn" onclick="ctl('start')" style="border-color:#39ff14; color:#39ff14;">START BOT</button>
-        <button class="btn" onclick="ctl('stop')" style="border-color:red; color:red;">STOP</button>
-        
-        <div id="mainDisp" style="margin: 20px 0; min-height: 120px; border: 1px dashed #333; padding: 15px; border-radius: 15px;">
-            READY
+    <div id="login" style="position:fixed; inset:0; background:#020617; z-index:2000; display:flex; flex-direction:column; align-items:center; justify-content:center;">
+        <div style="border:1px solid var(--neon); padding:30px; border-radius:20px;">
+            <h2 style="color:var(--neon)">KHOURY LOGIN</h2>
+            <input type="text" id="u" placeholder="ID" style="width:90%; padding:10px; margin-bottom:10px; background:#000; color:var(--neon); border:1px solid #333;"><br>
+            <input type="password" id="p" placeholder="PASS" style="width:90%; padding:10px; margin-bottom:15px; background:#000; color:var(--neon); border:1px solid #333;"><br>
+            <button class="btn" onclick="check()" style="width:100%">ENTER</button>
         </div>
-        
-        <div class="logs" id="lBox"></div>
     </div>
+
+    <div id="dash" style="display:none;">
+        <div class="box">
+            <h2 style="color:var(--neon)">SNIPER PRO V9</h2>
+            <select id="asset" style="width:100%; padding:10px; background:#000; color:var(--neon); margin-bottom:15px;">
+                <option value="frxEURUSD">EUR/USD</option>
+                <option value="frxEURJPY">EUR/JPY</option>
+            </select>
+            <div id="clk" style="font-size: 40px; margin: 15px; color:var(--neon)">00:00:00</div>
+            <button class="btn" onclick="ctl('start')" style="color:var(--green); border-color:var(--green);">START</button>
+            <button class="btn" onclick="ctl('stop')" style="color:var(--red); border-color:var(--red);">STOP</button>
+            
+            <div id="mainDisp" style="margin-top:20px; min-height:150px;">
+                READY
+            </div>
+            <div class="logs" id="lBox"></div>
+        </div>
+    </div>
+
     <script>
-        async function ctl(a) { await fetch(`/api/cmd?action=${a}&pair=` + document.getElementById('asset').value); }
-        setInterval(async () => {
+        function check() {
+            if(document.getElementById('u').value==='KHOURYBOT' && document.getElementById('p').value==='123456') {
+                document.getElementById('login').style.display='none';
+                document.getElementById('dash').style.display='block';
+                setInterval(upd, 1000);
+            } else alert('Error');
+        }
+        async function ctl(a) { await fetch(`/api/cmd?action=${a}&pair=${document.getElementById('asset').value}`); }
+        async function upd() {
             document.getElementById('clk').innerText = new Date().toTimeString().split(' ')[0];
-            try {
-                const r = await fetch('/api/status');
-                const d = await r.json();
-                const disp = document.getElementById('mainDisp');
-                if(d.run) {
-                    if(d.show) {
-                        disp.innerHTML = `<b style="font-size:26px">${d.signal}</b><br>
-                                         <div class="win-display">${d.win_rate.toFixed(1)}%</div>
-                                         <small style="color:#aaa">ENTRY AT: ${d.entry}</small>`;
-                    } else {
-                        disp.innerHTML = "WAITING FOR SEC 50...<br><small>Sniper Mode: ON</small>";
-                    }
-                } else { disp.innerHTML = "SYSTEM OFFLINE"; }
-                document.getElementById('lBox').innerHTML = d.logs.join('<br>');
-            } catch(e) {}
-        }, 1000);
+            const r = await fetch('/api/status');
+            const d = await r.json();
+            const disp = document.getElementById('mainDisp');
+            if(d.run) {
+                if(d.show) {
+                    disp.innerHTML = `<h3>${d.pair}</h3><b style="font-size:24px">${d.signal}</b><div class="win-display">${d.win_rate.toFixed(1)}%</div><small>ENTRY AT: ${d.entry}</small>`;
+                } else { disp.innerHTML = "WAITING FOR SEC 50..."; }
+            } else { disp.innerHTML = "SYSTEM OFFLINE"; }
+            document.getElementById('lBox').innerHTML = d.logs.join('<br>');
+        }
     </script>
 </body>
 </html>
@@ -141,19 +161,17 @@ def home(): return render_template_string(UI)
 def cmd():
     bot_config["isRunning"] = (request.args.get('action') == 'start')
     bot_config["pair_id"] = request.args.get('pair')
-    add_log("SNIPER ACTIVE" if bot_config["isRunning"] else "SNIPER STOPPED")
     return jsonify({"ok": True})
 
 @app.route('/api/status')
 def get_status():
-    # تظهر الإشارة من الثانية 51 حتى الثانية 59 من الدقيقة التالية
     show = (time.time() - bot_config["timestamp"]) < 65 and bot_config["timestamp"] > 0
     return jsonify({
-        "run": bot_config["isRunning"], "show": show, 
-        "signal": bot_config["direction"], "win_rate": bot_config["win_rate"], 
-        "entry": bot_config["entryTime"], "logs": bot_config["logs"]
+        "run": bot_config["isRunning"], "show": show, "isSignal": bot_config["isSignal"],
+        "signal": bot_config["direction"], "win_rate": bot_config["win_rate"],
+        "pair": bot_config["pair_name"], "entry": bot_config["entryTime"], "logs": bot_config["logs"]
     })
 
 if __name__ == "__main__":
-    threading.Thread(target=ws_worker, daemon=True).start()
+    threading.Thread(target=smart_ws_worker, daemon=True).start()
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
