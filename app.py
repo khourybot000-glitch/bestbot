@@ -17,46 +17,29 @@ users=db["users"]
 
 DERIV_WS="wss://blue.derivws.com/websockets/v3?app_id=16929"
 
-# --- Logging ---
 def log(uid,msg):
     t=datetime.now().strftime("%H:%M:%S")
     users.update_one({"_id":ObjectId(uid)},{"$push":{"logs":{"$each":[f"[{t}] {msg}"],"$slice":-50}}})
 
-# --- Strategy (RSI + Momentum) ---
+# --- الاستراتيجية الجديدة: 6 تيكات وزخم 5 تيكات ---
 def strategy(ticks):
-    if len(ticks) < 14:
+    if len(ticks) < 6:
         return "NONE", 0
 
-    gains = []
-    losses = []
-    for i in range(1, len(ticks)):
-        diff = ticks[i] - ticks[i-1]
-        if diff >= 0:
-            gains.append(diff)
-            losses.append(0)
-        else:
-            gains.append(0)
-            losses.append(abs(diff))
-
-    avg_gain = sum(gains[-14:]) / 14
-    avg_loss = sum(losses[-14:]) / 14
+    # أخذ آخر 6 تيكات
+    last_6 = ticks[-6:]
     
-    if avg_loss == 0: 
-        rsi = 100
-    else:
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
+    # التأكد من أن التغيرات الـ 5 الأخيرة لها نفس الاتجاه
+    is_up = all(last_6[i] > last_6[i-1] for i in range(1, 6))
+    is_down = all(last_6[i] < last_6[i-1] for i in range(1, 6))
 
-    # دخول عند التشبع: شراء (CALL) إذا RSI منخفض، بيع (PUT) إذا RSI مرتفع
-    if rsi < 35 and ticks[-1] > ticks[-2]:
-        return "PUT", +0.5
-    
-    if rsi > 65 and ticks[-1] < ticks[-2]:
-        return "CALL", -0.5
+    if is_up:
+        return "CALL", -0.8
+    if is_down:
+        return "PUT", 0.8
 
     return "NONE", 0
 
-# --- Check Result ---
 def check(uid):
     u=users.find_one({"_id":ObjectId(uid)})
     if not u or not u.get("contract"):
@@ -78,38 +61,33 @@ def check(uid):
             log(uid,f"WIN {profit}$")
             users.update_one({"_id":ObjectId(uid)},{"$set":{"contract":None,"profit":total,"wins":u["wins"]+1,"stake":round(u["base"],2),"loss_seq":0}})
         else:
-            # المضاعفة 2.2 كما طلبت
-            loss_seq=u["loss_seq"]+1
-            new_stake=round(u["stake"]*11, 2)
-            log(uid,f"LOSS #{loss_seq} next stake {new_stake}$")
-            users.update_one({"_id":ObjectId(uid)},{"$set":{"contract":None,"stake":new_stake,"loss_seq":loss_seq},"$inc":{"losses":1,"profit":profit}})
-            
-            # التوقف بعد 4 خسائر متتالية
-            if loss_seq>=2:
-                users.update_one({"_id":ObjectId(uid)},{"$set":{"status":"stopped","reason":"4 consecutive losses"}})
+            # التوقف بعد خسارة واحدة كما طلبت
+            log(uid,f"LOSS {profit}$ - STOPPING BOT")
+            users.update_one({"_id":ObjectId(uid)},{"$set":{"contract":None,"status":"stopped","reason":"Stopped after 1 loss"}})
         
         if total>=u["tp"]:
             users.update_one({"_id":ObjectId(uid)},{"$set":{"status":"stopped","reason":"TP reached"}})
     except:
         pass
 
-# --- Bot Loop ---
 def bot(uid):
     while True:
         u=users.find_one({"_id":ObjectId(uid)})
         if not u or u.get("status")!="running":
             break
+        
+        # التحليل عند الثواني 0، 10، 20، 30، 40، 50
         sec=time.localtime().tm_sec
-        # التحليل عند الثانية 30 تماماً كما في كودك الأصلي
-        if sec % 5 == 0: 
+        if sec in [0, 10, 20, 30, 40, 50]: 
             try:
                 ws=websocket.create_connection(DERIV_WS)
-                ws.send(json.dumps({"ticks_history":u["symbol"],"count":30,"end":"latest","style":"ticks"}))
+                ws.send(json.dumps({"ticks_history":u["symbol"],"count":6,"end":"latest","style":"ticks"}))
                 r=json.loads(ws.recv())
                 ws.close()
                 if "history" not in r:
                     time.sleep(1)
                     continue
+                
                 sig,barrier=strategy(r["history"]["prices"])
                 if sig=="NONE" or u.get("contract"):
                     time.sleep(1)
@@ -137,23 +115,22 @@ def bot(uid):
                 ws.close()
                 if "buy" in trade:
                     cid=trade["buy"]["contract_id"]
-                    log(uid,f"ENTER {sig}")
+                    log(uid,f"ENTER {sig} with barrier {barrier}")
                     users.update_one({"_id":ObjectId(uid)},{"$set":{"contract":cid}})
             except:
                 pass
         time.sleep(0.5)
         check(uid)
 
-# --- Resume Existing Sessions ---
 def resume():
     for u in users.find({"status":"running"}):
         Thread(target=bot,args=(str(u["_id"]),),daemon=True).start()
 
-# --- Web Interface (التصميم الأصلي) ---
+# --- HTML Interface ---
 HTML="""
 <html>
 <body style='background:#0b0f14;color:white;font-family:sans-serif'>
-<h2>KHOURY BOT</h2>
+<h2>KHOURY BOT - Momentum Strategy</h2>
 
 Email<br>
 <input id=email>
@@ -188,31 +165,15 @@ async function login(){
     email=document.getElementById("email").value
     let r=await fetch("/check/"+email)
     let d=await r.json()
-    if(d.found){
-        stats.style.display="block"
-    }else{
-        settings.style.display="block"
-    }
+    if(d.found){ stats.style.display="block" }else{ settings.style.display="block" }
 }
 async function start(){
-    let data={
-        email:email,
-        token:token.value,
-        symbol:symbol.value,
-        stake:parseFloat(stake.value),
-        tp:parseFloat(tp.value)
-    }
+    let data={email:email, token:token.value, symbol:symbol.value, stake:parseFloat(stake.value), tp:parseFloat(tp.value)}
     await fetch("/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)})
-    settings.style.display="none"
-    stats.style.display="block"
+    settings.style.display="none"; stats.style.display="block"
 }
-async function stop(){
-    await fetch("/stop",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:email})})
-}
-async function news(){
-    await fetch("/reset",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:email})})
-    location.reload()
-}
+async function stop(){ await fetch("/stop",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:email})}) }
+async function news(){ await fetch("/reset",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:email})}); location.reload() }
 setInterval(async()=>{
     if(!email)return
     let r=await fetch("/check/"+email)
@@ -227,7 +188,6 @@ setInterval(async()=>{
 </html>
 """
 
-# --- Routes ---
 @app.route("/")
 def home(): return render_template_string(HTML)
 
@@ -242,22 +202,7 @@ def check_email(email):
 @app.route("/start",methods=["POST"])
 def start():
     d=request.json
-    uid=users.insert_one({
-        "email":d["email"],
-        "token":d["token"],
-        "symbol":d["symbol"],
-        "base":round(d["stake"],2),
-        "stake":round(d["stake"],2),
-        "tp":round(d["tp"],2),
-        "profit":0.0,
-        "wins":0,
-        "losses":0,
-        "loss_seq":0,
-        "contract":None,
-        "logs":[],
-        "status":"running",
-        "reason":""
-    }).inserted_id
+    uid=users.insert_one({"email":d["email"],"token":d["token"],"symbol":d["symbol"],"base":round(d["stake"],2),"stake":round(d["stake"],2),"tp":round(d["tp"],2),"profit":0.0,"wins":0,"losses":0,"loss_seq":0,"contract":None,"logs":[],"status":"running","reason":""}).inserted_id
     Thread(target=bot,args=(str(uid),),daemon=True).start()
     return jsonify({"ok":True})
 
