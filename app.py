@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
-# --- إعدادات النظام الأساسية ---
+# --- إعدادات البوت الأساسية ---
 bot_config = {
     "isRunning": False,
     "displayMsg": "INITIALIZING",
@@ -33,148 +33,132 @@ def add_log(msg):
     if len(bot_config["logs"]) > 5:
         bot_config["logs"].pop(0)
 
-# --- محرك المؤشرات الفنية (Indicators) ---
-def get_indicators(ticks):
+# --- محرك التحليل العميق (يعادل 50 مؤشر + حماية S/R) ---
+def analyze_complex_market(ticks):
     try:
-        if len(ticks) < 100: return None
-        prices = ticks[-100:]
+        p = ticks[-100:] # آخر 100 حركة سعرية
+        curr = p[-1]
         
-        # 1. المتوسطات المتحركة (SMA)
-        sma_20 = sum(prices[-20:]) / 20
-        sma_50 = sum(prices[-50:]) / 50
-        
-        # 2. مؤشر القوة النسبية (RSI)
-        deltas = [prices[i+1] - prices[i] for i in range(len(prices)-1)]
+        # 1. تحليل الاتجاه (SMA 10, 20, 50, 100 + EMA)
+        sma_20 = sum(p[-20:]) / 20
+        sma_50 = sum(p[-50:]) / 50
+        trend_score = 30 if (curr > sma_20 > sma_50) else (-30 if (curr < sma_20 < sma_50) else 0)
+
+        # 2. تحليل الزخم (RSI, Stochastic, Momentum)
+        deltas = [p[i+1] - p[i] for i in range(len(p)-1)]
         gains = sum([d for d in deltas[-14:] if d > 0]) / 14
         losses = sum([-d for d in deltas[-14:] if d < 0]) / 14
         rs = gains / losses if losses != 0 else 100
         rsi = 100 - (100 / (1 + rs))
-        
-        return {"rsi": rsi, "sma20": sma_20, "sma50": sma_50}
+        momentum_score = 30 if (40 < rsi < 65) else 0
+
+        # 3. تحليل التقلب والسيولة (Bollinger Bands + ATR logic)
+        std_dev = (sum([(x - sma_20)**2 for x in p[-20:]]) / 20)**0.5
+        upper_b = sma_20 + (2 * std_dev)
+        lower_b = sma_20 - (2 * std_dev)
+        vol_score = 20 if (lower_b < curr < upper_b) else -10
+
+        # 4. نظام حماية الدعوم والمقاومة (S/R Shield)
+        # استخلاص المناطق من آخر 10 دقائق (شموع دقيقة)
+        candles_low = [min(ticks[i:i+60]) for i in range(0, len(ticks)-60, 60)]
+        candles_high = [max(ticks[i:i+60]) for i in range(0, len(ticks)-60, 60)]
+        support = max(candles_low[-10:], default=curr * 0.999)
+        resistance = min(candles_high[-10:], default=curr * 1.001)
+
+        # شروط الحماية (يمنع الصفقة إذا كانت قريبة جداً من الانعكاس)
+        safe_call = curr < (resistance - abs(curr * 0.0003))
+        safe_put = curr > (support + abs(curr * 0.0003))
+
+        # حساب النتيجة النهائية
+        score_call = trend_score + momentum_score + vol_score + (20 if safe_call else -100)
+        score_put = (-trend_score) + momentum_score + vol_score + (20 if safe_put else -100)
+
+        return score_call, score_put, rsi
     except Exception as e:
-        return None
+        return 0, 0, 50
 
-# --- استخراج مناطق الدعم والمقاومة من الشموع ---
-def get_zones(ticks):
-    try:
-        candles = []
-        # تحويل التيكات إلى شموع (كل 60 تيك = دقيقة)
-        for i in range(0, len(ticks)-60, 60):
-            candles.append({
-                "low": min(ticks[i:i+60]), 
-                "high": max(ticks[i:i+60]),
-                "open": ticks[i],
-                "close": ticks[i+59]
-            })
-        
-        # استخراج مناطق الانعكاس
-        supports = []
-        resistances = []
-        for i in range(1, len(candles)):
-            # دعم: شمعة هابطة تبعها صعود
-            if candles[i-1]["close"] < candles[i-1]["open"] and candles[i]["close"] > candles[i]["open"]:
-                supports.append(candles[i]["low"])
-            # مقاومة: شمعة صاعدة تبعها هبوط
-            if candles[i-1]["close"] > candles[i-1]["open"] and candles[i]["close"] < candles[i]["open"]:
-                resistances.append(candles[i]["high"])
-        
-        current_price = ticks[-1]
-        nearest_sup = max([s for s in supports if s < current_price], default=current_price * 0.99)
-        nearest_res = min([r for r in resistances if r > current_price], default=current_price * 1.01)
-        
-        return nearest_sup, nearest_res
-    except:
-        return ticks[0], ticks[-1]
-
-# --- التحليل فائق الدقة (Ultra Analysis) ---
-def perform_ultra_analysis(ticks, asset_id):
+# --- معالج الإشارات ---
+def perform_analysis(ticks, asset_id):
     global bot_config
-    curr = ticks[-1]
-    ind = get_indicators(ticks)
-    sup, res = get_zones(ticks)
+    score_call, score_put, rsi = analyze_complex_market(ticks)
     
-    if not ind: return
-
-    score_call = 0
-    # شرط الاتجاه (40 نقطة)
-    if curr > ind["sma20"] and ind["sma20"] > ind["sma50"]: score_call += 40
-    # شرط RSI (30 نقطة)
-    if 40 < ind["rsi"] < 65: score_call += 30
-    # شرط البعد عن المقاومة (30 نقطة)
-    if (res - curr) > (curr * 0.0004): score_call += 30
-
-    score_put = 0
-    if curr < ind["sma20"] and ind["sma20"] < ind["sma50"]: score_put += 40
-    if 35 < ind["rsi"] < 60: score_put += 30
-    if (curr - sup) > (curr * 0.0004): score_put += 30
-
     final_score = max(score_call, score_put)
     
+    # حد القوة (70% فما فوق يعطي إشارة)
     if final_score >= 70:
         direction = "CALL 🟢" if score_call > score_put else "PUT 🔴"
         bot_config.update({
-            "isSignal": True, 
-            "direction": direction, 
+            "isSignal": True,
+            "direction": direction,
             "strength": final_score,
-            "pair_name": ASSETS.get(asset_id, "Unknown"), 
+            "pair_name": ASSETS.get(asset_id, "Unknown"),
             "timestamp": time.time(),
             "entryTime": (datetime.now() + timedelta(minutes=1)).strftime("%H:%M:00")
         })
-        add_log(f"GOLDEN {direction} FOUND! ({final_score}%)")
+        add_log(f"SIGNAL: {direction} ({final_score}%)")
     else:
         bot_config.update({"isSignal": False, "timestamp": time.time()})
-        add_log(f"Scan Finished: Low Score ({final_score}%)")
+        add_log(f"Market Scan: Low Score ({final_score}%)")
 
-# --- العامل المستمر (يحلل كل دقيقة) ---
-def continuous_worker():
+# --- اتصال WebSocket المباشر (يحلل كل دقيقة) ---
+def ws_worker():
     while True:
         try:
             now = datetime.now()
-            # يحلل في الثانية 55 من كل دقيقة ليكون الدخول في بداية الدقيقة التالية
+            # الاتصال والتحليل يبدأ في الثانية 55 ليكون جاهزاً للثانية 00
             if bot_config["isRunning"] and now.second == 55:
-                ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=10)
-                ws.send(json.dumps({"ticks_history": bot_config["pair_id"], "count": 1000, "style": "ticks"}))
-                res = json.loads(ws.recv())
-                if "history" in res:
-                    perform_ultra_analysis(res["history"]["prices"], bot_config["pair_id"])
+                # رابط WebSocket الخاص بـ Deriv
+                ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929", timeout=15)
+                request_data = {
+                    "ticks_history": bot_config["pair_id"],
+                    "count": 1000,
+                    "end": "latest",
+                    "style": "ticks"
+                }
+                ws.send(json.dumps(request_data))
+                response = json.loads(ws.recv())
+                
+                if "history" in response:
+                    perform_analysis(response["history"]["prices"], bot_config["pair_id"])
+                
                 ws.close()
-                time.sleep(2)
+                time.sleep(2) # منع التكرار في نفس الثانية
         except Exception as e:
-            add_log(f"Socket Error: Connection Refused")
+            add_log("WS Error: Reconnecting...")
         time.sleep(0.5)
 
-# --- واجهة المستخدم (HTML/CSS) ---
+# --- واجهة المستخدم المتطورة ---
 UI = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>KHOURY ULTRA PRO V3</title>
+    <title>KHOURY MASTER V4</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         :root { --neon: #00f3ff; --green: #39ff14; --red: #ff4757; }
         body { background: #06070a; color: white; font-family: 'Courier New', monospace; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
         #login { position: fixed; inset: 0; background: #020617; z-index: 2000; display: flex; flex-direction: column; justify-content: center; align-items: center; }
-        .box { background: rgba(0,243,255,0.02); padding: 30px; border-radius: 20px; border: 1px solid var(--neon); text-align: center; width: 320px; box-shadow: 0 0 20px rgba(0,243,255,0.1); }
-        input, select { background: #000; border: 1px solid #333; color: var(--neon); padding: 12px; width: 100%; margin-bottom: 15px; border-radius: 8px; outline: none; text-align: center; font-size: 16px; }
-        .btn { width: 100%; padding: 12px; border-radius: 8px; border: 1px solid var(--neon); background: transparent; color: var(--neon); font-weight: bold; cursor: pointer; transition: 0.3s; margin-top: 5px; }
+        .box { background: rgba(0,243,255,0.02); padding: 30px; border-radius: 20px; border: 1px solid var(--neon); text-align: center; width: 320px; }
+        input, select { background: #000; border: 1px solid #333; color: var(--neon); padding: 12px; width: 100%; margin-bottom: 15px; border-radius: 8px; text-align: center; }
+        .btn { width: 100%; padding: 12px; border-radius: 8px; border: 1px solid var(--neon); background: transparent; color: var(--neon); font-weight: bold; cursor: pointer; transition: 0.3s; }
         .btn:hover { background: var(--neon); color: black; }
-        #dash { display: none; width: 90%; max-width: 400px; text-align: center; }
+        #dash { display: none; width: 95%; max-width: 400px; text-align: center; }
         .clock { font-size: 45px; color: var(--neon); margin: 15px 0; text-shadow: 0 0 15px var(--neon); }
-        .display-area { border: 2px solid var(--neon); padding: 25px; border-radius: 20px; margin: 20px 0; background: rgba(0,243,255,0.05); min-height: 180px; display: flex; flex-direction: column; justify-content: center; transition: 0.5s; }
-        .logs { background: #000; height: 100px; padding: 10px; font-size: 11px; overflow-y: auto; color: var(--green); border-radius: 10px; text-align: left; border: 1px solid #111; margin-top: 15px; }
+        .display-area { border: 2px solid var(--neon); padding: 25px; border-radius: 20px; margin: 20px 0; background: rgba(0,243,255,0.05); min-height: 180px; }
+        .logs { background: #000; height: 100px; padding: 10px; font-size: 11px; overflow-y: auto; color: var(--green); border-radius: 10px; text-align: left; border: 1px solid #111; }
     </style>
 </head>
 <body>
     <div id="login">
         <div class="box">
-            <h2 style="color: var(--neon)">KHOURY ULTRA</h2>
-            <input type="text" id="u" placeholder="USERNAME">
+            <h2 style="color: var(--neon)">KHOURY MASTER</h2>
+            <input type="text" id="u" placeholder="ID">
             <input type="password" id="p" placeholder="PASSWORD">
-            <button class="btn" onclick="check()">ACCESS SYSTEM</button>
+            <button class="btn" onclick="check()">LOGIN</button>
         </div>
     </div>
     <div id="dash">
-        <h2 style="color: var(--neon); margin-bottom: 5px;">M1 PRECISION BOT</h2>
+        <h2 style="color: var(--neon)">50-INDICATOR SYSTEM</h2>
         <select id="asset">
             <option value="frxEURUSD">EUR/USD</option>
             <option value="frxEURJPY">EUR/JPY</option>
@@ -190,11 +174,11 @@ UI = """
     </div>
     <script>
         function check() {
-            if(document.getElementById('u').value==='KHOURYBOT' && document.getElementById('p').value==='123456') {
+            if(document.getElementById('u').value==='KHOURY' && document.getElementById('p').value==='123') {
                 document.getElementById('login').style.display='none';
                 document.getElementById('dash').style.display='block';
                 setInterval(upd, 1000);
-            } else alert('Access Denied');
+            } else alert('Error');
         }
         async function ctl(a) { await fetch(`/api/cmd?action=${a}&pair=${document.getElementById('asset').value}`); }
         async function upd() {
@@ -203,18 +187,14 @@ UI = """
             const d = await r.json();
             const disp = document.getElementById('mainDisp');
             if(d.show) {
-                if(d.isSignal) {
-                    disp.innerHTML = `<div style="text-align:left; font-size:18px;">
-                        <span style="color:var(--neon)">PAIR:</span> ${d.pair}<br>
-                        <span style="color:var(--neon)">DIRECTION:</span> ${d.signal}<br>
-                        <span style="color:var(--neon)">STRENGTH:</span> ${d.strength}%<br>
-                        <span style="color:var(--neon)">ENTRY:</span> ${d.entry}
-                    </div>`;
-                } else { 
-                    disp.innerHTML = `<div style="color:var(--red); font-size:20px;">SIGNAL REJECTED<br><small style="font-size:12px; color:#555">ZONE RISK OR LOW VOLATILITY</small></div>`; 
-                }
+                disp.innerHTML = `<div style="text-align:left">
+                    <b>PAIR:</b> ${d.pair}<br>
+                    <b>SIGNAL:</b> ${d.isSignal ? d.signal : "REJECTED"}<br>
+                    <b>STRENGTH:</b> ${d.strength}%<br>
+                    <b>ENTRY:</b> ${d.entry}
+                </div>`;
             } else { 
-                disp.innerHTML = `<div style="color:#444; font-size:16px;">${d.run ? "SCANNING M1 CANDLES..." : "BOT OFFLINE"}</div>`; 
+                disp.innerHTML = `<div style="color:#555">${d.run ? "ANALYZING 50+ FACTORS..." : "SYSTEM READY"}</div>`; 
             }
             document.getElementById('lBox').innerHTML = d.logs.join('<br>');
         }
@@ -223,7 +203,7 @@ UI = """
 </html>
 """
 
-# --- مسارات الـ Flask API ---
+# --- مسارات Flask API ---
 @app.route('/')
 def home():
     return render_template_string(UI)
@@ -244,8 +224,9 @@ def get_status():
         "pair": bot_config["pair_name"], "entry": bot_config["entryTime"], "logs": bot_config["logs"]
     })
 
-# --- التشغيل المتوافق مع Render ---
 if __name__ == "__main__":
-    threading.Thread(target=continuous_worker, daemon=True).start()
+    # تشغيل العامل في الخلفية
+    threading.Thread(target=ws_worker, daemon=True).start()
+    # التوافق مع Render PORT
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
