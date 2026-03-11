@@ -22,29 +22,26 @@ def log(uid, msg):
     t = datetime.now().strftime("%H:%M:%S")
     users.update_one({"_id": ObjectId(uid)}, {"$push": {"logs": {"$each": [f"[{t}] {msg}"], "$slice": -50}}})
 
-# --- استراتيجية الـ 13 شمعة المتصلة (53 تيك) ---
-def strategy_7_6(ticks):
-    if len(ticks) < 53: 
+# --- استراتيجية النمط المحدد (4 شموع متصلة) ---
+def strategy_pattern(ticks):
+    if len(ticks) < 17: 
         return "NONE", 0
     
-    up_candles = 0
-    down_candles = 0
-    
-    # كل شمعة 5 تيكات، لكنها تبدأ من تيك إغلاق السابقة (قفزة بـ 4 تيكات)
-    # 0-4 (ش1), 4-8 (ش2), 8-12 (ش3) ... حتى 48-52 (ش13)
-    for i in range(0, 52, 4): 
-        open_p = ticks[i]      # سعر الفتح
-        close_p = ticks[i+4]   # سعر الإغلاق
-        
-        if close_p > open_p:
-            up_candles += 1
-        elif close_p < open_p:
-            down_candles += 1
+    results = []
+    # تحليل 4 شموع متصلة (كل واحدة 5 تيكات)
+    for i in range(0, 16, 4):
+        open_p = ticks[i]
+        close_p = ticks[i+4]
+        if close_p > open_p: results.append("UP")
+        elif close_p < open_p: results.append("DOWN")
+        else: results.append("DOJI")
 
-    # الشرط الصارم: 7 مقابل 6 بالضبط
-    if up_candles == 7 and down_candles == 6:
+    # نمط الصعود: صاعدة -> هابطة -> صاعدة -> صاعدة
+    if results == ["UP", "DOWN", "UP", "UP"]:
         return "CALL", -0.5
-    if down_candles == 7 and up_candles == 6:
+    
+    # نمط الهبوط: هابطة -> صاعدة -> هابطة -> هابطة
+    if results == ["DOWN", "UP", "DOWN", "DOWN"]:
         return "PUT", 0.5
         
     return "NONE", 0
@@ -72,7 +69,7 @@ def check_contract(uid):
             })
         else:
             loss_seq = u["loss_seq"] + 1
-            new_stake = round(u["stake"] * 19, 2) # مضاعفة x19
+            new_stake = round(u["stake"] * 19, 2)
             log(uid, f"❌ LOSS. Martingale x19: {new_stake}$")
             users.update_one({"_id": ObjectId(uid)}, {
                 "$set": {"contract": None, "stake": new_stake, "loss_seq": loss_seq, "status": "analysing"},
@@ -91,20 +88,18 @@ def bot_worker(uid):
         if not u or u.get("status") == "stopped": break
         
         now = datetime.now()
-        # إدارة الحالة المعروضة في الواجهة
         if not u.get("contract") and u.get("status") != "stopped":
             if u.get("status") != "analysing":
                 users.update_one({"_id": ObjectId(uid)}, {"$set": {"status": "analysing"}})
 
-        # التحليل كل 10 ثوانٍ (0, 10, 20, 30, 40, 50)
+        # التحليل كل 10 ثوانٍ
         if now.second in [0, 10, 20, 30, 40, 50]:
             try:
                 ws = websocket.create_connection(DERIV_WS)
-                # نطلب 53 تيك لتغطية 13 شمعة متصلة
-                ws.send(json.dumps({"ticks_history": u["symbol"], "count": 53, "style": "ticks"}))
+                ws.send(json.dumps({"ticks_history": u["symbol"], "count": 20, "style": "ticks"}))
                 r = json.loads(ws.recv()); ws.close()
                 if "history" in r:
-                    sig, bar = strategy_7_6(r["history"]["prices"])
+                    sig, bar = strategy_pattern(r["history"]["prices"][-17:])
                     if sig != "NONE" and not u.get("contract"):
                         ws = websocket.create_connection(DERIV_WS)
                         ws.send(json.dumps({"authorize": u["token"]}))
@@ -114,15 +109,16 @@ def bot_worker(uid):
                             "parameters": {
                                 "amount": round(u["stake"], 2), "basis": "stake", 
                                 "contract_type": sig, "currency": auth["authorize"]["currency"], 
-                                "duration": 5, "duration_unit": "t", 
+                                "duration": 6,           # تم التعديل إلى 6
+                                "duration_unit": "t",    # تيكات
                                 "symbol": u["symbol"], "barrier": bar
                             }
                         }))
                         trade = json.loads(ws.recv()); ws.close()
                         if "buy" in trade:
-                            log(uid, f"🚀 ENTER {sig} (5 Ticks)")
+                            log(uid, f"🚀 PATTERN! {sig} (6 Ticks)")
                             users.update_one({"_id": ObjectId(uid)}, {"$set": {"contract": trade["buy"]["contract_id"], "status": "in trade"}})
-                time.sleep(2) # تأخير بسيط لمنع تكرار التحليل في نفس الثانية
+                time.sleep(2)
             except: pass
         
         time.sleep(0.5); check_contract(uid)
@@ -132,11 +128,11 @@ def bot_worker(uid):
 def home():
     return render_template_string("""
     <body style='background:#0b1016;color:white;text-align:center;font-family:sans-serif;padding:30px'>
-        <h2 style='color:#00f3ff'>KHOURY SNIPER V37</h2>
-        <div style='font-size:12px;color:#888;margin-bottom:20px'>Blue WS | Scan Every 10s | 5-Tick Duration | x19 Martingale</div>
+        <h2 style='color:#ffcc00'>KHOURY SNIPER V40</h2>
+        <div style='font-size:12px;color:#888;margin-bottom:20px'>Pattern Logic | 6-Tick Duration | Blue WS</div>
         
         <input id=email placeholder=Email style='padding:12px;border-radius:8px;border:none;width:250px'><br><br>
-        <button onclick="login()" style='padding:10px 25px;background:#238636;color:white;border:none;border-radius:8px;cursor:pointer;font-weight:bold'>LOGIN / CHECK</button>
+        <button onclick="login()" style='padding:10px 25px;background:#238636;color:white;border:none;border-radius:8px;cursor:pointer;font-weight:bold'>LOGIN</button>
         
         <div id=settings style='display:none;margin-top:25px'>
             <input id=token placeholder="API Token" type=password style='padding:10px;margin:5px;width:250px;border-radius:5px'><br>
@@ -151,7 +147,6 @@ def home():
                 <div style='color:#39ff14'>WINS: <span id=wins_count>0</span></div>
                 <div style='color:#ff4757'>LOSSES: <span id=loss_count>0</span></div>
             </div>
-            <div id=res style='color:#ff4757;font-weight:bold;margin-bottom:10px'></div>
             <div id=s style='font-size:18px;margin:10px 0;color:#fff'></div>
             <div id=l style='text-align:left;color:#39ff14;font-size:11px;margin-top:15px;height:180px;overflow:auto;background:#000;padding:12px;border-radius:10px'></div>
             <br>
@@ -192,7 +187,6 @@ def home():
                     document.getElementById('loss_count').innerText = d.losses;
                     document.getElementById('s').innerHTML=`Profit: <b>${d.profit.toFixed(2)}$</b> | Stake: <b>${d.stake.toFixed(2)}$</b>`;
                     document.getElementById('l').innerHTML=d.logs.reverse().join('<br>'); 
-                    document.getElementById('res').innerText=d.reason || "";
                 }
             }, 1000);
         </script>
