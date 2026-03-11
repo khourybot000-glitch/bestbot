@@ -24,8 +24,8 @@ def strategy_check(ticks):
         if c > o: res.append("U")
         elif c < o: res.append("D")
         else: res.append("S")
-    if res == ["U", "D", "U", "U"]: return "CALL"
-    if res == ["D", "U", "D", "D"]: return "PUT"
+    if res == ["U", "D", "U", "U"]: return "PUT"
+    if res == ["D", "U", "D", "D"]: return "CALL"
     return "NONE"
 
 # دالة مخصصة لفحص النتيجة بعد 16 ثانية من دخول الصفقة
