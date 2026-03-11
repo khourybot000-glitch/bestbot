@@ -81,7 +81,7 @@ def bot_worker(uid):
                             bar = "-0.01" if sig == "CALL" else "+0.01"
                             ws.send(json.dumps({
                                 "buy": 1, "price": round(u["stake"], 2),
-                                "parameters": {"amount": round(u["stake"], 2), "basis": "stake", "contract_type": sig, "currency": auth["authorize"]["currency"], "duration": 6, "duration_unit": "t", "symbol": u["symbol"], "barrier": bar}
+                                "parameters": {"amount": round(u["stake"], 2), "basis": "stake", "contract_type": sig, "currency": auth["authorize"]["currency"], "duration": 30, "duration_unit": "s", "symbol": u["symbol"], "barrier": bar}
                             }))
                             res = json.loads(ws.recv())
                             if "buy" in res:
