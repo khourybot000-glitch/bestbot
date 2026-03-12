@@ -16,27 +16,43 @@ def log(uid, msg):
     t = datetime.now().strftime("%H:%M:%S")
     users.update_one({"_id": ObjectId(uid)}, {"$push": {"logs": {"$each": [f"[{t}] {msg}"], "$slice": -50}}})
 
-def strategy_check(ticks):
-    if len(ticks) < 17: return "NONE"
-    recent = ticks[-17:]; res = []
-    for i in range(0, 16, 4):
-        o, c = recent[i], recent[i+4]
-        if c > o: res.append("U")
-        elif c < o: res.append("D")
-        else: res.append("S")
-    if res == ["U", "D", "U", "U"]: return "CALL"
-    if res == ["D", "U", "D", "D"]: return "PUT"
+def advanced_strategy(ticks):
+    if len(ticks) < 60: return "NONE"
+    
+    # تقسيم الـ 60 تيك لنصفين
+    first_half = ticks[-60:-30]  # من 60 إلى 30 تيك مضت
+    second_half = ticks[-30:]    # آخر 30 تيك
+    
+    fh_trend = "UP" if first_half[-1] > first_half[0] else "DOWN"
+    sh_trend = "UP" if second_half[-1] > second_half[0] else "DOWN"
+    
+    # تقسيم النصف الثاني (30 تيك) لـ 6 شموع (كل واحدة 5 تيكات)
+    up_candles = 0
+    down_candles = 0
+    for i in range(0, 30, 5):
+        candle = second_half[i:i+5]
+        if candle[-1] > candle[0]: up_candles += 1
+        elif candle[-1] < candle[0]: down_candles += 1
+    
+    # شرط الصعود (CALL): الأول هابط، الثاني صاعد، والزخم صاعد (>=4 شموع)
+    if fh_trend == "DOWN" and sh_trend == "UP" and up_candles >= 4:
+        return "CALL"
+        
+    # شرط الهبوط (PUT): الأول صاعد، الثاني هابط، والزخم هابط (>=4 شموع)
+    if fh_trend == "UP" and sh_trend == "DOWN" and down_candles >= 4:
+        return "PUT"
+        
     return "NONE"
 
 def delayed_check(uid, cid, token):
-    time.sleep(40) 
+    # الانتظار 16 ثانية لضمان انتهاء عقد الـ 6 تيكات
+    time.sleep(16)
     try:
         ws = websocket.create_connection(DERIV_WS, timeout=10)
         ws.send(json.dumps({"authorize": token}))
         ws.recv()
         ws.send(json.dumps({"proposal_open_contract": 1, "contract_id": cid}))
         r = json.loads(ws.recv()); ws.close()
-        
         c = r.get("proposal_open_contract")
         if c and c.get("is_sold"):
             p = float(c.get("profit", 0))
@@ -46,51 +62,47 @@ def delayed_check(uid, cid, token):
                 users.update_one({"_id": ObjectId(uid)}, {"$set": {"contract": None, "stake": u["base"], "loss_seq": 0, "status": "searching"}, "$inc": {"wins": 1, "profit": p}})
             else:
                 new_seq = u.get("loss_seq", 0) + 1
-                if new_seq >= 5: # التوقف بعد خسارتين متتاليتين
-                    log(uid, f"🛑 STOPPED: 5 consecutive losses reached.")
-                    users.update_one({"_id": ObjectId(uid)}, {"$set": {"contract": None, "status": "stopped", "reason": "2 losses reach"}})
+                if new_seq >= 2:
+                    log(uid, f"🛑 STOPPED: 2 consecutive losses.")
+                    users.update_one({"_id": ObjectId(uid)}, {"$set": {"contract": None, "status": "stopped", "reason": "Max losses reached"}})
                 else:
-                    ns = round(u["stake"] * 2.2, 2)
-                    log(uid, f"❌ LOSS. Martingale x19: {ns}$")
+                    ns = round(u["stake"] * 19, 2)
+                    log(uid, f"❌ LOSS. Martingale: {ns}$")
                     users.update_one({"_id": ObjectId(uid)}, {"$set": {"contract": None, "stake": ns, "loss_seq": new_seq, "status": "searching"}, "$inc": {"losses": 1, "profit": p}})
     except: pass
 
 def bot_worker(uid):
+    log(uid, "⏱️ Sniper Ready - Syncing to Second 00")
     while True:
         u = users.find_one({"_id": ObjectId(uid)})
         if not u or u.get("status") == "stopped": break
         
-        # التوقف عند الهدف الربحي
-        if u["profit"] >= u["tp"]:
-            log(uid, f"🏁 TP Reached: {u['tp']}$")
-            users.update_one({"_id": ObjectId(uid)}, {"$set": {"status": "stopped", "reason": "TP reached"}})
-            break
-
         now = datetime.now()
-        if now.second in [0, 10, 20, 30, 40, 50] and not u.get("contract"):
+        # التحليل حصراً عند الثانية 00
+        if now.second == 0 and not u.get("contract"):
             try:
                 ws = websocket.create_connection(DERIV_WS, timeout=7)
                 ws.send(json.dumps({"authorize": u["token"]}))
-                auth = json.loads(ws.recv())
-                if "authorize" in auth:
-                    ws.send(json.dumps({"ticks_history": u["symbol"], "count": 25, "end": "latest", "style": "ticks"}))
-                    hist = json.loads(ws.recv())
-                    if "history" in hist:
-                        sig = strategy_check(hist["history"]["prices"])
-                        if sig != "NONE":
-                            bar = "-0.01" if sig == "CALL" else "+0.01"
-                            ws.send(json.dumps({
-                                "buy": 1, "price": round(u["stake"], 2),
-                                "parameters": {"amount": round(u["stake"], 2), "basis": "stake", "contract_type": sig, "currency": auth["authorize"]["currency"], "duration": 30, "duration_unit": "s", "symbol": u["symbol"], "barrier": bar}
-                            }))
-                            res = json.loads(ws.recv())
-                            if "buy" in res:
-                                cid = res["buy"]["contract_id"]
-                                log(uid, f"🎯 {sig} @ {now.second}s | ID: {cid}")
-                                users.update_one({"_id": ObjectId(uid)}, {"$set": {"contract": cid, "status": "waiting"}})
-                                Thread(target=delayed_check, args=(uid, cid, u["token"])).start()
+                ws.recv()
+                ws.send(json.dumps({"ticks_history": u["symbol"], "count": 70, "end": "latest", "style": "ticks"}))
+                hist = json.loads(ws.recv())
+                
+                if "history" in hist:
+                    sig = advanced_strategy(hist["history"]["prices"])
+                    if sig != "NONE":
+                        bar = "-0.5" if sig == "CALL" else "+0.5"
+                        ws.send(json.dumps({
+                            "buy": 1, "price": round(u["stake"], 2),
+                            "parameters": {"amount": round(u["stake"], 2), "basis": "stake", "contract_type": sig, "currency": "USD", "duration": 6, "duration_unit": "t", "symbol": u["symbol"], "barrier": bar}
+                        }))
+                        res = json.loads(ws.recv())
+                        if "buy" in res:
+                            cid = res["buy"]["contract_id"]
+                            log(uid, f"🎯 {sig} Entry at 00s | Strength Check Passed")
+                            users.update_one({"_id": ObjectId(uid)}, {"$set": {"contract": cid, "status": "waiting"}})
+                            Thread(target=delayed_check, args=(uid, cid, u["token"])).start()
                 ws.close()
-                time.sleep(1.1)
+                time.sleep(2) # منع التكرار في نفس الثانية
             except: pass
         time.sleep(0.1)
 
@@ -99,29 +111,22 @@ def bot_worker(uid):
 def home():
     return render_template_string("""
     <body style='background:#0d1117;color:white;text-align:center;font-family:sans-serif;padding:30px'>
-        <h2 style='color:#58a6ff'>KHOURY SAFE SNIPER V49</h2>
-        <div id=login_div><input id=email_val placeholder="Email"><br><br><button onclick="login()">LOGIN</button></div>
-        <div id=settings style='display:none'><input id=token_val placeholder="Token"><br><br><input id=stake_val value=0.35><br><br><input id=tp_val value=10><br><br><button onclick="start()">START</button></div>
+        <h2 style='color:#58a6ff'>KHOURY SNIPER V51 - 00s ONLY</h2>
+        <div id=login_div><input id=ev placeholder="Email"><br><br><button onclick="login()">LOGIN</button></div>
+        <div id=settings style='display:none'><input id=tv placeholder="Token"><br><br><input id=sv value=0.35><br><br><input id=tpv value=10><br><br><button onclick="start()">START</button></div>
         <div id=stats style='display:none'>
-            <h3 id=status_txt></h3>
-            <p id=reason_txt style='color:red'></p>
-            <div id=s_info style='font-size:20px'></div>
-            <div id=logs_box style='text-align:left;background:black;height:250px;overflow:auto;margin:15px auto;max-width:400px;color:#39ff14;padding:10px'></div>
-            <button onclick="stop()">STOP</button>
-            <button onclick="reset()" style='margin-left:10px'>RESET / START NEW</button>
+            <h3 id=st></h3><p id=re style='color:red'></p>
+            <div id=info style='font-size:20px'></div>
+            <div id=lb style='text-align:left;background:black;height:250px;overflow:auto;margin:15px auto;max-width:400px;color:#39ff14;padding:10px;font-family:monospace'></div>
+            <button onclick="stop()">STOP</button><button onclick="reset()" style='margin-left:10px'>RESET</button>
         </div>
         <script>
             let email="";
-            async function login(){ email=document.getElementById('email_val').value; let r=await fetch('/check/'+email); let d=await r.json(); document.getElementById('login_div').style.display='none'; if(d.found && d.status!=='stopped'){ document.getElementById('stats').style.display='block'; startSync(); } else { document.getElementById('settings').style.display='block'; } }
-            async function start(){ let d={email:email,token:document.getElementById('token_val').value,symbol:'R_100',stake:parseFloat(document.getElementById('stake_val').value),tp:parseFloat(document.getElementById('tp_val').value)}; await fetch('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)}); document.getElementById('settings').style.display='none'; document.getElementById('stats').style.display='block'; startSync(); }
-            async function stop(){ await fetch('/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email})}); }
-            async function reset(){ if(confirm("Start new session?")){ await fetch('/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email})}); location.reload(); } }
-            function startSync(){ setInterval(async()=>{ let r=await fetch('/check/'+email); let d=await r.json(); if(d.found){ 
-                document.getElementById('status_txt').innerText="STATUS: "+d.status.toUpperCase(); 
-                document.getElementById('reason_txt').innerText=d.reason || "";
-                document.getElementById('s_info').innerText=`Profit: ${d.profit.toFixed(2)}$ | W: ${d.wins} L: ${d.losses}`; 
-                document.getElementById('logs_box').innerHTML=d.logs.reverse().join('<br>'); 
-            } },1000); }
+            async function login(){ email=document.getElementById('ev').value; let r=await fetch('/check/'+email); let d=await r.json(); document.getElementById('login_div').style.display='none'; if(d.found && d.status!=='stopped'){ document.getElementById('stats').style.display='block'; sync(); } else { document.getElementById('settings').style.display='block'; } }
+            async function start(){ let d={email:email,token:document.getElementById('tv').value,symbol:'R_100',stake:parseFloat(document.getElementById('sv').value),tp:parseFloat(document.getElementById('tpv').value)}; await fetch('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)}); document.getElementById('settings').style.display='none'; document.getElementById('stats').style.display='block'; sync(); }
+            async function stop(){ fetch('/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email})}); }
+            async function reset(){ if(confirm("Reset?")){ await fetch('/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email})}); location.reload(); } }
+            function sync(){ setInterval(async()=>{ let r=await fetch('/check/'+email); let d=await r.json(); if(d.found){ document.getElementById('st').innerText="STATUS: "+d.status.toUpperCase(); document.getElementById('re').innerText=d.reason||""; document.getElementById('info').innerText=`Profit: ${d.profit.toFixed(2)}$ | W: ${d.wins} L: ${d.losses}`; document.getElementById('lb').innerHTML=d.logs.reverse().join('<br>'); } },1000); }
         </script>
     </body>
     """)
@@ -139,10 +144,11 @@ def start():
     Thread(target=bot_worker, args=(str(uid),), daemon=True).start(); return jsonify({"ok": True})
 
 @app.route("/stop", methods=["POST"])
-def stop(): email = request.json["email"]; users.update_one({"email": email}, {"$set": {"status": "stopped", "reason": "Manual stop"}}); return jsonify({"ok": True})
+def stop(): email = request.json["email"]; users.update_one({"email": email}, {"$set": {"status": "stopped", "reason": "User stop"}}); return jsonify({"ok": True})
 
 @app.route("/reset", methods=["POST"])
 def reset(): email = request.json["email"]; users.delete_one({"email": email}); return jsonify({"ok": True})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+        
