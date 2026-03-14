@@ -16,14 +16,18 @@ def log(uid, msg):
     t = datetime.now().strftime("%H:%M:%S")
     users.update_one({"_id": ObjectId(uid)}, {"$push": {"logs": {"$each": [f"[{t}] {msg}"], "$slice": -50}}})
 
+def get_last_digit_from_price(price):
+    """تنسيق السعر لرقمين بعد الفاصلة وجلب الرقم الأخير"""
+    return int("{:.2f}".format(float(price))[-1])
+
 def get_least_digit(prices):
     """تحليل الرقم الأقل تكراراً في آخر 100 تيك"""
-    digits = [int(str(p).split('.')[-1][-1]) for p in prices]
+    digits = [get_last_digit_from_price(p) for p in prices]
     counts = {i: digits.count(i) for i in range(10)}
     return min(counts, key=counts.get)
 
 def delayed_check(uid, cid, token):
-    # الانتظار 6 ثوانٍ لضمان انتهاء عقد الـ 1 تيك وقطع الاتصال
+    """فتح اتصال جديد بعد 6 ثوانٍ لفحص النتيجة"""
     time.sleep(6)
     try:
         ws = websocket.create_connection(DERIV_WS, timeout=10)
@@ -37,7 +41,7 @@ def delayed_check(uid, cid, token):
             u = users.find_one({"_id": ObjectId(uid)})
             if p > 0:
                 log(uid, f"✅ WIN {p}$")
-                users.update_one({"_id": ObjectId(uid)}, {"$set": {"contract": None, "stake": u["base"], "loss_seq": 0, "status": "searching"}, "$inc": {"wins": 1, "profit": p}})
+                users.update_one({"_id": ObjectId(uid)}, {"$set": {"contract": None, "stake": u["base"], "status": "searching"}, "$inc": {"wins": 1, "profit": p}})
             else:
                 ns = round(u["stake"] * 14, 2)
                 log(uid, f"❌ LOSS. Martingale x14: {ns}$")
@@ -45,69 +49,58 @@ def delayed_check(uid, cid, token):
     except: pass
 
 def bot_worker(uid):
-    log(uid, "⏱️ Sniper Ready - Syncing to Second 00")
+    log(uid, "⏱️ Sniper Ready - Instant Entry at 00s")
     while True:
         u = users.find_one({"_id": ObjectId(uid)})
         if not u or u.get("status") == "stopped": break
         
         now = datetime.now()
-        # التحليل حصراً عند الثانية 00
+        # التنفيذ يبدأ عند الثانية 00 تماماً
         if now.second == 0 and not u.get("contract"):
             ws = None
             try:
                 ws = websocket.create_connection(DERIV_WS, timeout=10)
-                # جلب العملة والبيانات تلقائياً
+                # 1. جلب العملة والبيانات
                 ws.send(json.dumps({"authorize": u["token"]}))
                 auth_data = json.loads(ws.recv())
                 currency = auth_data.get("authorize", {}).get("currency", "USD")
                 
-                # جلب 100 تيك للتحليل
+                # 2. تحليل الـ 100 تيك لجلب الرقم المستهدف
                 ws.send(json.dumps({"ticks_history": u["symbol"], "count": 100, "end": "latest", "style": "ticks"}))
                 hist = json.loads(ws.recv())
                 
                 if "history" in hist:
                     target_digit = get_least_digit(hist["history"]["prices"])
-                    log(uid, f"📊 Analysis: Least Digit [{target_digit}] | Waiting...")
+                    log(uid, f"📊 Target: {target_digit} | Entering Immediately...")
                     
-                    # الاشتراك في التيكات لانتظار ظهور الرقم
-                    ws.send(json.dumps({"ticks": u["symbol"]}))
-                    
-                    start_wait = time.time()
-                    while True:
-                        # إذا تأخر الرقم أكثر من 50 ثانية نخرج لنبدأ تحليل جديد في الدقيقة التالية
-                        if time.time() - start_wait > 50: break
+                    # 3. دخول الصفقة فوراً بعد التحليل
+                    ws.send(json.dumps({
+                        "buy": 1, "price": round(u["stake"], 2),
+                        "parameters": {
+                            "amount": round(u["stake"], 2), "basis": "stake", 
+                            "contract_type": "DIGITDIFF", "currency": currency, 
+                            "duration": 1, "duration_unit": "t", 
+                            "symbol": u["symbol"], "barrier": str(target_digit)
+                        }
+                    }))
+                    res = json.loads(ws.recv())
+                    if "buy" in res:
+                        cid = res["buy"]["contract_id"]
+                        log(uid, f"🎯 Trade Executed! (Digit: {target_digit})")
+                        users.update_one({"_id": ObjectId(uid)}, {"$set": {"contract": cid, "status": "waiting"}})
                         
-                        msg = json.loads(ws.recv())
-                        if "tick" in msg:
-                            last_digit = int(str(msg["tick"]["quote"])[-1])
-                            if last_digit == target_digit:
-                                # دخول الصفقة DIGITDIFF
-                                ws.send(json.dumps({
-                                    "buy": 1, "price": round(u["stake"], 2),
-                                    "parameters": {
-                                        "amount": round(u["stake"], 2), "basis": "stake", 
-                                        "contract_type": "DIGITDIFF", "currency": currency, 
-                                        "duration": 1, "duration_unit": "t", 
-                                        "symbol": u["symbol"], "barrier": str(target_digit)
-                                    }
-                                }))
-                                res = json.loads(ws.recv())
-                                if "buy" in res:
-                                    cid = res["buy"]["contract_id"]
-                                    log(uid, f"🎯 Digit {target_digit} Spotted - Entry Taken")
-                                    users.update_one({"_id": ObjectId(uid)}, {"$set": {"contract": cid, "status": "waiting"}})
-                                    
-                                    # قطع الاتصال فوراً بعد الشراء كما طلبت
-                                    ws.close(); ws = None
-                                    Thread(target=delayed_check, args=(uid, cid, u["token"])).start()
-                                    break
+                        # قطع الاتصال فوراً
+                        ws.close(); ws = None
+                        Thread(target=delayed_check, args=(uid, cid, u["token"])).start()
+                
                 if ws: ws.close()
-                time.sleep(2) # منع التكرار في نفس الثانية 00
+                time.sleep(2) # منع التكرار خلال الثانية 00
             except: 
                 if ws: ws.close()
+        
         time.sleep(0.1)
 
-# --- UI (نفس الـ HTML الذي أرسلته أنت دون تعديل) ---
+# --- UI (نفس التنسيق الأصلي) ---
 @app.route("/")
 def home():
     return render_template_string("""
