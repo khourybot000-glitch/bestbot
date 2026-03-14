@@ -44,8 +44,13 @@ def check_result(token, cid):
 def bot_worker(uid):
     while True:
         u = users.find_one({"_id": ObjectId(uid)})
-        if not u or u.get("status") == "stopped": break
+        if not u or u.get("status") == "STOPPED": break
         
+        # تحقق من الـ TP
+        if u.get("profit", 0) >= u.get("tp", 1000):
+            set_status(uid, "STOPPED")
+            break
+
         if datetime.now().second == 0 and not u.get("contract"):
             try:
                 set_status(uid, "ANALYZING")
@@ -73,6 +78,7 @@ def bot_worker(uid):
                     profit = check_result(u["token"], cid)
                     if profit > 0:
                         users.update_one({"_id": ObjectId(uid)}, {"$set": {"stake": u["base"]}, "$inc": {"wins": 1, "profit": profit}})
+                        set_status(uid, "WAITING")
                     else:
                         users.update_one({"_id": ObjectId(uid)}, {"$inc": {"losses": 1, "profit": -u["stake"]}})
                         new_stake = round(u["stake"] * 19, 2)
@@ -81,8 +87,10 @@ def bot_worker(uid):
                         profit2 = check_result(u["token"], cid2)
                         if profit2 > 0:
                             users.update_one({"_id": ObjectId(uid)}, {"$set": {"stake": u["base"]}, "$inc": {"wins": 1, "profit": profit2}})
+                            set_status(uid, "WAITING")
                         else:
-                            users.update_one({"_id": ObjectId(uid)}, {"$set": {"status": "stopped"}, "$inc": {"losses": 1, "profit": -new_stake}})
+                            users.update_one({"_id": ObjectId(uid)}, {"$inc": {"losses": 1, "profit": -new_stake}})
+                            set_status(uid, "STOPPED")
                             break
             except: pass
         time.sleep(0.5)
@@ -93,7 +101,7 @@ def home():
     <body style='background:#0d1117;color:white;text-align:center;font-family:sans-serif;padding:30px'>
         <h2 style='color:#58a6ff'>KHOURY SNIPER - V51</h2>
         <div id=login_div><input id=ev placeholder="Email"><br><br><button onclick="login()">LOGIN</button></div>
-        <div id=settings style='display:none'><input id=tv placeholder="Token"><br><br><input id=sv value=0.35><br><br><button onclick="start()">START</button></div>
+        <div id=settings style='display:none'><input id=tv placeholder="Token"><br><br><input id=sv value=0.35><br><br><input id=tpv value=10 placeholder="TP"><br><br><button onclick="start()">START</button></div>
         <div id=stats style='display:none'>
             <div style='font-size:30px; font-weight:bold; color:yellow' id=st></div>
             <div id=info style='font-size:20px; margin:20px 0'></div>
@@ -102,9 +110,9 @@ def home():
         <script>
             let email="";
             async function login(){ email=document.getElementById('ev').value; let r=await fetch('/check/'+email); let d=await r.json(); document.getElementById('login_div').style.display='none'; if(d.found){ document.getElementById('stats').style.display='block'; sync(); } else { document.getElementById('settings').style.display='block'; } }
-            async function start(){ let d={email:email,token:document.getElementById('tv').value,symbol:'R_100',stake:parseFloat(document.getElementById('sv').value)}; await fetch('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)}); document.getElementById('settings').style.display='none'; document.getElementById('stats').style.display='block'; sync(); }
-            async function stop(){ fetch('/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email})}); location.reload(); }
-            async function reset(){ if(confirm("Reset?")){ await fetch('/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email})}); location.reload(); } }
+            async function start(){ let d={email:email,token:document.getElementById('tv').value,symbol:'R_100',stake:parseFloat(document.getElementById('sv').value),tp:parseFloat(document.getElementById('tpv').value)}; await fetch('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)}); document.getElementById('settings').style.display='none'; document.getElementById('stats').style.display='block'; sync(); }
+            async function stop(){ fetch('/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email})}); }
+            async function reset(){ if(confirm("Are you sure? This will delete all session data.")){ await fetch('/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email})}); location.reload(); } }
             function sync(){ setInterval(async()=>{ let r=await fetch('/check/'+email); let d=await r.json(); if(d.found){ document.getElementById('st').innerText=d.status.toUpperCase(); document.getElementById('info').innerText=`Profit: ${d.profit.toFixed(2)}$ | W: ${d.wins} L: ${d.losses}`; } },1000); }
         </script>
     </body>
@@ -119,11 +127,11 @@ def check_email(email):
 @app.route("/start", methods=["POST"])
 def start():
     d = request.json; users.delete_one({"email": d["email"]})
-    users.insert_one({"email": d["email"], "token": d["token"], "symbol": d["symbol"], "base": d["stake"], "stake": d["stake"], "profit": 0.0, "wins": 0, "losses": 0, "status": "ANALYZING"})
+    users.insert_one({"email": d["email"], "token": d["token"], "symbol": d["symbol"], "base": d["stake"], "stake": d["stake"], "tp": d["tp"], "profit": 0.0, "wins": 0, "losses": 0, "status": "ANALYZING"})
     Thread(target=bot_worker, args=(str(users.find_one({"email": d["email"]})["_id"]),), daemon=True).start(); return jsonify({"ok": True})
 
 @app.route("/stop", methods=["POST"])
-def stop(): email = request.json["email"]; users.update_one({"email": email}, {"$set": {"status": "stopped"}}); return jsonify({"ok": True})
+def stop(): email = request.json["email"]; users.update_one({"email": email}, {"$set": {"status": "STOPPED"}}); return jsonify({"ok": True})
 
 @app.route("/reset", methods=["POST"])
 def reset(): email = request.json["email"]; users.delete_one({"email": email}); return jsonify({"ok": True})
