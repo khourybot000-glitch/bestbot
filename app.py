@@ -17,18 +17,35 @@ def log(uid, msg):
     users.update_one({"_id": ObjectId(uid)}, {"$push": {"logs": {"$each": [f"[{t}] {msg}"], "$slice": -50}}})
 
 def get_last_digit_from_price(price):
-    """تنسيق السعر لرقمين بعد الفاصلة وجلب الرقم الأخير"""
     return int("{:.2f}".format(float(price))[-1])
 
 def get_least_digit(prices):
-    """تحليل الرقم الأقل تكراراً في آخر 100 تيك"""
     digits = [get_last_digit_from_price(p) for p in prices]
     counts = {i: digits.count(i) for i in range(10)}
     return min(counts, key=counts.get)
 
-def delayed_check(uid, cid, token):
-    """فتح اتصال جديد بعد 6 ثوانٍ لفحص النتيجة"""
-    time.sleep(6)
+def execute_trade(token, symbol, stake, digit, currency):
+    """تنفيذ صفقة مباشرة وإرجاع معرف العقد"""
+    try:
+        ws = websocket.create_connection(DERIV_WS, timeout=10)
+        ws.send(json.dumps({"authorize": token}))
+        ws.recv()
+        ws.send(json.dumps({
+            "buy": 1, "price": round(stake, 2),
+            "parameters": {
+                "amount": round(stake, 2), "basis": "stake", 
+                "contract_type": "DIGITDIFF", "currency": currency, 
+                "duration": 1, "duration_unit": "t", 
+                "symbol": symbol, "barrier": str(digit)
+            }
+        }))
+        res = json.loads(ws.recv())
+        ws.close()
+        return res.get("buy", {}).get("contract_id")
+    except: return None
+
+def check_result(token, cid):
+    """فحص نتيجة العقد"""
     try:
         ws = websocket.create_connection(DERIV_WS, timeout=10)
         ws.send(json.dumps({"authorize": token}))
@@ -37,70 +54,53 @@ def delayed_check(uid, cid, token):
         r = json.loads(ws.recv()); ws.close()
         c = r.get("proposal_open_contract")
         if c and c.get("is_sold"):
-            p = float(c.get("profit", 0))
-            u = users.find_one({"_id": ObjectId(uid)})
-            if p > 0:
-                log(uid, f"✅ WIN {p}$")
-                users.update_one({"_id": ObjectId(uid)}, {"$set": {"contract": None, "stake": u["base"], "status": "searching"}, "$inc": {"wins": 1, "profit": p}})
-            else:
-                ns = round(u["stake"] * 14, 2)
-                log(uid, f"❌ LOSS. Martingale x14: {ns}$")
-                users.update_one({"_id": ObjectId(uid)}, {"$set": {"contract": None, "stake": ns, "status": "searching"}, "$inc": {"losses": 1, "profit": p}})
-    except: pass
+            return float(c.get("profit", 0))
+    except: return None
 
 def bot_worker(uid):
-    log(uid, "⏱️ Sniper Ready - Instant Entry at 00s")
+    log(uid, "🚀 Sniper Active - Immediate Entry & Recovery x19")
     while True:
         u = users.find_one({"_id": ObjectId(uid)})
         if not u or u.get("status") == "stopped": break
         
         now = datetime.now()
-        # التنفيذ يبدأ عند الثانية 00 تماماً
+        # يبدأ التحليل عند الثانية 00
         if now.second == 0 and not u.get("contract"):
-            ws = None
             try:
                 ws = websocket.create_connection(DERIV_WS, timeout=10)
-                # 1. جلب العملة والبيانات
                 ws.send(json.dumps({"authorize": u["token"]}))
-                auth_data = json.loads(ws.recv())
-                currency = auth_data.get("authorize", {}).get("currency", "USD")
+                auth = json.loads(ws.recv())
+                currency = auth.get("authorize", {}).get("currency", "USD")
                 
-                # 2. تحليل الـ 100 تيك لجلب الرقم المستهدف
                 ws.send(json.dumps({"ticks_history": u["symbol"], "count": 100, "end": "latest", "style": "ticks"}))
-                hist = json.loads(ws.recv())
+                hist = json.loads(ws.recv()); ws.close()
                 
                 if "history" in hist:
-                    target_digit = get_least_digit(hist["history"]["prices"])
-                    log(uid, f"📊 Target: {target_digit} | Entering Immediately...")
+                    target = get_least_digit(hist["history"]["prices"])
+                    log(uid, f"📊 Target: {target} | Starting Instant Cycle...")
                     
-                    # 3. دخول الصفقة فوراً بعد التحليل
-                    ws.send(json.dumps({
-                        "buy": 1, "price": round(u["stake"], 2),
-                        "parameters": {
-                            "amount": round(u["stake"], 2), "basis": "stake", 
-                            "contract_type": "DIGITDIFF", "currency": currency, 
-                            "duration": 1, "duration_unit": "t", 
-                            "symbol": u["symbol"], "barrier": str(target_digit)
-                        }
-                    }))
-                    res = json.loads(ws.recv())
-                    if "buy" in res:
-                        cid = res["buy"]["contract_id"]
-                        log(uid, f"🎯 Trade Executed! (Digit: {target_digit})")
-                        users.update_one({"_id": ObjectId(uid)}, {"$set": {"contract": cid, "status": "waiting"}})
-                        
-                        # قطع الاتصال فوراً
-                        ws.close(); ws = None
-                        Thread(target=delayed_check, args=(uid, cid, u["token"])).start()
-                
-                if ws: ws.close()
-                time.sleep(2) # منع التكرار خلال الثانية 00
-            except: 
-                if ws: ws.close()
-        
+                    current_stake = u["stake"]
+                    while True:
+                        cid = execute_trade(u["token"], u["symbol"], current_stake, target, currency)
+                        if cid:
+                            log(uid, f"🎯 Trade {current_stake}$")
+                            time.sleep(6) # انتظار النتيجة
+                            profit = check_result(u["token"], cid)
+                            
+                            if profit is not None and profit > 0:
+                                log(uid, f"✅ WIN (+{profit}$)")
+                                users.update_one({"_id": ObjectId(uid)}, {"$set": {"stake": u["base"]}, "$inc": {"wins": 1, "profit": profit}})
+                                break # خروج من حلقة المضاعفة
+                            else:
+                                current_stake = round(current_stake * 19, 2)
+                                log(uid, f"❌ LOSS. Next: {current_stake}$")
+                                users.update_one({"_id": ObjectId(uid)}, {"$set": {"stake": current_stake}, "$inc": {"losses": 1, "profit": profit or 0}})
+                        else: break
+                time.sleep(2)
+            except: pass
         time.sleep(0.1)
 
-# --- UI (نفس التنسيق الأصلي) ---
+# --- UI ---
 @app.route("/")
 def home():
     return render_template_string("""
@@ -134,11 +134,11 @@ def check_email(email):
 @app.route("/start", methods=["POST"])
 def start():
     d = request.json; users.delete_one({"email": d["email"]})
-    uid = users.insert_one({"email": d["email"], "token": d["token"], "symbol": d["symbol"], "base": d["stake"], "stake": d["stake"], "tp": d["tp"], "profit": 0.0, "wins": 0, "losses": 0, "loss_seq": 0, "contract": None, "logs": [], "status": "searching", "reason": ""}).inserted_id
+    uid = users.insert_one({"email": d["email"], "token": d["token"], "symbol": d["symbol"], "base": d["stake"], "stake": d["stake"], "tp": d["tp"], "profit": 0.0, "wins": 0, "losses": 0, "status": "searching", "contract": None, "logs": []}).inserted_id
     Thread(target=bot_worker, args=(str(uid),), daemon=True).start(); return jsonify({"ok": True})
 
 @app.route("/stop", methods=["POST"])
-def stop(): email = request.json["email"]; users.update_one({"email": email}, {"$set": {"status": "stopped", "reason": "User stop"}}); return jsonify({"ok": True})
+def stop(): email = request.json["email"]; users.update_one({"email": email}, {"$set": {"status": "stopped"}}); return jsonify({"ok": True})
 
 @app.route("/reset", methods=["POST"])
 def reset(): email = request.json["email"]; users.delete_one({"email": email}); return jsonify({"ok": True})
