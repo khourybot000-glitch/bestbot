@@ -76,12 +76,12 @@ def bot_worker(uid):
 
                 # الشرط الأول: كلاهما أصغر من 3 -> Over 1
                 if all(d < 3 for d in digits):
-                    target_type = "DIGITOVER"
-                    barrier = 1
-                # الشرط الثاني: كلاهما أكبر من 6 -> Under 8
-                elif all(d > 6 for d in digits):
                     target_type = "DIGITUNDER"
                     barrier = 8
+                # الشرط الثاني: كلاهما أكبر من 6 -> Under 8
+                elif all(d > 6 for d in digits):
+                    target_type = "DIGITOVER"
+                    barrier = 1
 
                 if target_type:
                     set_status(uid, f"IN TRADE ({target_type})")
