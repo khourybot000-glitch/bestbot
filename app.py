@@ -16,9 +16,10 @@ def set_status(uid, status):
     users.update_one({"_id": ObjectId(uid)}, {"$set": {"status": status}})
 
 def get_last_digit(price):
-    return int("{:.2f}".format(float(price))[-1])
+    s_price = "{:.2f}".format(float(price))
+    return int(s_price[-1])
 
-def execute_over_contract(token, symbol, stake, currency):
+def execute_contract(token, symbol, stake, c_type, barrier, currency):
     try:
         ws = websocket.create_connection(DERIV_WS, timeout=10)
         ws.send(json.dumps({"authorize": token})); ws.recv()
@@ -26,9 +27,9 @@ def execute_over_contract(token, symbol, stake, currency):
             "buy": 1, "price": round(stake, 2),
             "parameters": {
                 "amount": round(stake, 2), "basis": "stake",
-                "contract_type": "DIGITOVER", "currency": currency,
+                "contract_type": c_type, "currency": currency,
                 "duration": 1, "duration_unit": "t",
-                "symbol": symbol, "barrier": "1"
+                "symbol": symbol, "barrier": str(barrier)
             }
         }))
         res = json.loads(ws.recv()); ws.close()
@@ -57,30 +58,39 @@ def bot_worker(uid):
             set_status(uid, "STOPPED")
             break
 
-        if u.get("profit", 0) >= u.get("tp", 1000):
-            set_status(uid, "STOPPED")
-            break
-
         now = datetime.now()
         if now.second == 0:
             try:
                 set_status(uid, "ANALYZING")
                 ws = websocket.create_connection(DERIV_WS, timeout=10)
                 ws.send(json.dumps({"authorize": u["token"]})); ws.recv()
-                ws.send(json.dumps({"ticks_history": u["symbol"], "count": 3, "end": "latest", "style": "ticks"}))
+                ws.send(json.dumps({"ticks_history": u["symbol"], "count": 2, "end": "latest", "style": "ticks"}))
                 hist = json.loads(ws.recv()); ws.close()
+                
                 prices = hist["history"]["prices"]
                 digits = [get_last_digit(p) for p in prices]
-                
-                if all(d < 4 for d in digits):
-                    set_status(uid, "IN TRADE")
+                print(f"Time 00s | Digits: {digits}")
+
+                target_type = None
+                barrier = None
+
+                # الشرط الأول: كلاهما أصغر من 3 -> Over 1
+                if all(d < 3 for d in digits):
+                    target_type = "DIGITOVER"
+                    barrier = 1
+                # الشرط الثاني: كلاهما أكبر من 6 -> Under 8
+                elif all(d > 6 for d in digits):
+                    target_type = "DIGITUNDER"
+                    barrier = 8
+
+                if target_type:
+                    set_status(uid, f"IN TRADE ({target_type})")
                     current_stake = u.get("stake")
-                    cid = execute_over_contract(u["token"], u["symbol"], current_stake, "USD")
+                    cid = execute_contract(u["token"], u["symbol"], current_stake, target_type, barrier, "USD")
                     
                     if cid:
-                        time.sleep(6) # انتظار النتيجة (6 ثواني كافية لتيك واحدة)
+                        time.sleep(6)
                         profit = check_result(u["token"], cid)
-                        
                         if profit is not None:
                             if profit > 0:
                                 consecutive_losses = 0
@@ -88,19 +98,17 @@ def bot_worker(uid):
                                     "$inc": {"wins": 1, "profit": profit},
                                     "$set": {"stake": u["base_stake"]}
                                 })
-                                set_status(uid, "WAITING")
                             else:
                                 consecutive_losses += 1
-                                new_stake = current_stake * 9
                                 users.update_one({"_id": ObjectId(uid)}, {
                                     "$inc": {"losses": 1, "profit": -current_stake},
-                                    "$set": {"stake": new_stake}
+                                    "$set": {"stake": current_stake * 9}
                                 })
-                                set_status(uid, "WAITING")
-                else:
-                    set_status(uid, "WAITING")
+                
+                set_status(uid, "WAITING")
                 time.sleep(1.5)
-            except: pass
+            except:
+                set_status(uid, "WAITING")
         time.sleep(0.5)
 
 @app.route("/")
@@ -124,25 +132,13 @@ def home():
             let email="";
             async function login(){ email=document.getElementById('ev').value; let r=await fetch('/check/'+email); let d=await r.json(); document.getElementById('login_div').style.display='none'; if(d.found){ document.getElementById('stats').style.display='block'; sync(); } else { document.getElementById('settings').style.display='block'; } }
             async function start(){ 
-                let d={
-                    email:email, token:document.getElementById('tv').value,
-                    symbol:'R_100', stake:parseFloat(document.getElementById('sv').value),
-                    tp:parseFloat(document.getElementById('tpv').value)
-                }; 
+                let d={email:email, token:document.getElementById('tv').value, symbol:'R_100', stake:parseFloat(document.getElementById('sv').value), tp:parseFloat(document.getElementById('tpv').value)}; 
                 await fetch('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)}); 
                 document.getElementById('settings').style.display='none'; document.getElementById('stats').style.display='block'; sync(); 
             }
             async function stop(){ fetch('/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email})}); location.reload(); }
             async function reset(){ if(confirm("Reset?")){ await fetch('/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email})}); location.reload(); } }
-            function sync(){ 
-                setInterval(async()=>{ 
-                    let r=await fetch('/check/'+email); let d=await r.json(); 
-                    if(d.found){ 
-                        document.getElementById('st').innerText=d.status.toUpperCase(); 
-                        document.getElementById('info').innerText=`Profit: ${d.profit.toFixed(2)}$ | W: ${d.wins} L: ${d.losses}`; 
-                    } 
-                },1000); 
-            }
+            function sync(){ setInterval(async()=>{ let r=await fetch('/check/'+email); let d=await r.json(); if(d.found){ document.getElementById('st').innerText=d.status.toUpperCase(); document.getElementById('info').innerText=`Profit: ${d.profit.toFixed(2)}$ | W: ${d.wins} L: ${d.losses}`; } },1000); }
         </script>
     </body>
     """)
@@ -156,11 +152,7 @@ def check_email(email):
 @app.route("/start", methods=["POST"])
 def start():
     d = request.json; users.delete_one({"email": d["email"]})
-    uid = users.insert_one({
-        "email": d["email"], "token": d["token"], "symbol": d["symbol"], 
-        "base_stake": d["stake"], "stake": d["stake"], "tp": d["tp"], 
-        "profit": 0.0, "wins": 0, "losses": 0, "status": "WAITING"
-    }).inserted_id
+    uid = users.insert_one({"email": d["email"], "token": d["token"], "symbol": d["symbol"], "base_stake": d["stake"], "stake": d["stake"], "tp": d["tp"], "profit": 0.0, "wins": 0, "losses": 0, "status": "WAITING"}).inserted_id
     Thread(target=bot_worker, args=(str(uid),), daemon=True).start(); return jsonify({"ok": True})
 
 @app.route("/stop", methods=["POST"])
