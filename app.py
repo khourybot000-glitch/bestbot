@@ -54,7 +54,7 @@ def bot_worker(uid):
                     abs_diff = abs(diff)
 
                     # شرط الدخول: فرق 0.2 أو أكثر
-                    if abs_diff >= 0.2:
+                    if abs_diff >= 0.15:
                         direction = "CALL" if diff > 0 else "PUT"
                         barrier = "-0.7" if direction == "CALL" else "+0.7"
                         
