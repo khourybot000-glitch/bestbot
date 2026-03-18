@@ -56,7 +56,7 @@ def bot_worker(uid):
                     current_dir = "CALL" if diff > 0 else "PUT"
 
                     if not pending_direction:
-                        if abs(diff) >= 0.7:
+                        if abs(diff) >= 0.5:
                             pending_direction = current_dir
                             set_status(uid, f"SIGNAL: {current_dir} (WAIT)")
                         else:
