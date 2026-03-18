@@ -8,6 +8,7 @@ from bson.objectid import ObjectId
 app = Flask(__name__)
 
 # --- MongoDB Configuration ---
+# ملاحظة: تأكد من أن هذا الرابط يعمل وصحيح في حسابك على MongoDB Atlas
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 client = MongoClient(MONGO_URI)
 db = client["KHOURY_BOT"]
@@ -23,20 +24,22 @@ def get_ws_connection(token):
         ws.send(json.dumps({"authorize": token}))
         ws.recv()
         return ws
-    except: return None
+    except Exception as e:
+        print(f"Connection Error: {e}")
+        return None
 
 def bot_worker(uid):
     last_price = None
     
     while True:
         u = users.find_one({"_id": ObjectId(uid)})
-        # التوقف إذا كانت الحالة STOPPED أو إذا خسرنا صفقة سابقاً
-        if not u or "STOPPED" in u.get("status"): break
+        if not u or "STOPPED" in u.get("status"):
+            break
 
-        # 1. فتح اتصال سريع لمراقبة التيك الحالي
+        # فتح اتصال سريع لمراقبة التيك
         ws = get_ws_connection(u["token"])
         if not ws:
-            time.sleep(0.5)
+            time.sleep(1)
             continue
 
         try:
@@ -50,22 +53,26 @@ def bot_worker(uid):
                     diff = current_price - last_price
                     abs_diff = abs(diff)
 
-                    # الشرط المطلوب: فرق 0.2 أو أكثر
+                    # شرط الدخول: فرق 0.2 أو أكثر
                     if abs_diff >= 0.2:
                         direction = "CALL" if diff > 0 else "PUT"
                         barrier = "-0.7" if direction == "CALL" else "+0.7"
                         
                         set_status(uid, f"SPIKE {diff:.2f}! ENTERING {direction}")
-                        print(f"🚀 Detected Spike: {diff:.2f}. Executing {direction} with Barrier {barrier}")
 
-                        # 2. تنفيذ الصفقة (6 تيكات)
+                        # تنفيذ الصفقة (6 تيكات)
                         buy_req = {
-                            "buy": 1, "price": float(u["stake"]),
+                            "buy": 1, 
+                            "price": float(u["stake"]),
                             "parameters": {
-                                "amount": float(u["stake"]), "basis": "stake",
-                                "contract_type": direction, "currency": "USD",
-                                "duration": 6, "duration_unit": "t",
-                                "symbol": u["symbol"], "barrier": barrier
+                                "amount": float(u["stake"]), 
+                                "basis": "stake",
+                                "contract_type": direction, 
+                                "currency": "USD",
+                                "duration": 6, 
+                                "duration_unit": "t",
+                                "symbol": u["symbol"], 
+                                "barrier": barrier
                             }
                         }
                         ws.send(json.dumps(buy_req))
@@ -73,13 +80,11 @@ def bot_worker(uid):
                         
                         if "buy" in buy_res:
                             cid = buy_res["buy"]["contract_id"]
-                            # 3. قطع الاتصال فوراً لتجنب التشويش
-                            ws.close()
+                            ws.close() # قطع الاتصال فوراً
                             
-                            # 4. انتظار انتهاء الـ 6 تيكات (حوالي 12 ثانية للأمان)
-                            time.sleep(12) 
+                            time.sleep(12) # انتظار انتهاء 6 تيكات
                             
-                            # 5. فتح اتصال جديد لفحص النتيجة
+                            # فتح اتصال جديد لفحص النتيجة
                             ws_res = get_ws_connection(u["token"])
                             if ws_res:
                                 ws_res.send(json.dumps({"proposal_open_contract": 1, "contract_id": cid}))
@@ -92,78 +97,181 @@ def bot_worker(uid):
                                         users.update_one({"_id": ObjectId(uid)}, {
                                             "$inc": {"wins": 1, "profit": profit}
                                         })
-                                        set_status(uid, "WIN! SCANNING TICKS...")
+                                        set_status(uid, "WIN! SCANNING...")
                                     else:
-                                        # الخسارة تعني التوقف النهائي
+                                        # التوقف بعد خسارة واحدة كما طلبت
                                         users.update_one({"_id": ObjectId(uid)}, {
                                             "$inc": {"losses": 1, "profit": -float(u["stake"])}
                                         })
                                         set_status(uid, "STOPPED (LOSS DETECTED)")
                                         ws_res.close()
-                                        break # إنهاء الخيط (Thread)
+                                        break 
                                 ws_res.close()
                         else:
-                            print(f"❌ Buy Error: {buy_res.get('error', {}).get('message')}")
+                            set_status(uid, f"ERROR: {buy_res.get('error', {}).get('message')}")
                 
                 last_price = current_price
             
-            if ws: ws.close() # غلق الاتصال الدوري
-        except Exception as e:
-            print(f"❌ Loop Error: {e}")
+            if ws: ws.close()
+        except:
             if ws: ws.close()
         
-        time.sleep(0.1) # سرعة عالية جداً في المراقبة
+        time.sleep(0.5)
 
-# --- Flask Web Interface ---
+# --- Flask Interface ---
 @app.route("/")
 def home():
     return render_template_string("""
-    <body style='background:#0d1117;color:white;text-align:center;font-family:sans-serif;padding:30px'>
-        <h2 style='color:#00e676'>SPIKE SNIPER V4 (DIFF 0.2)</h2>
-        <div id=login_div><input id=ev placeholder="Email"><br><br><button onclick="login()">LOGIN</button></div>
-        <div id=stats style='display:none'>
-            <div style='font-size:32px; font-weight:bold' id=st></div>
-            <div id=info style='font-size:20px; margin:20px 0; background:#161b22; padding:15px; border-radius:10px'></div>
-            <button onclick="stop()" style="background:#ff5252;color:white;border:none;padding:10px 20px;border-radius:5px">STOP</button>
-            <button onclick="reset()" style='margin-left:10px;padding:10px 20px;border-radius:5px'>RESET</button>
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>SPIKE SNIPER V4</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body { background:#0d1117; color:white; text-align:center; font-family:sans-serif; padding:20px; }
+            input { padding:12px; margin:10px; border-radius:5px; border:1px solid #30363d; background:#161b22; color:white; width:80%; max-width:300px; }
+            button { padding:12px 25px; border-radius:5px; border:none; cursor:pointer; font-weight:bold; margin:10px; }
+            .btn-start { background:#238636; color:white; }
+            .btn-login { background:#21262d; color:#c9d1d9; border:1px solid #30363d; }
+            .btn-stop { background:#da3633; color:white; }
+            .btn-reset { background:#30363d; color:white; }
+            #stats-box { background:#161b22; padding:20px; border-radius:10px; margin-top:20px; border:1px solid #30363d; }
+        </style>
+    </head>
+    <body>
+        <h2 style='color:#00e676'>SPIKE SNIPER V4</h2>
+        
+        <div id="login_div">
+            <input type="email" id="email_input" placeholder="Enter Email to Login">
+            <br>
+            <button class="btn-login" onclick="login()">LOGIN / ACCESS</button>
         </div>
-        <div id=settings style='display:none'>
-            <input id=tv placeholder="Deriv Token"><br><br>
-            <input id=sv value=1.0 placeholder="Stake"><br><br>
-            <button onclick="start()" style="background:#00e676;padding:10px 20px;border:none;border-radius:5px">START SNIPING</button>
+
+        <div id="settings_div" style="display:none">
+            <h3>Bot Settings</h3>
+            <input type="text" id="token_input" placeholder="Deriv API Token">
+            <br>
+            <input type="number" id="stake_input" value="1.0" step="0.5" placeholder="Stake Amount">
+            <br>
+            <button class="btn-start" onclick="startBot()">START SNIPING</button>
         </div>
+
+        <div id="stats_div" style="display:none">
+            <div id="stats-box">
+                <div id="status_text" style="font-size:24px; margin-bottom:10px">Connecting...</div>
+                <div id="info_text" style="font-size:18px; color:#8b949e">Profit: 0.00 | W: 0 L: 0</div>
+            </div>
+            <br>
+            <button class="btn-stop" onclick="stopBot()">STOP</button>
+            <button class="btn-reset" onclick="resetBot()">RESET ALL</button>
+        </div>
+
         <script>
-            let email="";
-            async function login(){ email=document.getElementById('ev').value; let r=await fetch('/check/'+email); let d=await r.json(); document.getElementById('login_div').style.display='none'; if(d.found){ document.getElementById('stats').style.display='block'; sync(); } else { document.getElementById('settings').style.display='block'; } }
-            async function start(){ 
-                let d={email:email, token:document.getElementById('tv').value, symbol:'R_100', stake:parseFloat(document.getElementById('sv').value)}; 
-                await fetch('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)}); 
-                document.getElementById('settings').style.display='none'; document.getElementById('stats').style.display='block'; sync(); 
+            let userEmail = "";
+
+            async function login() {
+                userEmail = document.getElementById('email_input').value;
+                if(!userEmail) { alert("Please enter email!"); return; }
+                
+                let res = await fetch('/check/' + userEmail);
+                let data = await res.json();
+                
+                document.getElementById('login_div').style.display = 'none';
+                if(data.found) {
+                    document.getElementById('stats_div').style.display = 'block';
+                    startSync();
+                } else {
+                    document.getElementById('settings_div').style.display = 'block';
+                }
             }
-            async function stop(){ fetch('/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email})}); location.reload(); }
-            async function reset(){ if(confirm("Reset Data?")){ await fetch('/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email})}); location.reload(); } }
-            function sync(){ setInterval(async()=>{ let r=await fetch('/check/'+email); let d=await r.json(); if(d.found){ document.getElementById('st').innerText=d.status; document.getElementById('info').innerText=`Profit: ${d.profit.toFixed(2)}$ | W: ${d.wins} L: ${d.losses}`; document.getElementById('st').style.color = d.status.includes("STOPPED") ? "red" : "#00e676"; } },1000); }
+
+            async function startBot() {
+                let token = document.getElementById('token_input').value;
+                let stake = document.getElementById('stake_input').value;
+                if(!token) { alert("Token required!"); return; }
+
+                await fetch('/start', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({email: userEmail, token: token, stake: stake, symbol: 'R_100'})
+                });
+
+                document.getElementById('settings_div').style.display = 'none';
+                document.getElementById('stats_div').style.display = 'block';
+                startSync();
+            }
+
+            async function stopBot() {
+                await fetch('/stop', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({email: userEmail})
+                });
+                location.reload();
+            }
+
+            async function resetBot() {
+                if(confirm("Delete all data and reset?")) {
+                    await fetch('/reset', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({email: userEmail})
+                    });
+                    location.reload();
+                }
+            }
+
+            function startSync() {
+                setInterval(async () => {
+                    let res = await fetch('/check/' + userEmail);
+                    let data = await res.json();
+                    if(data.found) {
+                        let st = document.getElementById('status_text');
+                        st.innerText = data.status;
+                        st.style.color = data.status.includes("STOPPED") ? "#ff7b72" : "#7ee787";
+                        document.getElementById('info_text').innerText = `Profit: ${data.profit.toFixed(2)}$ | W: ${data.wins} L: ${data.losses}`;
+                    }
+                }, 1000);
+            }
         </script>
     </body>
+    </html>
     """)
 
 @app.route("/check/<email>")
-def check_email(email):
-    u = users.find_one({"email": email}); return jsonify({"found": True, **u}) if u else jsonify({"found": False})
+def check_user(email):
+    u = users.find_one({"email": email})
+    if u:
+        u["_id"] = str(u["_id"])
+        return jsonify({"found": True, **u})
+    return jsonify({"found": False})
 
 @app.route("/start", methods=["POST"])
 def start():
-    d = request.json; users.delete_one({"email": d["email"]})
-    uid = users.insert_one({"email": d["email"], "token": d["token"], "symbol": d["symbol"], "base_stake": d["stake"], "stake": d["stake"], "profit": 0.0, "wins": 0, "losses": 0, "status": "SCANNING FOR SPIKES..."}).inserted_id
+    d = request.json
+    users.delete_one({"email": d["email"]})
+    new_user = {
+        "email": d["email"], "token": d["token"], "symbol": d["symbol"],
+        "stake": float(d["stake"]), "base_stake": float(d["stake"]),
+        "profit": 0.0, "wins": 0, "losses": 0, "status": "SCANNING..."
+    }
+    uid = users.insert_one(new_user).inserted_id
     Thread(target=bot_worker, args=(str(uid),), daemon=True).start()
     return jsonify({"ok": True})
 
 @app.route("/stop", methods=["POST"])
-def stop(): email = request.json["email"]; users.update_one({"email": email}, {"$set": {"status": "STOPPED"}}); return jsonify({"ok": True})
+def stop():
+    email = request.json["email"]
+    users.update_one({"email": email}, {"$set": {"status": "STOPPED"}})
+    return jsonify({"ok": True})
 
 @app.route("/reset", methods=["POST"])
-def reset(): email = request.json["email"]; users.delete_one({"email": email}); return jsonify({"ok": True})
+def reset():
+    email = request.json["email"]
+    users.delete_one({"email": email})
+    return jsonify({"ok": True})
 
 if __name__ == "__main__":
+    # هذا السطر مهم جداً ليعمل على Render
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
