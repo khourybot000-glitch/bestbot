@@ -1,4 +1,4 @@
-import json, websocket, time
+import json, websocket, time, os
 from datetime import datetime
 from threading import Thread
 from flask import Flask, render_template_string, jsonify, request
@@ -45,7 +45,7 @@ def check_result(token, cid):
         ws = websocket.create_connection(DERIV_WS, timeout=10)
         ws.send(json.dumps({"authorize": token}))
         ws.recv()
-        time.sleep(62) # انتظار انتهاء الصفقة
+        time.sleep(62) 
         ws.send(json.dumps({"proposal_open_contract": 1, "contract_id": cid}))
         r = json.loads(ws.recv())
         ws.close()
@@ -57,20 +57,19 @@ def check_result(token, cid):
 
 def bot_worker(uid):
     consecutive_losses = 0
-    pending_signal = None # لتخزين الإشارة المستخرجة عند الثانية 30
+    pending_signal = None 
     
     while True:
         u = users.find_one({"_id": ObjectId(uid)})
         if not u or u.get("status") == "STOPPED": break
         
-        # التوقف بعد 5 خسائر متتالية
         if consecutive_losses >= 5:
-            set_status(uid, "STOPPED (5 LOSSES)")
+            set_status(uid, "STOPPED (MAX LOSS)")
             break
 
         now = datetime.now()
 
-        # 1. مرحلة التحليل عند الثانية 30
+        # التحليل عند الثانية 30
         if now.second == 30:
             try:
                 set_status(uid, "ANALYZING...")
@@ -88,26 +87,23 @@ def bot_worker(uid):
                 corr_60 = last_90[:60]
                 imp_30 = last_90[-30:]
 
-                # الاستراتيجية: تصحيح 60 عكس الاتجاه + اندفاع 30 مع الاتجاه
                 if is_up and (corr_60[-1] < corr_60[0]) and (imp_30[-1] > imp_30[0]):
                     pending_signal = "CALL"
-                    set_status(uid, "SIGNAL READY: CALL")
+                    set_status(uid, "READY: CALL")
                 elif is_down and (corr_60[-1] > corr_60[0]) and (imp_30[-1] < imp_30[0]):
                     pending_signal = "PUT"
-                    set_status(uid, "SIGNAL READY: PUT")
+                    set_status(uid, "READY: PUT")
                 else:
                     pending_signal = None
-                    set_status(uid, "NO SIGNAL (WAIT)")
-                
+                    set_status(uid, "NO SIGNAL")
                 time.sleep(1)
             except: pass
 
-        # 2. مرحلة الدخول عند الثانية 58
+        # الدخول عند الثانية 58
         if now.second == 58 and pending_signal:
             target = pending_signal
-            pending_signal = None # تفريغ الإشارة بعد الاستخدام
-            
-            set_status(uid, f"ENTERING {target}...")
+            pending_signal = None 
+            set_status(uid, f"IN TRADE ({target})")
             current_stake = u.get("stake")
             cid = execute_contract(u["token"], u["symbol"], current_stake, target, "USD")
             
@@ -124,28 +120,28 @@ def bot_worker(uid):
                         consecutive_losses += 1
                         users.update_one({"_id": ObjectId(uid)}, {
                             "$inc": {"losses": 1, "profit": -current_stake},
-                            "$set": {"stake": current_stake * 2.2} # المضاعفة 2.2
+                            "$set": {"stake": current_stake * 2.2}
                         })
-            set_status(uid, "WAITING NEXT CYCLE")
-
-        time.sleep(0.1) # سرعة استجابة عالية للثواني
+            set_status(uid, "WAITING CYCLE")
+        time.sleep(0.1)
 
 @app.route("/")
 def home():
     return render_template_string("""
     <body style='background:#0d1117;color:white;text-align:center;font-family:sans-serif;padding:30px'>
         <h2 style='color:#00e676'>SILENT ALPHA SNIPER - V2.2</h2>
-        <div id=login_div><input id=ev placeholder="Email"><br><br><button onclick="login()">LOGIN</button></div>
+        <div id=login_div><input id=ev placeholder="Email" style="padding:10px;border-radius:5px"><br><br><button onclick="login()" style="padding:10px 20px;background:#00e676;border:none;border-radius:5px;cursor:pointer">LOGIN</button></div>
         <div id=settings style='display:none'>
-            <input id=tv placeholder="Deriv Token" style="width:250px"><br><br>
-            <input id=sv value=1.0 placeholder="Stake"><br><br>
-            <input id=tpv value=50 placeholder="Target Profit"><br><br>
-            <button onclick="start()">START BOT</button>
+            <input id=tv placeholder="Deriv Token" style="width:250px;padding:10px"><br><br>
+            <input id=sv value=1.0 placeholder="Stake" style="padding:10px"><br><br>
+            <input id=tpv value=50 placeholder="Target Profit" style="padding:10px"><br><br>
+            <button onclick="start()" style="padding:10px 20px;background:#2979ff;color:white;border:none;border-radius:5px">START BOT</button>
         </div>
         <div id=stats style='display:none'>
-            <div style='font-size:30px; font-weight:bold; color:#00e676' id=st></div>
-            <div id=info style='font-size:20px; margin:20px 0'></div>
-            <button onclick="stop()" style="background:#ff5252;color:white;border:none;padding:10px 20px">STOP</button>
+            <div style='font-size:35px; font-weight:bold; color:#00e676; margin-bottom:10px' id=st></div>
+            <div id=info style='font-size:22px; margin:20px 0; background:#161b22; padding:20px; border-radius:10px'></div>
+            <button onclick="stop()" style="background:#ff5252;color:white;border:none;padding:15px 30px;border-radius:5px;cursor:pointer;font-weight:bold">STOP</button>
+            <button onclick="reset()" style='margin-left:15px;padding:15px 30px;border-radius:5px;background:#30363d;color:white;border:none;cursor:pointer'>RESET ALL</button>
         </div>
         <script>
             let email="";
@@ -155,8 +151,9 @@ def home():
                 await fetch('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)}); 
                 document.getElementById('settings').style.display='none'; document.getElementById('stats').style.display='block'; sync(); 
             }
-            async function stop(){ fetch('/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email})}); location.reload(); }
-            function sync(){ setInterval(async()=>{ let r=await fetch('/check/'+email); let d=await r.json(); if(d.found){ document.getElementById('st').innerText=d.status.toUpperCase(); document.getElementById('info').innerText=`Profit: ${d.profit.toFixed(2)}$ | W: ${d.wins} L: ${d.losses}`; } },1000); }
+            async function stop(){ await fetch('/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email})}); }
+            async function reset(){ if(confirm("حذف جميع البيانات والبدء من جديد؟")){ await fetch('/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email})}); location.reload(); } }
+            function sync(){ setInterval(async()=>{ let r=await fetch('/check/'+email); let d=await r.json(); if(d.found){ document.getElementById('st').innerText=d.status; document.getElementById('info').innerText=`Profit: ${d.profit.toFixed(2)}$ | Wins: ${d.wins} | Losses: ${d.losses}`; if(d.status.includes("STOPPED")) { document.getElementById('st').style.color='#ff5252'; } else { document.getElementById('st').style.color='#00e676'; } } },1000); }
         </script>
     </body>
     """)
@@ -187,4 +184,5 @@ def reset():
     return jsonify({"ok": True})
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
