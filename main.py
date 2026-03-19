@@ -21,10 +21,10 @@ def run_flask():
     app.run(host='0.0.0.0', port=port)
 
 # --- إعدادات البوت والبيانات ---
-TOKEN = "YOUR_TELEGRAM_TOKEN"
-CHAT_ID = "YOUR_CHAT_ID"
+TOKEN = "8511172742:AAH0fIuvTi4ZwWL28ncZb0bsXZv3rOf8pR8"
+CHAT_ID = "-1003731752986"
 SYMBOL = "USDPKR_otc"
-API_URL = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={SYMBOL}&timeframe=M1&limit=14"
+API_URL = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={SYMBOL}&timeframe=M1&limit=4"
 
 # --- إعداد MongoDB ---
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
