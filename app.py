@@ -3,180 +3,157 @@ from datetime import datetime
 from threading import Thread
 from flask import Flask, render_template_string, jsonify, request
 from pymongo import MongoClient
-from bson.objectid import ObjectId
 
 app = Flask(__name__)
 
-# --- MongoDB ---
+# --- إعدادات قاعدة البيانات ---
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 client = MongoClient(MONGO_URI)
 db = client["KHOURY_BOT"]
 users = db["users"]
 DERIV_WS = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 
-def set_status(uid, status):
-    users.update_one({"_id": ObjectId(uid)}, {"$set": {"status": status}})
+def update_bot_data(email, w, l, p, status):
+    """تحديث قاعدة البيانات وإجبار الواجهة على القراءة"""
+    users.update_one(
+        {"email": email},
+        {"$inc": {"wins": w, "losses": l, "profit": p}, "$set": {"status": status}}
+    )
 
-def get_account_currency(token):
+def get_currency(token):
     try:
         ws = websocket.create_connection(DERIV_WS, timeout=10)
         ws.send(json.dumps({"authorize": token}))
         res = json.loads(ws.recv())
+        ws.close()
         return res.get('authorize', {}).get('currency', 'USD')
     except: return "USD"
 
-def bot_worker(uid):
-    user_id = ObjectId(uid)
+def bot_worker(email):
     consecutive_losses = 0
-    current_stake = None
-
     while True:
-        u = users.find_one({"_id": user_id})
-        if not u or "STOPPED" in u.get("status") or "REACHED" in u.get("status"): break
+        u = users.find_one({"email": email})
+        if not u or "STOPPED" in u.get("status") or "REACHED" in u.get("status"):
+            break
         
-        if current_stake is None: current_stake = float(u["stake"])
-
-        # فحص الهدف الربحي
-        if u.get("profit", 0) >= float(u.get("tp", 999)):
-            set_status(uid, "TARGET REACHED! 🎉")
+        # فحص الهدف الربحي (Take Profit)
+        if u.get("profit", 0) >= float(u.get("tp", 10)):
+            update_bot_data(email, 0, 0, 0, "TARGET REACHED! 🎉")
             break
 
+        # التحليل عند الثانية 30 فقط
         now = datetime.now()
-        # التحليل فقط عند الثانية 30
         if now.second == 30:
+            stake = float(u.get("current_stake", u["stake"]))
             try:
-                ws = websocket.create_connection(DERIV_WS, timeout=10)
+                ws = websocket.create_connection(DERIV_WS, timeout=15)
                 ws.send(json.dumps({"authorize": u["token"]}))
                 ws.recv()
 
-                # جلب 15 تيك
+                # استراتيجية الـ 15 تيك
                 ws.send(json.dumps({"ticks_history": u["symbol"], "count": 15, "end": "latest", "style": "ticks"}))
-                res = json.loads(ws.recv())
+                prices = json.loads(ws.recv()).get("history", {}).get("prices", [])
                 
-                if "history" in res:
-                    prices = res["history"]["prices"]
-                    last_tick = prices[-1]
-                    previous_14 = prices[:-1]
+                if len(prices) >= 15:
+                    last = prices[-1]
+                    prev = prices[:-1]
+                    high, low = max(prev), min(prev)
                     
-                    high = max(previous_14)
-                    low = min(previous_14)
-                    
-                    direction = None
-                    barrier = ""
+                    side = "CALL" if last > high else "PUT" if last < low else None
+                    barrier = "-0.5" if side == "CALL" else "+0.5"
 
-                    if last_tick > high:
-                        direction = "CALL"
-                        barrier = "-0.5"
-                    elif last_tick < low:
-                        direction = "PUT"
-                        barrier = "+0.5"
-
-                    if direction:
-                        set_status(uid, f"BREAKOUT {direction} | STAKE: {current_stake}")
-                        
-                        buy_req = {
-                            "buy": 1, "price": current_stake,
+                    if side:
+                        update_bot_data(email, 0, 0, 0, f"ENTERING {side}...")
+                        buy_data = {
+                            "buy": 1, "price": stake,
                             "parameters": {
-                                "amount": current_stake, "basis": "stake",
-                                "contract_type": direction, "currency": u["currency"],
-                                "duration": 6, "duration_unit": "t",
+                                "amount": stake, "basis": "stake", "contract_type": side,
+                                "currency": u["currency"], "duration": 6, "duration_unit": "t",
                                 "symbol": u["symbol"], "barrier": barrier
                             }
                         }
-                        ws.send(json.dumps(buy_req))
-                        buy_res = json.loads(ws.recv())
+                        ws.send(json.dumps(buy_data))
+                        res = json.loads(ws.recv())
                         
-                        if "buy" in buy_res:
-                            cid = buy_res["buy"]["contract_id"]
-                            ws.close()
-                            time.sleep(12) # انتظار 6 تيكات
+                        if "buy" in res:
+                            contract_id = res["buy"]["contract_id"]
+                            time.sleep(12) # انتظار نتيجة الـ 6 تيكات
                             
-                            # فحص النتيجة
-                            ws_res = websocket.create_connection(DERIV_WS, timeout=10)
+                            # التحقق من النتيجة وتحديث الواجهة فوراً
+                            ws_res = websocket.create_connection(DERIV_WS)
                             ws_res.send(json.dumps({"authorize": u["token"]}))
                             ws_res.recv()
-                            ws_res.send(json.dumps({"proposal_open_contract": 1, "contract_id": cid}))
+                            ws_res.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id}))
                             poc = json.loads(ws_res.recv()).get("proposal_open_contract", {})
                             
                             if poc.get("is_sold"):
                                 profit = float(poc.get("profit", 0))
                                 if profit > 0:
-                                    users.update_one({"_id": user_id}, {"$inc": {"wins": 1, "profit": profit}})
-                                    set_status(uid, "WIN! RESETTING STAKE")
-                                    current_stake = float(u["stake"]) # إعادة المبلغ للأصلي
+                                    # ربح: تصفير الخسارات المتتالية والعودة للمبلغ الأصلي
+                                    update_bot_data(email, 1, 0, profit, "WIN! SCANNING...")
+                                    users.update_one({"email": email}, {"$set": {"current_stake": float(u["stake"])}})
                                     consecutive_losses = 0
                                 else:
-                                    loss_amount = current_stake
+                                    # خسارة: تفعيل الـ Martingale x19 أو الإيقاف
                                     consecutive_losses += 1
-                                    users.update_one({"_id": user_id}, {"$inc": {"losses": 1, "profit": -loss_amount}})
-                                    
+                                    update_bot_data(email, 0, 1, -stake, f"LOSS #{consecutive_losses}")
                                     if consecutive_losses >= 2:
-                                        set_status(uid, "STOPPED: 2 LOSSES IN ROW")
+                                        update_bot_data(email, 0, 0, 0, "STOPPED: 2 LOSSES")
                                         ws_res.close()
                                         break
                                     else:
-                                        current_stake *= 19 # مضاعفة × 19
-                                        set_status(uid, f"LOSS! MARTINGALE x19")
+                                        users.update_one({"email": email}, {"$set": {"current_stake": stake * 19}})
                             ws_res.close()
-                        else: set_status(uid, "REFUSED BY BROKER")
-                    else:
-                        set_status(uid, "NO BREAKOUT AT SEC 30")
-                
-                if ws: ws.close()
-            except: pass
-            time.sleep(2) # منع التكرار في نفس الثانية
-
+                        else: update_bot_data(email, 0, 0, 0, "REFUSED BY DERIV")
+                    else: update_bot_data(email, 0, 0, 0, "NO BREAKOUT")
+                ws.close()
+            except Exception as e: print(f"Error: {e}")
+            time.sleep(2) # تجنب تكرار الدخول في نفس الثانية
         time.sleep(0.5)
 
-# --- الواجهة البرمجية ---
+# --- واجهة Flask المحسنة ---
 @app.route("/")
 def home():
     return render_template_string("""
-    <body style='background:#0d1117;color:white;text-align:center;font-family:sans-serif;padding:20px'>
-        <h2 style='color:#00e676'>SEC-30 BREAKOUT V13</h2>
+    <body style='background:#0d1117;color:white;text-align:center;font-family:sans-serif;padding:30px'>
+        <h2 style='color:#00e676'>KHOURY BOT V16</h2>
         <div id=login_div>
-            <input id=ev placeholder="Email" style="padding:10px; border-radius:5px">
-            <button onclick="login()" style="padding:10px 20px">ACCESS</button>
+            <input id=ev placeholder="Email Address" style="padding:12px; border-radius:8px; width:260px"><br><br>
+            <button onclick="login()" style="padding:12px 30px; cursor:pointer; background:#238636; color:white; border:none; border-radius:8px; font-weight:bold">LOGIN & RUN</button>
         </div>
-        <div id=settings style='display:none'>
-            <input id=tv placeholder="API Token" style="width:280px; padding:10px"><br><br>
-            <input id=stk_v value="1.0" type="number" style="width:130px; padding:10px">
-            <input id=tp_v value="10.0" type="number" style="width:130px; padding:10px"><br><br>
-            <button onclick="start()" style="background:#238636; color:white; padding:15px; width:280px; border:none; border-radius:8px">START BOT</button>
-        </div>
+        
         <div id=stats style='display:none'>
-            <div style="background:#161b22; padding:20px; border-radius:15px; border:1px solid #30363d; max-width:400px; margin:0 auto">
-                <div id=st style='font-size:18px; color:#00e676'>WAITING FOR SEC 30...</div>
-                <div id=profit_text style="font-size:45px; font-weight:bold; margin:10px 0">0.00</div>
-                <div style="display:flex; justify-content:space-around; font-size:20px">
+            <div style="background:#161b22; padding:25px; border-radius:20px; border:1px solid #30363d; max-width:400px; margin:0 auto">
+                <div id=st style='font-size:18px; color:#7ee787; font-weight:bold'>READY</div>
+                <div id=profit_text style="font-size:55px; margin:15px 0; font-weight:bold; color:white">0.00</div>
+                <div style="display:flex; justify-content:space-around; font-size:24px; background:#0d1117; padding:15px; border-radius:12px">
                     <div style="color:#7ee787">W: <span id=wins_text>0</span></div>
                     <div style="color:#ff7b72">L: <span id=loss_text>0</span></div>
                 </div>
-            </div><br>
-            <button onclick="resetBot()" style="background:#30363d; color:white; border:none; padding:10px 20px; border-radius:8px">RESET & EXIT</button>
+            </div>
+            <br>
+            <button onclick="reset()" style="background:#da3633; color:white; border:none; padding:12px 25px; border-radius:8px; font-weight:bold; cursor:pointer">RESET ALL DATA</button>
         </div>
+
         <script>
             let email = "";
             async function login(){
                 email = document.getElementById('ev').value;
+                if(!email) return alert("Email required!");
                 let r = await fetch('/check/'+email);
                 let d = await r.json();
+                if(d.found){
+                    startUI();
+                } else {
+                    let t = prompt("Enter Deriv API Token:"), s = prompt("Initial Stake:"), tp = prompt("Target Profit:");
+                    if(!t || !s) return;
+                    await fetch('/start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email:email, token:t, stake:s, tp:tp, symbol:'R_100'})});
+                    startUI();
+                }
+            }
+            function startUI(){
                 document.getElementById('login_div').style.display='none';
-                if(d.found){ document.getElementById('stats').style.display='block'; sync(); }
-                else { document.getElementById('settings').style.display='block'; }
-            }
-            async function start(){
-                let d = {email:email, token:document.getElementById('tv').value, stake:document.getElementById('stk_v').value, tp:document.getElementById('tp_v').value, symbol:'R_100'};
-                await fetch('/start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(d)});
-                document.getElementById('settings').style.display='none';
                 document.getElementById('stats').style.display='block';
-                sync();
-            }
-            async function resetBot(){
-                await fetch('/reset', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email:email})});
-                location.reload();
-            }
-            function sync(){
                 setInterval(async()=>{
                     let r = await fetch('/check/'+email);
                     let d = await r.json();
@@ -188,6 +165,12 @@ def home():
                     }
                 }, 1000);
             }
+            async function reset(){
+                if(confirm("Are you sure? This stops the bot and clears stats.")){
+                    await fetch('/reset', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email:email})});
+                    location.reload();
+                }
+            }
         </script>
     </body>
     """)
@@ -195,22 +178,26 @@ def home():
 @app.route("/check/<email>")
 def check(email):
     u = users.find_one({"email": email})
-    if u: u["_id"] = str(u["_id"]); return jsonify({"found": True, **u})
-    return jsonify({"found": False})
+    if u: return jsonify({"found":True, "status":u["status"], "profit":u["profit"], "wins":u["wins"], "losses":u["losses"]})
+    return jsonify({"found":False})
 
 @app.route("/start", methods=["POST"])
 def start():
     d = request.json
-    curr = get_account_currency(d["token"])
+    curr = get_currency(d["token"])
     users.delete_one({"email": d["email"]})
-    uid = users.insert_one({"email": d["email"], "token": d["token"], "symbol": d["symbol"], "stake": float(d["stake"]), "tp": float(d["tp"]), "currency": curr, "profit": 0.0, "wins": 0, "losses": 0, "status": "WAITING SEC 30"}).inserted_id
-    Thread(target=bot_worker, args=(str(uid),), daemon=True).start()
-    return jsonify({"ok": True})
+    users.insert_one({
+        "email": d["email"], "token": d["token"], "symbol": d["symbol"], 
+        "stake": float(d["stake"]), "current_stake": float(d["stake"]),
+        "tp": float(d["tp"]), "currency": curr, "profit": 0.0, "wins": 0, "losses": 0, "status": "WAITING SEC 30"
+    })
+    Thread(target=bot_worker, args=(d["email"],), daemon=True).start()
+    return jsonify({"ok":True})
 
 @app.route("/reset", methods=["POST"])
-def reset():
+def reset_bot():
     users.delete_one({"email": request.json["email"]})
-    return jsonify({"ok": True})
+    return jsonify({"ok":True})
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    app.run(host="0.0.0.0", port=5000)
