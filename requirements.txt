@@ -1,6 +1,5 @@
+requests
 flask
+gunicorn
 pymongo
 dnspython
-selenium
-requests
-webdriver-manager
