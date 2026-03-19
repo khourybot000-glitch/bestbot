@@ -11,137 +11,116 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "KhouryBot M5 Strategy [Limit 14 Active]"
+    return "KhouryBot V4 - No MTG - Second 06 Active"
 
 def run_flask():
-    # Render يمرر البورت تلقائياً عبر PORT
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
 
-# --- إعدادات البوت الخاصة بك ---
+# --- إعدادات البوت والاتصال ---
 TOKEN = "8511172742:AAGqDR6vq4OIH5R_JbTp-YzFnnTCw2f5gF8"
 CHAT_ID = "-1003731752986"
 SYMBOL = "USDPKR_otc"
-# الطلب دائماً لـ 14 شمعة
 API_URL = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={SYMBOL}&timeframe=M1&limit=14"
 
-# --- إعداد MongoDB ---
+# --- إعداد MongoDB للاحصائيات ---
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 client = MongoClient(MONGO_URI)
 db = client['KhouryBotDB']
 stats_col = db['trading_stats']
 
-def get_stats():
-    stats = stats_col.find_one({"_id": "global_stats"})
-    if not stats:
-        initial = {"_id": "global_stats", "wins": 0, "losses": 0}
-        stats_col.insert_one(initial)
-        return initial
-    return stats
-
 def update_stats(result_type):
-    if result_type == "win":
-        stats_col.update_one({"_id": "global_stats"}, {"$inc": {"wins": 1}})
-    else:
-        stats_col.update_one({"_id": "global_stats"}, {"$inc": {"losses": 1}})
-    return get_stats()
+    try:
+        field = "wins" if result_type == "win" else "losses"
+        stats_col.update_one({"_id": "global_stats"}, {"$inc": {field: 1}}, upsert=True)
+        return stats_col.find_one({"_id": "global_stats"})
+    except: return {"wins": 0, "losses": 0}
 
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    try:
-        requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"})
+    try: requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"})
     except: pass
 
-def analyze_4_candles_trend(data):
+# دالة التحليل (استراتيجية الـ 4 شموع)
+def analyze_4_candles(data):
     try:
-        # تحليل آخر 4 شموع (id 1 إلى id 4)
-        open_4 = float(data[3]['open'])
-        close_1 = float(data[0]['close'])
-        if close_1 > open_4: return "UP"
-        elif close_1 < open_4: return "DOWN"
+        c1 = data[0] # الأحدث (id 1)
+        c4 = data[3] # الأقدم (id 4)
+        
+        c1_open, c1_close = float(c1['open']), float(c1['close'])
+        c4_open, c4_close = float(c4['open']), float(c4['close'])
+        
+        # شرط الصعود: القديمة حمراء، الحديثة خضراء، والاتجاه العام صاعد
+        if (c4_open > c4_close) and (c1_close > c1_open) and (c1_close > c4_open):
+            return "UP"
+        # شرط الهبوط: القديمة خضراء، الحديثة حمراء، والاتجاه العام هابط
+        if (c4_close > c4_open) and (c1_open > c1_close) and (c1_close < c4_open):
+            return "DOWN"
     except: pass
     return None
 
-def check_m5_result(data, direction):
+# دالة النتيجة (تطلب بيانات فريش وتفحص آخر 5 شموع)
+def get_fresh_m5_result(direction):
     try:
-        # التحقق من نتيجة 5 دقائق (أول 5 عناصر في القائمة التي سحبها البوت الآن)
-        # افتتاح الشمعة الخامسة (id 5) وإغلاق الشمعة الأحدث (id 1)
-        open_price = float(data[4]['open'])
-        close_price = float(data[0]['close'])
-        actual_dir = "UP" if close_price > open_price else "DOWN"
-        return True if actual_dir == direction else False
-    except: return False
+        res = requests.get(API_URL, timeout=12).json()
+        if res.get('success'):
+            data = res['data']
+            # افتتاح id 5 وإغلاق id 1 (فترة الـ 5 دقائق)
+            open_p = float(data[4]['open'])
+            close_p = float(data[0]['close'])
+            actual_dir = "UP" if close_p > open_p else "DOWN"
+            return True if actual_dir == direction else False
+    except: pass
+    return False
 
 last_trade = None
 
 def bot_engine():
     global last_trade
-    print("🚀 KhouryBot Engine [M5 - Dynamic Fetch] Started...")
+    print("🚀 KhouryBot Engine [No MTG - 06s Mode] Started...")
     
     while True:
         now = datetime.now()
+        current_time = now.strftime('%H:%M:%S')
         
-        # 1. لحظة التحليل (إرسال الإشارة)
-        if now.minute % 15 == 14 and now.second == 20:
+        # 1. التحليل عند الدقيقة الرابعة (4, 9, 14...) والثانية 06
+        if (now.minute + 1) % 5 == 0 and now.second == 6:
             try:
-                # يطلب 14 شمعة "جديدة" للتحليل
                 res = requests.get(API_URL, timeout=10).json()
                 if res.get('success'):
-                    signal = analyze_4_candles_trend(res['data'])
+                    signal = analyze_4_candles(res['data'])
                     if signal:
                         entry_t = (now + timedelta(minutes=1)).replace(second=0).strftime('%H:%M')
-                        emoji = "🟢 CALL" if signal == "UP" else "🔴 PUT"
-                        msg = (f"🎯 *KhouryBot New Signal*\n\n"
-                               f"📊 Asset: `{SYMBOL}`\n"
-                               f"⏳ Timeframe: `M5`\n"
-                               f"🚦 Signal: *{emoji}*\n"
-                               f"⏱ Entry Time: `{entry_t}`\n\n"
-                               f"⚠️ *USE 1 MTG*")
-                        send_telegram(msg)
-                        # تحديد وقت التحقق القادم (بعد 5 دقائق + 6 ثوانٍ)
+                        # وقت النتيجة بعد 5 دقائق + 6 ثوانٍ (ليكون عند الثانية 06 بالضبط)
                         check_at = (now + timedelta(minutes=6)).replace(second=6).strftime('%H:%M:%S')
-                        last_trade = {"entry": entry_t, "check_at": check_at, "dir": signal, "mtg": False}
+                        
+                        emoji = "🟢 CALL" if signal == "UP" else "🔴 PUT"
+                        msg = f"🎯 *KhouryBot Signal*\n📊 Asset: `{SYMBOL}`\n⏳ M5 | Signal: *{emoji}*\n⏱ Entry: `{entry_t}`\n🚫 *NO MTG*"
+                        send_telegram(msg)
+                        
+                        last_trade = {"dir": signal, "check_at": check_at}
+                        print(f"✅ Signal Sent. Check at {check_at}")
                 time.sleep(1)
             except: pass
 
-        # 2. لحظة التحقق من النتيجة الأولى
-        if last_trade and not last_trade['mtg']:
-            if now.strftime('%H:%M:%S') == last_trade['check_at']:
-                try:
-                    # يطلب 14 شمعة "جديدة" للتحقق من النتيجة
-                    res = requests.get(API_URL).json()
-                    if check_m5_result(res['data'], last_trade['dir']):
-                        s = update_stats("win")
-                        send_telegram(f"✅ *WIN* - {SYMBOL}\n📈 Stats: W: {s['wins']} | L: {s['losses']}")
-                        last_trade = None
-                    else:
-                        last_trade['mtg'] = True
-                        # تحديد وقت التحقق للمضاعفة (بعد 5 دقائق إضافية)
-                        new_check = (datetime.strptime(last_trade['check_at'], '%H:%M:%S') + timedelta(minutes=5)).strftime('%H:%M:%S')
-                        last_trade['check_at'] = new_check
-                except: pass
-                time.sleep(1)
-
-        # 3. لحظة التحقق من المارتينجال
-        if last_trade and last_trade['mtg']:
-            if now.strftime('%H:%M:%S') == last_trade['check_at']:
-                try:
-                    # يطلب 14 شمعة "جديدة" للتحقق من نتيجة المارتينجال
-                    res = requests.get(API_URL).json()
-                    if check_m5_result(res['data'], last_trade['dir']):
-                        s = update_stats("win")
-                        send_telegram(f"⚖️ *MTG WIN* - {SYMBOL}\n📈 Stats: W: {s['wins']} | L: {s['losses']}")
-                    else:
-                        s = update_stats("loss")
-                        send_telegram(f"❌ *MTG LOSS* - {SYMBOL}\n📈 Stats: W: {s['wins']} | L: {s['losses']}")
-                    last_trade = None
-                except: pass
-                time.sleep(1)
+        # 2. التحقق من النتيجة عند الثانية 06 (طلب API جديد)
+        if last_trade and current_time == last_trade['check_at']:
+            print(f"🔔 Time to check! Fetching fresh data at {current_time}")
+            is_win = get_fresh_m5_result(last_trade['dir'])
+            
+            if is_win:
+                s = update_stats("win")
+                send_telegram(f"✅ *WIN* - {SYMBOL}\n📈 W: {s['wins']} | L: {s['losses']}")
+            else:
+                s = update_stats("loss")
+                send_telegram(f"❌ *LOSS* - {SYMBOL}\n📈 W: {s['wins']} | L: {s['losses']}")
+            
+            # تصفير الصفقة (بدون مضاعفة)
+            last_trade = None
+            time.sleep(1)
 
         time.sleep(0.5)
 
 if __name__ == "__main__":
-    # تشغيل Flask للسيرفر
     threading.Thread(target=run_flask, daemon=True).start()
-    # تشغيل البوت
     bot_engine()
