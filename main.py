@@ -20,7 +20,7 @@ def run_flask():
 # --- إعدادات البوت والاتصال ---
 TOKEN = "8511172742:AAGqDR6vq4OIH5R_JbTp-YzFnnTCw2f5gF8"
 CHAT_ID = "-1003731752986"
-SYMBOL = "USDPKR_otc"
+SYMBOL = "FB_otc"
 API_URL = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={SYMBOL}&timeframe=M1&limit=14"
 
 # --- إعداد MongoDB للاحصائيات ---
