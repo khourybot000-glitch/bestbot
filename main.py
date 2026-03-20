@@ -22,8 +22,8 @@ def analyze():
         is_green = float(data[1]['close']) > float(data[1]['open'])
         is_red = float(data[1]['close']) < float(data[1]['open'])
 
-        if is_trend_up and is_red: return jsonify({"signal": "UP"})
-        if is_trend_down and is_green: return jsonify({"signal": "DOWN"})
+        if is_trend_up and is_red: return jsonify({"signal": "DOWN"})
+        if is_trend_down and is_green: return jsonify({"signal": "UP"})
     except: pass
     return jsonify({"signal": None})
 
@@ -41,7 +41,7 @@ def check():
         
         # سعر فتح الشمعة الثالثة (بداية الصفقة قبل 3 دقائق)
         # في المصفوفة: 0=الحالية، 1=السابقة، 2=الثالثة
-        entry_open = float(data[2]['open']) 
+        entry_open = float(data[0]['open']) 
         
         # فحص النتيجة بناءً على مقارنة (إغلاق الحديثة vs فتح الثالثة)
         won = (direction == "UP" and current_close > entry_open) or \
