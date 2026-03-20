@@ -9,20 +9,29 @@ CORS(app)
 def analyze():
     pair = request.args.get('pair')
     try:
-        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M5&limit=5"
-        data = requests.get(url, timeout=5).json()['data']
-        closes = [float(d['close']) for d in data]
-        opens = [float(d['open']) for d in data]
+        # طلب 5 شموع (ترتيب الـ API: 0 هي الأحدث، 4 هي الأقدم)
+        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=5"
+        resp = requests.get(url, timeout=5).json()
+        if not resp.get("success"): return jsonify({"signal": None})
         
-        sma_3 = sum(closes[:3]) / 3
-        momentum = closes[0] - closes[4]
+        data = resp["data"]
         
-        # منطق الارتداد
-        is_call = (closes[0] > sma_3 and momentum > 0 and opens[0] > closes[0])
-        is_put = (closes[0] < sma_3 and momentum < 0 and opens[0] < closes[0])
+        # 1. الاتجاه العام لـ 5 شموع (فتح الأقدم index 4 vs إغلاق الأحدث index 0)
+        overall_open = float(data[4]['open'])
+        current_close = float(data[0]['close'])
         
-        if is_call: return jsonify({"signal": "CALL"})
-        if is_put: return jsonify({"signal": "PUT"})
+        is_trend_up = current_close > overall_open
+        is_trend_down = current_close < overall_open
+
+        # 2. تحليل الشمعة الأخيرة (إغلاق 0 vs فتح 0)
+        current_open = float(data[0]['open'])
+        is_green = current_close > current_open
+        is_red = current_close < current_open
+
+        # القرار: توافق الاتجاه مع لون الشمعة
+        if is_trend_up and is_green: return jsonify({"signal": "CALL"})
+        if is_trend_down and is_red: return jsonify({"signal": "PUT"})
+            
     except: pass
     return jsonify({"signal": None})
 
@@ -31,13 +40,19 @@ def check():
     pair = request.args.get('pair')
     direction = request.args.get('direction')
     try:
-        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=1"
-        c = requests.get(url, timeout=5).json()['data'][0]
-        won = (direction == "CALL" and float(c['close']) > float(c['open'])) or \
-              (direction == "PUT" and float(c['close']) < float(c['open']))
+        # لضمان النتيجة، نطلب قائمة الـ 5 شموع كاملة من جديد ونفحص index 0
+        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=5"
+        resp = requests.get(url, timeout=5).json()
+        latest = resp['data'][0]
+        
+        c_close = float(latest['close'])
+        c_open = float(latest['open'])
+        
+        won = (direction == "CALL" and c_close > c_open) or \
+              (direction == "PUT" and c_close < c_open)
         return jsonify({"result": "WIN" if won else "LOSS"})
-    except: pass
-    return jsonify({"result": "ERROR"})
+    except:
+        return jsonify({"result": "ERROR"})
 
 if __name__ == '__main__':
     import os
