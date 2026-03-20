@@ -9,7 +9,8 @@ from pymongo import MongoClient
 # --- الإعدادات ---
 TELEGRAM_TOKEN = '8511172742:AAGqDR6vq4OIH5R_JbTp-YzFnnTCw2f5gF8'
 CHAT_ID = '-1003731752986'
-API_URL = "https://mrbeaxt.site/Qx/Qx.php?format=json&pair=FB_otc&timeframe=M1&limit=1"
+# طلبنا limit=5 لجلب آخر 5 شموع
+API_URL = "https://mrbeaxt.site/Qx/Qx.php?format=json&pair=FB_otc&timeframe=M1&limit=5"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 PORT = 8080
 
@@ -22,7 +23,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "KhouryBot Active - Fast Martingale Logic (Next Minute Check)", 200
+    return "KhouryBot M5 Strategy - 5 Candles Trend", 200
 
 def update_stats(result):
     field = "wins" if "WIN" in result else "losses"
@@ -30,8 +31,7 @@ def update_stats(result):
 
 def get_stats():
     stats = stats_col.find_one({"_id": "daily_stats"})
-    if stats:
-        return stats.get("wins", 0), stats.get("losses", 0)
+    if stats: return stats.get("wins", 0), stats.get("losses", 0)
     return 0, 0
 
 def send_telegram_msg(message):
@@ -43,77 +43,83 @@ def send_telegram_msg(message):
 def get_api_data():
     try:
         response = requests.get(API_URL).json()
-        if response.get("success") and "data" in response and len(response["data"]) > 0:
-            return response["data"][0]
+        if response.get("success") and "data" in response:
+            return response["data"] # نرجع القائمة كاملة (5 شموع)
     except: return None
 
 def job():
-    print("KhouryBot Core Started...")
+    print("KhouryBot M5 Trend Strategy Started...")
     
     while True:
         now_utc = datetime.now(pytz.utc)
         
         if now_utc.second == 10:
-            # الوقت المستهدف للفحص هو الدقيقة السابقة مباشرة
-            target_check_time = (now_utc - timedelta(minutes=1)).strftime('%H:%M')
-            pending_signal = signals_col.find_one({"entry_time": target_check_time, "status": "PENDING"})
+            current_min_str = now_utc.strftime('%H:%M')
+            
+            # 1. فحص النتيجة (بعد مرور 5 دقائق من وقت الدخول)
+            # إذا دخلنا 12:05، نفحص عند 12:10:10 (أي الدخول كان قبل 5 دقائق من الآن)
+            target_entry_time = (now_utc - timedelta(minutes=5)).strftime('%H:%M')
+            pending_signal = signals_col.find_one({"entry_time": target_entry_time, "status": "PENDING"})
             
             if pending_signal:
-                candle = get_api_data()
-                if candle:
-                    open_p = float(candle.get('open', 0))
-                    close_p = float(candle.get('close', 0))
-                    sent_dir = pending_signal['direction']
-                    is_mtg_attempt = pending_signal.get('is_mtg', False)
-
-                    # منطق تحديد الربح
-                    won_current = False
-                    if sent_dir == "PUT" and close_p < open_p:
-                        won_current = True
-                    elif sent_dir == "CALL" and close_p > open_p:
-                        won_current = True
+                # لجلب نتيجة صفقة 5 دقائق، نحتاج مقارنة السعر الآن بسعر الافتتاح المخزن
+                candles = get_api_data()
+                if candles:
+                    current_close = float(candles[0]['close']) # إغلاق أحدث شمعة
+                    open_at_entry = pending_signal['open_price']
+                    direction = pending_signal['direction']
                     
-                    if won_current:
-                        res_label = "MTG WIN ✅" if is_mtg_attempt else "WIN ✅"
-                        update_stats(res_label)
-                        w, l = get_stats()
-                        send_telegram_msg(f"🏁 *Result Update*\nDirection: {sent_dir}\nResult: {res_label}\n\n📊 Stats: W {w} | L {l}")
-                        signals_col.update_one({"_id": pending_signal["_id"]}, {"$set": {"status": "COMPLETED"}})
-                    else:
-                        if not is_mtg_attempt:
-                            # خسارة الصفقة الأساسية (مثلاً عند 12:06:10 لشمعة 12:05)
-                            # نقوم فوراً بتحديث الهدف ليكون الشمعة الحالية (12:06) ليتم فحصها عند 12:07:10
-                            mtg_entry_time = now_utc.strftime('%H:%M') 
-                            signals_col.update_one({"_id": pending_signal["_id"]}, {"$set": {
-                                "entry_time": mtg_entry_time,
-                                "is_mtg": True
-                            }})
-                            print(f"Signal lost at {target_check_time}. Silent MTG starts now for {mtg_entry_time}")
-                        else:
-                            # خسارة المضاعفة
-                            res_label = "MTG LOSS ❌"
-                            update_stats(res_label)
-                            w, l = get_stats()
-                            send_telegram_msg(f"🏁 *Result Update*\nDirection: {sent_dir}\nResult: {res_label}\n\n📊 Stats: W {w} | L {l}")
-                            signals_col.update_one({"_id": pending_signal["_id"]}, {"$set": {"status": "COMPLETED"}})
+                    result_text = "LOSS ❌"
+                    if direction == "CALL" and current_close > open_at_entry:
+                        result_text = "WIN ✅"
+                    elif direction == "PUT" and current_close < open_at_entry:
+                        result_text = "WIN ✅"
+                    
+                    update_stats(result_text)
+                    w, l = get_stats()
+                    send_telegram_msg(f"🏁 *M5 Result Update*\nDirection: {direction}\nResult: {result_text}\n\n📊 Stats: W {w} | L {l}")
+                    signals_col.update_one({"_id": pending_signal["_id"]}, {"$set": {"status": "COMPLETED"}})
 
-            # 2. تحليل إشارة جديدة (فقط إذا لم نكن في حالة انتظار مضاعفة فورية)
-            next_min = (now_utc + timedelta(minutes=1)).strftime('%H:%M')
-            if not signals_col.find_one({"entry_time": next_min}):
-                candle = get_api_data()
-                if candle:
-                    h_p, l_p, c_p = float(candle.get('high', 0)), float(candle.get('low', 0)), float(candle.get('close', 0))
-                    direction = "CALL" if c_p == h_p else ("PUT" if c_p == l_p else None)
+            # 2. تحليل 5 شموع لاتخاذ قرار جديد
+            data = get_api_data()
+            if data and len(data) == 5:
+                # فحص إذا كانت الـ 5 شموع كلها نفس الاتجاه
+                # ملاحظة: في الـ API عادة data[0] هي الأحدث
+                directions = []
+                for c in data:
+                    if float(c['close']) > float(c['open']): directions.append("CALL")
+                    elif float(c['close']) < float(c['open']): directions.append("PUT")
+                    else: directions.append("DOJI")
+                
+                # التأكد أن الـ 5 عناصر متطابقة وليست Doji
+                if all(d == "CALL" for d in directions):
+                    final_dir = "CALL"
+                elif all(d == "PUT" for d in directions):
+                    final_dir = "PUT"
+                else:
+                    final_dir = None
 
-                    if direction:
-                        send_telegram_msg(f"⚠️ *Signal Alert*\nPair: Facebook inc otc\nDirection: {direction}\nEntry: {next_min}\n(UTC 0)")
-                        signals_col.insert_one({
-                            "entry_time": next_min,
-                            "direction": direction,
-                            "status": "PENDING",
-                            "is_mtg": False,
-                            "timestamp": now_utc
-                        })
+                if final_dir:
+                    entry_time = (now_utc + timedelta(minutes=1)).strftime('%H:%M')
+                    # حفظ سعر الإغلاق الحالي ليكون هو سعر "الافتتاح" للصفقة القادمة
+                    current_price = float(data[0]['close'])
+                    
+                    msg = (
+                        f"⚠️ *Trend Alert (5 Candles)*\n\n"
+                        f"PAIR: Facebook inc otc\n"
+                        f"Direction: {final_dir}\n"
+                        f"Duration: 5 Minutes\n"
+                        f"Entry Time: {entry_time}\n"
+                        f"(UTC 0)"
+                    )
+                    send_telegram_msg(msg)
+                    signals_col.insert_one({
+                        "entry_time": entry_time,
+                        "open_price": current_price,
+                        "direction": final_dir,
+                        "status": "PENDING",
+                        "timestamp": now_utc
+                    })
             
             time.sleep(2)
         time.sleep(0.5)
