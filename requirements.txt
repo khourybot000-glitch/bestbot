@@ -4,3 +4,4 @@ gunicorn
 pymongo
 dnspython
 pytz
+pandas
