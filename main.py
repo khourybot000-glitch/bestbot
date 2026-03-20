@@ -6,16 +6,16 @@ from datetime import datetime, timedelta
 from flask import Flask
 from pymongo import MongoClient
 
-# --- الإعدادات (تم التحديث ببياناتك) ---
+# --- الإعدادات ---
 TELEGRAM_TOKEN = '8511172742:AAGqDR6vq4OIH5R_JbTp-YzFnnTCw2f5gF8'
 CHAT_ID = '-1003731752986'
 API_URL = "https://mrbeaxt.site/Qx/Qx.php?format=json&pair=FB_otc&timeframe=M1&limit=1"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 PORT = 8080
 
-# إعداد قاعدة البيانات
+# --- تغيير اسم قاعدة البيانات هنا ---
 client = MongoClient(MONGO_URI)
-db = client['TradingBot']
+db = client['KhouryBot_DB'] # تم تغيير الاسم هنا
 signals_col = db['signals']
 stats_col = db['stats']
 
@@ -23,14 +23,11 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Khourybot is Active - Port 8080 Open", 200
+    return "KhouryBot is Live - Database: KhouryBot_DB", 200
 
-# --- نظام الإحصائيات ---
 def update_stats(result):
-    if "WIN" in result:
-        stats_col.update_one({"_id": "daily_stats"}, {"$inc": {"wins": 1}}, upsert=True)
-    else:
-        stats_col.update_one({"_id": "daily_stats"}, {"$inc": {"losses": 1}}, upsert=True)
+    field = "wins" if "WIN" in result else "losses"
+    stats_col.update_one({"_id": "daily_stats"}, {"$inc": {field: 1}}, upsert=True)
 
 def get_stats():
     stats = stats_col.find_one({"_id": "daily_stats"})
@@ -38,103 +35,85 @@ def get_stats():
         return stats.get("wins", 0), stats.get("losses", 0)
     return 0, 0
 
-# --- وظائف التلغرام ---
 def send_telegram_msg(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
-    try:
-        requests.post(url, json=payload)
-    except Exception as e:
-        print(f"Telegram Error: {e}")
+    try: requests.post(url, json=payload)
+    except: pass
 
 def get_api_data():
     try:
         response = requests.get(API_URL).json()
         if response.get("success") and response.get("data"):
             return response["data"][0]
-    except Exception as e:
-        print(f"API Error: {e}")
-    return None
+    except: return None
 
-# --- منطق البوت الأساسي ---
 def job():
-    print("Bot Core Started...")
+    print("KhouryBot Core Started (Silent Martingale)...")
     
     while True:
         now_utc = datetime.now(pytz.utc)
         
-        # التنفيذ عند الثانية 10 من كل دقيقة
         if now_utc.second == 10:
-            current_min_str = now_utc.strftime('%H:%M')
-            
-            # 1. التحقق من نتيجة الصفقة السابقة (التي دخلت في الدقيقة السابقة)
-            target_entry_time = (now_utc - timedelta(minutes=1)).strftime('%H:%M')
-            pending_signal = signals_col.find_one({"entry_time": target_entry_time, "status": "PENDING"})
+            # 1. فحص الصفقات المنتظرة للنتيجة (أساسية أو مضاعفة)
+            target_time = (now_utc - timedelta(minutes=1)).strftime('%H:%M')
+            pending_signal = signals_col.find_one({"entry_time": target_time, "status": "PENDING"})
             
             if pending_signal:
                 candle = get_api_data()
                 if candle:
-                    close_p = float(candle['close'])
-                    high_p = float(candle['high'])
-                    low_p = float(candle['low'])
+                    open_p, close_p = float(candle['open']), float(candle['close'])
+                    sent_dir = pending_signal['direction']
+                    is_mtg_attempt = pending_signal.get('is_mtg', False)
                     
-                    # تحديد اتجاه السوق الحقيقي للمقارنة
-                    actual_market_dir = "CALL" if close_p == high_p else ("PUT" if close_p == low_p else "NONE")
+                    # هل الشمعة الحالية مطابقة للاتجاه؟
+                    won_current = (sent_dir == "PUT" and close_p < open_p) or (sent_dir == "CALL" and close_p > open_p)
                     
-                    # إذا كانت الإشارة المعكوسة تطابق السوق = ربح
-                    result_text = "WIN ✅" if pending_signal['direction'] == actual_market_dir else "LOSS ❌"
+                    if won_current:
+                        res_label = "MTG WIN ✅" if is_mtg_attempt else "WIN ✅"
+                        update_stats(res_label)
+                        w, l = get_stats()
+                        send_telegram_msg(f"🏁 *Result Update*\nDirection: {sent_dir}\nResult: {res_label}\n\n📊 Stats: W {w} | L {l}")
+                        signals_col.update_one({"_id": pending_signal["_id"]}, {"$set": {"status": "COMPLETED"}})
                     
-                    update_stats(result_text)
-                    w, l = get_stats()
-                    
-                    res_msg = (
-                        f"🏁 *Result Update (Inverted Logic)*\n"
-                        f"Direction Sent: {pending_signal['direction']}\n"
-                        f"Final Result: {result_text}\n\n"
-                        f"📊 *Current Stats*\n"
-                        f"Wins: {w} | Losses: {l}"
-                    )
-                    send_telegram_msg(res_msg)
-                    signals_col.update_one({"_id": pending_signal["_id"]}, {"$set": {"status": result_text}})
+                    else:
+                        if not is_mtg_attempt:
+                            # خسارة أولى: تحديث الوقت للدقيقة القادمة للصمت والانتظار
+                            new_entry_time = (now_utc + timedelta(minutes=1)).strftime('%H:%M')
+                            signals_col.update_one({"_id": pending_signal["_id"]}, {"$set": {
+                                "entry_time": new_entry_time,
+                                "is_mtg": True
+                            }})
+                            print(f"Silent Martingale started for {new_entry_time}")
+                        else:
+                            # خسارة المضاعفة: إرسال النتيجة النهائية
+                            res_label = "MTG LOSS ❌"
+                            update_stats(res_label)
+                            w, l = get_stats()
+                            send_telegram_msg(f"🏁 *Result Update*\nDirection: {sent_dir}\nResult: {res_label}\n\n📊 Stats: W {w} | L {l}")
+                            signals_col.update_one({"_id": pending_signal["_id"]}, {"$set": {"status": "COMPLETED"}})
 
-            # 2. تحليل إشارة جديدة بمنطق معكوس
-            candle = get_api_data()
-            if candle:
-                close_p = float(candle['close'])
-                high_p = float(candle['high'])
-                low_p = float(candle['low'])
-                
-                direction = None
-                # منطق معكوس (Reversal Logic)
-                if close_p == high_p: 
-                    direction = "PUT"
-                elif close_p == low_p: 
-                    direction = "CALL"
+            # 2. تحليل إشارة جديدة (منطق معكوس)
+            next_min = (now_utc + timedelta(minutes=1)).strftime('%H:%M')
+            if not signals_col.find_one({"entry_time": next_min}):
+                candle = get_api_data()
+                if candle:
+                    high_p, low_p, close_p = float(candle['high']), float(candle['low']), float(candle['close'])
+                    direction = "PUT" if close_p == high_p else ("CALL" if close_p == low_p else None)
 
-                if direction:
-                    entry_time = (now_utc + timedelta(minutes=1)).strftime('%H:%M')
-                    msg = (
-                        f"⚠️ *Inverted Signal Alert*\n\n"
-                        f"PAIR: Facebook inc otc\n"
-                        f"Direction: {direction}\n"
-                        f"Time Frame: M1\n"
-                        f"Entry Time: {entry_time}\n"
-                        f"(UTC 0)"
-                    )
-                    send_telegram_msg(msg)
-                    # تخزين في MongoDB
-                    signals_col.insert_one({
-                        "entry_time": entry_time,
-                        "direction": direction,
-                        "status": "PENDING",
-                        "timestamp": now_utc
-                    })
+                    if direction:
+                        send_telegram_msg(f"⚠️ *Signal Alert*\nPair: Facebook inc otc\nDirection: {direction}\nEntry: {next_min}\n(UTC 0)")
+                        signals_col.insert_one({
+                            "entry_time": next_min,
+                            "direction": direction,
+                            "status": "PENDING",
+                            "is_mtg": False,
+                            "timestamp": now_utc
+                        })
             
-            time.sleep(2) # منع تكرار الطلب في نفس الثانية
+            time.sleep(2)
         time.sleep(0.5)
 
 if __name__ == '__main__':
-    # تشغيل المنطق في Thread منفصل ليبقى الويب سيرفر متاحاً لـ UptimeRobot
     threading.Thread(target=job, daemon=True).start()
-    # فتح البورت 8080
     app.run(host='0.0.0.0', port=PORT)
