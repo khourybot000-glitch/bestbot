@@ -9,21 +9,21 @@ CORS(app)
 def analyze():
     pair = request.args.get('pair')
     try:
-        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=5"
+        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=10"
         resp = requests.get(url, timeout=5).json()
         if not resp.get("success"): return jsonify({"signal": None})
         
         data = resp["data"]
         # الاتجاه العام (فتح الأقدم 4 vs إغلاق الأحدث 0)
-        is_trend_up = float(data[0]['close']) > float(data[0]['open'])
-        is_trend_down = float(data[0]['close']) < float(data[0]['open'])
+        is_trend_up = float(data[0]['close']) > float(data[9]['open'])
+        is_trend_down = float(data[0]['close']) < float(data[9]['open'])
         
         # تأكيد الشمعة الحالية (إغلاق 0 vs فتح 0)
-        is_green = float(data[1]['close']) > float(data[1]['open'])
-        is_red = float(data[1]['close']) < float(data[1]['open'])
+        is_green = float(data[0]['close']) > float(data[0]['open'])
+        is_red = float(data[0]['close']) < float(data[0]['open'])
 
-        if is_trend_up and is_red: return jsonify({"signal": "UP"})
-        if is_trend_down and is_green: return jsonify({"signal": "DOWN"})
+        if is_trend_up and is_red: return jsonify({"signal": "DOWN"})
+        if is_trend_down and is_green: return jsonify({"signal": "UP"})
     except: pass
     return jsonify({"signal": None})
 
@@ -32,7 +32,7 @@ def check():
     pair = request.args.get('pair')
     direction = request.args.get('direction') 
     try:
-        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=5"
+        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=10"
         resp = requests.get(url, timeout=5).json()
         data = resp['data']
         
@@ -41,7 +41,7 @@ def check():
         
         # سعر فتح الشمعة الثالثة (بداية الصفقة قبل 3 دقائق)
         # في المصفوفة: 0=الحالية، 1=السابقة، 2=الثالثة
-        entry_open = float(data[0]['open']) 
+        entry_open = float(data[4]['open']) 
         
         # فحص النتيجة بناءً على مقارنة (إغلاق الحديثة vs فتح الثالثة)
         won = (direction == "UP" and current_close > entry_open) or \
