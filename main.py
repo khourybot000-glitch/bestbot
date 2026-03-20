@@ -2,6 +2,8 @@ import requests
 import time
 import threading
 import pytz
+import pandas as pd
+import pandas_ta as ta
 from datetime import datetime, timedelta
 from flask import Flask
 from pymongo import MongoClient
@@ -9,13 +11,18 @@ from pymongo import MongoClient
 # --- الإعدادات ---
 TELEGRAM_TOKEN = '8511172742:AAGqDR6vq4OIH5R_JbTp-YzFnnTCw2f5gF8'
 CHAT_ID = '-1003731752986'
-# طلبنا limit=5 لجلب آخر 5 شموع
-API_URL = "https://mrbeaxt.site/Qx/Qx.php?format=json&pair=FB_otc&timeframe=M1&limit=5"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 PORT = 8080
 
+# قائمة الأزواج الـ 10
+PAIRS = [
+    "USDINR_otc", "USDARS_otc", "USDPKR_otc", "USDMXN_otc", 
+    "USDNGN_otc", "FB_otc", "MSFT_otc", "USDBRL_otc", 
+    "USDBDT_otc", "USDPHP_otc"
+]
+
 client = MongoClient(MONGO_URI)
-db = client['KhouryBot_DB']
+db = client['Khoury123Bot_DB']
 signals_col = db['signals']
 stats_col = db['stats']
 
@@ -23,7 +30,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "KhouryBot M5 Strategy - 5 Candles Trend", 200
+    return "KhouryBot Radar M1 - Active", 200
 
 def update_stats(result):
     field = "wins" if "WIN" in result else "losses"
@@ -31,95 +38,92 @@ def update_stats(result):
 
 def get_stats():
     stats = stats_col.find_one({"_id": "daily_stats"})
-    if stats: return stats.get("wins", 0), stats.get("losses", 0)
-    return 0, 0
+    return (stats.get("wins", 0), stats.get("losses", 0)) if stats else (0, 0)
 
 def send_telegram_msg(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
-    try: requests.post(url, json=payload)
+    try: requests.post(url, json=payload, timeout=5)
     except: pass
 
-def get_api_data():
+def analyze_pair(pair_name):
     try:
-        response = requests.get(API_URL).json()
-        if response.get("success") and "data" in response:
-            return response["data"] # نرجع القائمة كاملة (5 شموع)
-    except: return None
+        # نطلب 60 شمعة لحساب المؤشرات رياضياً
+        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair_name}&timeframe=M1&limit=60"
+        response = requests.get(url, timeout=5).json()
+        if not response.get("success") or "data" not in response: return None, None
+        
+        df = pd.DataFrame(response["data"])
+        for col in ['open', 'high', 'low', 'close']: df[col] = df[col].astype(float)
+        df = df.sort_index(ascending=False).reset_index(drop=True)
+        
+        votes = {"CALL": 0, "PUT": 0}
+        
+        # حساب المؤشرات الـ 9 (Logic Binary)
+        votes["CALL" if ta.rsi(df['close'], 14).iloc[-1] > 50 else "PUT"] += 1
+        macd = ta.macd(df['close'])
+        votes["CALL" if macd.iloc[-1, 0] > macd.iloc[-1, 2] else "PUT"] += 1
+        stoch = ta.stoch(df['high'], df['low'], df['close'])
+        votes["CALL" if stoch.iloc[-1, 0] > stoch.iloc[-1, 1] else "PUT"] += 1
+        votes["CALL" if ta.ema(df['close'], 9).iloc[-1] > ta.ema(df['close'], 21).iloc[-1] else "PUT"] += 1
+        bb = ta.bbands(df['close'])
+        votes["CALL" if df['close'].iloc[-1] > bb.iloc[-1, 1] else "PUT"] += 1
+        votes["CALL" if ta.willr(df['high'], df['low'], df['close']) > -50 else "PUT"] += 1
+        votes["CALL" if ta.cci(df['high'], df['low'], df['close']) > 0 else "PUT"] += 1
+        adx = ta.adx(df['high'], df['low'], df['close'])
+        votes["CALL" if adx.iloc[-1, 1] > adx.iloc[-1, 2] else "PUT"] += 1
+        psar = ta.psar(df['high'], df['low'], df['close'])
+        votes["CALL" if df['close'].iloc[-1] > psar.iloc[-1, 0] else "PUT"] += 1
+
+        # فحص الشمعة الأخيرة فقط للارتداد
+        last_o, last_c = df['open'].iloc[-1], df['close'].iloc[-1]
+        
+        if votes["CALL"] >= 5 and last_o > last_c: return "CALL", last_c
+        if votes["PUT"] >= 5 and last_o < last_c: return "PUT", last_c
+        
+        return None, None
+    except: return None, None
 
 def job():
-    print("KhouryBot M5 Trend Strategy Started...")
-    
     while True:
         now_utc = datetime.now(pytz.utc)
-        
         if now_utc.second == 10:
-            current_min_str = now_utc.strftime('%H:%M')
+            # 1. فحص النتيجة
+            target_time = (now_utc - timedelta(minutes=1)).strftime('%H:%M')
+            pending = signals_col.find_one({"entry_time": target_time, "status": "PENDING"})
             
-            # 1. فحص النتيجة (بعد مرور 5 دقائق من وقت الدخول)
-            # إذا دخلنا 12:05، نفحص عند 12:10:10 (أي الدخول كان قبل 5 دقائق من الآن)
-            target_entry_time = (now_utc - timedelta(minutes=5)).strftime('%H:%M')
-            pending_signal = signals_col.find_one({"entry_time": target_entry_time, "status": "PENDING"})
-            
-            if pending_signal:
-                # لجلب نتيجة صفقة 5 دقائق، نحتاج مقارنة السعر الآن بسعر الافتتاح المخزن
-                candles = get_api_data()
-                if candles:
-                    current_close = float(candles[0]['close']) # إغلاق أحدث شمعة
-                    open_at_entry = pending_signal['open_price']
-                    direction = pending_signal['direction']
-                    
-                    result_text = "LOSS ❌"
-                    if direction == "CALL" and current_close > open_at_entry:
-                        result_text = "WIN ✅"
-                    elif direction == "PUT" and current_close < open_at_entry:
-                        result_text = "WIN ✅"
-                    
-                    update_stats(result_text)
+            if pending:
+                res = requests.get(f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pending['pair']}&timeframe=M1&limit=1").json()
+                if res.get("success"):
+                    c = res["data"][0]
+                    won = (pending['direction'] == "CALL" and float(c['close']) > float(c['open'])) or \
+                          (pending['direction'] == "PUT" and float(c['close']) < float(c['open']))
+                    res_txt = "WIN ✅" if won else "LOSS ❌"
+                    update_stats(res_txt)
                     w, l = get_stats()
-                    send_telegram_msg(f"🏁 *M5 Result Update*\nDirection: {direction}\nResult: {result_text}\n\n📊 Stats: W {w} | L {l}")
-                    signals_col.update_one({"_id": pending_signal["_id"]}, {"$set": {"status": "COMPLETED"}})
+                    send_telegram_msg(f"🏁 *{pending['pair']}* | {pending['direction']} | {res_txt}\n📊 W:{w} L:{l}")
+                    signals_col.update_one({"_id": pending["_id"]}, {"$set": {"status": "COMPLETED"}})
 
-            # 2. تحليل 5 شموع لاتخاذ قرار جديد
-            data = get_api_data()
-            if data and len(data) == 5:
-                # فحص إذا كانت الـ 5 شموع كلها نفس الاتجاه
-                # ملاحظة: في الـ API عادة data[0] هي الأحدث
-                directions = []
-                for c in data:
-                    if float(c['close']) > float(c['open']): directions.append("CALL")
-                    elif float(c['close']) < float(c['open']): directions.append("PUT")
-                    else: directions.append("DOJI")
-                
-                # التأكد أن الـ 5 عناصر متطابقة وليست Doji
-                if all(d == "CALL" for d in directions):
-                    final_dir = "CALL"
-                elif all(d == "PUT" for d in directions):
-                    final_dir = "PUT"
-                else:
-                    final_dir = None
-
-                if final_dir:
-                    entry_time = (now_utc + timedelta(minutes=1)).strftime('%H:%M')
-                    # حفظ سعر الإغلاق الحالي ليكون هو سعر "الافتتاح" للصفقة القادمة
-                    current_price = float(data[0]['close'])
-                    
-                    msg = (
-                        f"⚠️ *Trend Alert (5 Candles)*\n\n"
-                        f"PAIR: Facebook inc otc\n"
-                        f"Direction: {final_dir}\n"
-                        f"Duration: 5 Minutes\n"
-                        f"Entry Time: {entry_time}\n"
-                        f"(UTC 0)"
-                    )
-                    send_telegram_msg(msg)
-                    signals_col.insert_one({
-                        "entry_time": entry_time,
-                        "open_price": current_price,
-                        "direction": final_dir,
-                        "status": "PENDING",
-                        "timestamp": now_utc
-                    })
+            # 2. تحليل الرادار (إشارة واحدة نظيفة)
+            if signals_col.count_documents({"status": "PENDING"}) == 0:
+                for pair in PAIRS:
+                    direction, entry_p = analyze_pair(pair)
+                    if direction:
+                        next_min = (now_utc + timedelta(minutes=1)).strftime('%H:%M')
+                        # الرسالة المطلوبة مع Time Frame
+                        msg = (
+                            f"⚠️ *Signal Alert*\n\n"
+                            f"Pair: `{pair}`\n"
+                            f"Direction: *{direction}*\n"
+                            f"Time Frame: M1\n"
+                            f"Time: {next_min}"
+                        )
+                        send_telegram_msg(msg)
+                        signals_col.insert_one({
+                            "entry_time": next_min, "pair": pair, "direction": direction,
+                            "open_price": entry_p, "status": "PENDING", "timestamp": now_utc
+                        })
+                        break
             
             time.sleep(2)
         time.sleep(0.5)
