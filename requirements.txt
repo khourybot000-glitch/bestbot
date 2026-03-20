@@ -5,4 +5,3 @@ pymongo
 dnspython
 pytz
 pandas
-pandas_ta
