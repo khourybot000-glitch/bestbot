@@ -76,7 +76,7 @@ def job():
                     high_p = float(candle['high'])
                     low_p = float(candle['low'])
                     
-                    actual_dir = "PUT" if close_p == high_p else ("CALL" if close_p == low_p else "NONE")
+                    actual_dir = "CALL" if close_p == high_p else ("PUT" if close_p == low_p else "NONE")
                     result_text = "WIN ✅" if pending_signal['direction'] == actual_dir else "LOSS ❌"
                     
                     # تحديث الإحصائيات في MongoDB
@@ -103,8 +103,8 @@ def job():
                 low_p = float(candle['low'])
                 
                 direction = None
-                if close_p == high_p: direction = "CALL"
-                elif close_p == low_p: direction = "PUT"
+                if close_p == high_p: direction = "PUT"
+                elif close_p == low_p: direction = "CALL"
 
                 if direction:
                     entry_time = (now_utc + timedelta(minutes=1)).strftime('%H:%M')
