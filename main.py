@@ -9,16 +9,16 @@ CORS(app)
 def analyze():
     pair = request.args.get('pair')
     try:
-        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=10"
+        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=5"
         resp = requests.get(url, timeout=5).json()
         if not resp.get("success"): return jsonify({"signal": None})
         
         data = resp["data"]
-        # الاتجاه العام (فتح الأقدم 4 vs إغلاق الأحدث 0)
+        # الاتجاه العام (إغلاق الأحدث 0 vs فتح الأقدم 4) ليعبر عن حركة 5 دقائق
         is_trend_up = float(data[0]['close']) > float(data[4]['open'])
         is_trend_down = float(data[0]['close']) < float(data[4]['open'])
         
-        # تأكيد الشمعة الحالية (إغلاق 0 vs فتح 0)
+        # تأكيد الشمعة الحالية (لضمان وجود زخم في نفس الاتجاه)
         is_green = float(data[0]['close']) > float(data[0]['open'])
         is_red = float(data[0]['close']) < float(data[0]['open'])
 
@@ -32,24 +32,21 @@ def check():
     pair = request.args.get('pair')
     direction = request.args.get('direction') 
     try:
-        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=10"
+        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=5"
         resp = requests.get(url, timeout=5).json()
         data = resp['data']
         
-        # سعر إغلاق أحدث شمعة (نهاية الصفقة)
+        # التعديل هنا: المقارنة بين إغلاق الشمعة 0 وفتح الشمعة 4
         current_close = float(data[0]['close'])
+        start_open = float(data[4]['open'])
         
-        # سعر فتح الشمعة الثالثة (بداية الصفقة قبل 3 دقائق)
-        # في المصفوفة: 0=الحالية، 1=السابقة، 2=الثالثة
-        entry_open = float(data[4]['open']) 
-        
-        # فحص النتيجة بناءً على مقارنة (إغلاق الحديثة vs فتح الثالثة)
-        won = (direction == "UP" and current_close > entry_open) or \
-              (direction == "DOWN" and current_close < entry_open)
+        # فحص النتيجة بناءً على اتجاه الـ 5 دقائق بالكامل
+        won = (direction == "UP" and current_close > start_open) or \
+              (direction == "DOWN" and current_close < start_open)
               
         return jsonify({"result": "WIN" if won else "LOSS"})
-    except Exception as e:
-        return jsonify({"result": "ERROR", "msg": str(e)})
+    except:
+        return jsonify({"result": "ERROR"})
 
 if __name__ == '__main__':
     import os
