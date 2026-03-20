@@ -7,12 +7,13 @@ CORS(app)
 
 def get_candles(pair):
     try:
-        # جلب آخر شمعتين فقط للتحليل
-        url = f"https://mrbeaxt.site/Qx/Qx.php?pair={pair}&limit=2"
+        # طلب البيانات مع التأكد من جلب عدد كافٍ من الشموع
+        url = f"https://mrbeaxt.site/Qx/Qx.php?pair={pair}&limit=5"
         response = requests.get(url, timeout=10)
         data = response.json()
         return data
-    except:
+    except Exception as e:
+        print(f"Error: {e}")
         return None
 
 @app.route('/analyze', methods=['GET'])
@@ -21,29 +22,43 @@ def analyze():
     data = get_candles(pair)
     
     if not data or len(data) < 2:
-        return jsonify({"signal": None, "error": "No data"})
+        return jsonify({"signal": None, "error": "Insufficient data"})
 
-    # الشمعة 2 هي الأحدث (الحالية)، الشمعة 1 هي السابقة
-    c2 = data[0] # Current (M2)
-    c1 = data[1] # Previous (M1)
-
-    # تحديد لون الشموع
-    c1_up = float(c1['close']) > float(c1['open'])
-    c1_down = float(c1['close']) < float(c1['open'])
+    # البحث عن الشموع بناءً على الـ ID لضمان الدقة المطلقة
+    # m2_now (الشمعة الثانية - الأحدث) -> id: 1
+    # m1_prev (الشمعة الأولى - السابقة) -> id: 2
     
-    c2_up = float(c2['close']) > float(c2['open'])
-    c2_down = float(c2['close']) < float(c2['open'])
+    m2_now = next((c for c in data if int(c.get('id', 0)) == 1), None)
+    m1_prev = next((c for c in data if int(c.get('id', 0)) == 2), None)
+
+    if not m1_prev or not m2_now:
+        # إذا لم يجد الـ IDs المطلوبة، نأخذ أول عنصرين كاحتياط
+        m2_now = data[0]
+        m1_prev = data[1]
+
+    # استخراج الأسعار وتحويلها لأرقام
+    open1, close1 = float(m1_prev['open']), float(m1_prev['close'])
+    open2, close2 = float(m2_now['open']), float(m2_now['close'])
+
+    # تحديد حالة الشمعة (Green = Close > Open)
+    m1_is_up = close1 > open1    # صاعدة (الأولى)
+    m1_is_down = close1 < open1  # هابطة (الأولى)
+    
+    m2_is_up = close2 > open2    # صاعدة (الثانية)
+    m2_is_down = close2 < open2  # هابطة (الثانية)
 
     signal = None
 
-    # تطبيق الإستراتيجية المطلوبة
-    # 1. صاعدة ثم هابطة -> هبوط
-    if c1_up and c2_down:
+    # الاستراتيجية المطلوبة:
+    # 1. الأولى صاعدة + الثانية هابطة -> هبوط (DOWN)
+    if m1_is_up and m2_is_down:
         signal = "DOWN"
     
-    # 2. هابطة ثم صاعدة -> صعود
-    elif c1_down and c2_up:
+    # 2. الأولى هابطة + الثانية صاعدة -> صعود (UP)
+    elif m1_is_down and m2_is_up:
         signal = "UP"
+
+    print(f"[{pair}] Analysis -> M1: {'UP' if m1_is_up else 'DOWN'} | M2: {'UP' if m2_is_up else 'DOWN'} | Signal: {signal}")
 
     return jsonify({"signal": signal})
 
@@ -52,14 +67,12 @@ def check():
     pair = request.args.get('pair')
     direction = request.args.get('direction')
     data = get_candles(pair)
-    
-    if not data:
-        return jsonify({"result": "ERROR"})
+    if not data: return jsonify({"result": "ERROR"})
 
-    # فحص الشمعة الأخيرة بعد دخول الصفقة
-    last_candle = data[0]
-    is_up = float(last_candle['close']) > float(last_candle['open'])
-    is_down = float(last_candle['close']) < float(last_candle['open'])
+    # فحص نتيجة الشمعة الأحدث بعد انتهاء الصفقة (id: 1)
+    last = next((c for c in data if int(c.get('id', 0)) == 1), data[0])
+    is_up = float(last['close']) > float(last['open'])
+    is_down = float(last['close']) < float(last['open'])
 
     result = "LOSS"
     if (direction == "UP" and is_up) or (direction == "DOWN" and is_down):
