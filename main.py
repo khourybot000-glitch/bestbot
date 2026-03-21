@@ -9,7 +9,7 @@ CORS(app)
 def analyze():
     pair = request.args.get('pair')
     try:
-        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=5"
+        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=10"
         resp = requests.get(url, timeout=5).json()
         if not resp.get("success"): return jsonify({"signal": None})
         
@@ -32,7 +32,7 @@ def check():
     pair = request.args.get('pair')
     direction = request.args.get('direction') 
     try:
-        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=5"
+        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=10"
         resp = requests.get(url, timeout=5).json()
         data = resp['data']
         
