@@ -22,8 +22,8 @@ def analyze():
         is_green = float(data[0]['close']) > float(data[0]['open'])
         is_red = float(data[0]['close']) < float(data[0]['open'])
 
-        if is_trend_up and is_green: return jsonify({"signal": "UP"})
-        if is_trend_down and is_red: return jsonify({"signal": "DOWN"})
+        if is_trend_up and is_red: return jsonify({"signal": "UP"})
+        if is_trend_down and is_green: return jsonify({"signal": "DOWN"})
     except: pass
     return jsonify({"signal": None})
 
@@ -38,7 +38,7 @@ def check():
         
         # التعديل هنا: المقارنة بين إغلاق الشمعة 0 وفتح الشمعة 4
         current_close = float(data[0]['close'])
-        start_open = float(data[4]['open'])
+        start_open = float(data[0]['open'])
         
         # فحص النتيجة بناءً على اتجاه الـ 5 دقائق بالكامل
         won = (direction == "UP" and current_close > start_open) or \
