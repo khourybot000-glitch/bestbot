@@ -15,8 +15,8 @@ def analyze():
         
         data = resp["data"]
         # الاتجاه العام (إغلاق الأحدث 0 vs فتح الأقدم 4) ليعبر عن حركة 5 دقائق
-        is_trend_up = float(data[0]['close']) > float(data[2]['open'])
-        is_trend_down = float(data[0]['close']) < float(data[2]['open'])
+        is_trend_up = float(data[0]['close']) > float(data[1]['open'])
+        is_trend_down = float(data[0]['close']) < float(data[1]['open'])
         
         # تأكيد الشمعة الحالية (لضمان وجود زخم في نفس الاتجاه)
         is_green = float(data[0]['close']) > float(data[0]['open'])
