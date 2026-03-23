@@ -15,12 +15,12 @@ def analyze():
         
         data = resp["data"]
         # الاتجاه العام (إغلاق الأحدث 0 vs فتح الأقدم 4) ليعبر عن حركة 5 دقائق
-        is_trend_up = float(data[0]['close']) > float(data[2]['open'])
-        is_trend_down = float(data[0]['close']) < float(data[2]['open'])
+        is_trend_up = float(data[0]['close']) > float(data[3]['open'])
+        is_trend_down = float(data[0]['close']) < float(data[3]['open'])
         
         # تأكيد الشمعة الحالية (لضمان وجود زخم في نفس الاتجاه)
-        is_green = float(data[0]['close']) > float(data[0]['open'])
-        is_red = float(data[0]['close']) < float(data[0]['open'])
+        is_green = float(data[1]['close']) > float(data[1]['open'])
+        is_red = float(data[1]['close']) < float(data[1]['open'])
 
         if is_trend_up and is_green: return jsonify({"signal": "UP"})
         if is_trend_down and is_red: return jsonify({"signal": "DOWN"})
