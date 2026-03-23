@@ -38,7 +38,7 @@ def check():
         
         # التعديل هنا: المقارنة بين إغلاق الشمعة 0 وفتح الشمعة 4
         current_close = float(data[0]['close'])
-        start_open = float(data[1]['open'])
+        start_open = float(data[0]['open'])
         
         # فحص النتيجة بناءً على اتجاه الـ 5 دقائق بالكامل
         won = (direction == "UP" and current_close > start_open) or \
