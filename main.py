@@ -25,10 +25,10 @@ def analyze():
         is_red = float(data[0]['close']) < float(data[9]['open'])
 
         if is_trend_up and is_red:
-            return jsonify({"signal": "DOWN"})
+            return jsonify({"signal": "UP"})
 
         if is_trend_down and is_green:
-            return jsonify({"signal": "UP"})
+            return jsonify({"signal": "DOWN"})
 
     except:
         pass
