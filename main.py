@@ -56,7 +56,7 @@ def check():
     direction = request.args.get('direction') 
 
     try:
-        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=5"
+        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=6"
         resp = requests.get(url, timeout=5).json()
         data = resp['data']
 
