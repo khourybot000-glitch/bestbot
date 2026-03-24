@@ -38,11 +38,11 @@ def analyze():
 
         # ✅ تقاطع صعود (EMA2 يقطع EMA5 للأعلى)
         if prev['ema2'] < prev['ema5'] and curr['ema2'] > curr['ema5']:
-            return jsonify({"signal": "DOWN"})
+            return jsonify({"signal": "UP"})
 
         # ✅ تقاطع هبوط (EMA2 يقطع EMA5 للأسفل)
         elif prev['ema2'] > prev['ema5'] and curr['ema2'] < curr['ema5']:
-            return jsonify({"signal": "UP"})
+            return jsonify({"signal": "DOWN"})
 
     except:
         pass
@@ -61,7 +61,7 @@ def check():
         data = resp['data']
 
         current_close = float(data[0]['open'])
-        prev_open = float(data[1]['open'])
+        prev_open = float(data[5]['open'])
 
         won = (direction == "UP" and current_close > prev_open) or \
               (direction == "DOWN" and current_close < prev_open)
