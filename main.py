@@ -39,13 +39,13 @@ def analyze():
         if (prev['ema5'] < prev['ema10'] and 
             curr['ema5'] > curr['ema10'] and 
             curr['close'] > curr['ema50']):
-            return jsonify({"signal": "DOWN"})
+            return jsonify({"signal": "UP"})
 
         # 🔽 تقاطع هبوط + فلتر EMA50
         elif (prev['ema5'] > prev['ema10'] and 
               curr['ema5'] < curr['ema10'] and 
               curr['close'] < curr['ema50']):
-            return jsonify({"signal": "UP"})
+            return jsonify({"signal": "DOWN"})
 
     except:
         pass
