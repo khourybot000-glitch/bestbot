@@ -17,17 +17,17 @@ def analyze():
         data = resp["data"]
 
         # شرط الترند الجديد (شمعة قوية)
-        is_trend_up = float(data[5]['close']) > float(data[9]['open'])
-        is_trend_down = float(data[5]['close']) < float(data[9]['open'])
+        is_trend_up = float(data[0]['close']) > float(data[4]['open'])
+        is_trend_down = float(data[0]['close']) < float(data[4]['open'])
 
         # تأكيد الشمعة السابقة
-        is_green = float(data[0]['close']) > float(data[9]['open'])
-        is_red = float(data[0]['close']) < float(data[9]['open'])
+        is_green = float(data[0]['close']) > float(data[0]['open'])
+        is_red = float(data[0]['close']) < float(data[0]['open'])
 
-        if is_trend_up and is_red:
+        if is_trend_up and is_green:
             return jsonify({"signal": "UP"})
 
-        if is_trend_down and is_green:
+        if is_trend_down and is_red:
             return jsonify({"signal": "DOWN"})
 
     except:
