@@ -17,18 +17,18 @@ def analyze():
         data = resp["data"]
 
         # شرط الترند الجديد (شمعة قوية)
-        is_trend_up = float(data[0]['close']) == float(data[0]['high'])
-        is_trend_down = float(data[0]['close']) == float(data[0]['low'])
+        is_trend_up = float(data[5]['close']) > float(data[9]['open'])
+        is_trend_down = float(data[5]['close']) < float(data[9]['open'])
 
         # تأكيد الشمعة السابقة
-        is_green = float(data[0]['close']) > float(data[19]['open'])
-        is_red = float(data[0]['close']) < float(data[19]['open'])
+        is_green = float(data[0]['close']) > float(data[9]['open'])
+        is_red = float(data[0]['close']) < float(data[9]['open'])
 
-        if is_trend_up and is_green:
-            return jsonify({"signal": "UP"})
-
-        if is_trend_down and is_red:
+        if is_trend_up and is_red:
             return jsonify({"signal": "DOWN"})
+
+        if is_trend_down and is_green:
+            return jsonify({"signal": "UP"})
 
     except:
         pass
@@ -41,12 +41,12 @@ def check():
     pair = request.args.get('pair')
     direction = request.args.get('direction') 
     try:
-        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=5"
+        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=6"
         resp = requests.get(url, timeout=5).json()
         data = resp['data']
         
         current_close = float(data[0]['open'])
-        start_open = float(data[2]['open'])
+        start_open = float(data[5]['open'])
         
         won = (direction == "UP" and current_close > start_open) or \
               (direction == "DOWN" and current_close < start_open)
