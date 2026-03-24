@@ -61,7 +61,7 @@ def check():
         data = resp['data']
 
         current_close = float(data[0]['open'])
-        prev_open = float(data[5]['open'])
+        prev_open = float(data[3]['open'])
 
         won = (direction == "UP" and current_close > prev_open) or \
               (direction == "DOWN" and current_close < prev_open)
