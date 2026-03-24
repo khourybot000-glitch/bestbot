@@ -13,38 +13,35 @@ def calculate_ema(df, period):
 def analyze():
     pair = request.args.get('pair')
     try:
-        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=60"
+        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=50"
         resp = requests.get(url, timeout=5).json()
-        
         if not resp.get("success"):
             return jsonify({"signal": None})
         
         data = resp["data"]
 
+        # تحويل ل DataFrame
         df = pd.DataFrame(data)
         df['close'] = df['close'].astype(float)
 
-        # ترتيب الشموع
-        df = df.iloc[::-1].reset_index(drop=True)
+        # حساب EMA20
+        df['ema20'] = calculate_ema(df, 20)
 
-        # ✅ EMA 5 و EMA 10 و EMA 50
-        df['ema5'] = calculate_ema(df, 5)
-        df['ema10'] = calculate_ema(df, 10)
-        df['ema50'] = calculate_ema(df, 50)
+        # نفس تحليلك
+        is_trend_up = float(data[0]['close']) > float(data[1]['open'])
+        is_trend_down = float(data[0]['close']) < float(data[1]['open'])
 
-        prev = df.iloc[-2]
-        curr = df.iloc[-1]
+        is_green = float(data[1]['close']) > float(data[1]['open'])
+        is_red = float(data[1]['close']) < float(data[1]['open'])
 
-        # 🔼 تقاطع صعود + فلتر EMA50
-        if (prev['ema5'] < prev['ema10'] and 
-            curr['ema5'] > curr['ema10'] and 
-            curr['close'] > curr['ema50']):
+        current_close = float(data[0]['close'])
+        current_ema20 = df.iloc[0]['ema20']
+
+        # فلترة EMA20
+        if is_trend_up and is_red and current_close > current_ema20:
             return jsonify({"signal": "UP"})
 
-        # 🔽 تقاطع هبوط + فلتر EMA50
-        elif (prev['ema5'] > prev['ema10'] and 
-              curr['ema5'] < curr['ema10'] and 
-              curr['close'] < curr['ema50']):
+        if is_trend_down and is_green and current_close < current_ema20:
             return jsonify({"signal": "DOWN"})
 
     except:
@@ -57,20 +54,18 @@ def analyze():
 def check():
     pair = request.args.get('pair')
     direction = request.args.get('direction') 
-
     try:
-        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=6"
+        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=5"
         resp = requests.get(url, timeout=5).json()
         data = resp['data']
-
-        current_close = float(data[1]['open'])
-        prev_open = float(data[3]['open'])
-
-        won = (direction == "UP" and current_close > prev_open) or \
-              (direction == "DOWN" and current_close < prev_open)
-
+        
+        current_close = float(data[0]['open'])
+        start_open = float(data[2]['open'])
+        
+        won = (direction == "UP" and current_close > start_open) or \
+              (direction == "DOWN" and current_close < start_open)
+              
         return jsonify({"result": "WIN" if won else "LOSS"})
-
     except:
         return jsonify({"result": "ERROR"})
 
