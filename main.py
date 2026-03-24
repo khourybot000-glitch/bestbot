@@ -1,31 +1,50 @@
 import requests
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+import pandas as pd
 
 app = Flask(__name__)
 CORS(app)
+
+def calculate_ema(df, period):
+    return df['close'].ewm(span=period, adjust=False).mean()
 
 @app.route('/analyze', methods=['GET'])
 def analyze():
     pair = request.args.get('pair')
     try:
-        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=5"
+        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=30"
         resp = requests.get(url, timeout=5).json()
-        if not resp.get("success"): return jsonify({"signal": None})
+        if not resp.get("success"):
+            return jsonify({"signal": None})
         
         data = resp["data"]
-        # الاتجاه العام (إغلاق الأحدث 0 vs فتح الأقدم 4) ليعبر عن حركة 5 دقائق
-        is_trend_up = float(data[0]['close']) > float(data[0]['open'])
-        is_trend_down = float(data[0]['close']) < float(data[0]['open'])
-        
-        # تأكيد الشمعة الحالية (لضمان وجود زخم في نفس الاتجاه)
-        is_green = float(data[1]['close']) > float(data[1]['open'])
-        is_red = float(data[1]['close']) < float(data[1]['open'])
 
-        if is_trend_up and is_red: return jsonify({"signal": "UP"})
-        if is_trend_down and is_green: return jsonify({"signal": "DOWN"})
-    except: pass
+        # تحويل البيانات لـ DataFrame
+        df = pd.DataFrame(data)
+        df['close'] = df['close'].astype(float)
+
+        # حساب EMA
+        df['ema5'] = calculate_ema(df, 5)
+        df['ema20'] = calculate_ema(df, 20)
+
+        # آخر شمعتين
+        prev = df.iloc[-2]
+        curr = df.iloc[-1]
+
+        # تقاطع صعود
+        if prev['ema5'] < prev['ema20'] and curr['ema5'] > curr['ema20']:
+            return jsonify({"signal": "UP"})
+
+        # تقاطع هبوط
+        elif prev['ema5'] > prev['ema20'] and curr['ema5'] < curr['ema20']:
+            return jsonify({"signal": "DOWN"})
+
+    except:
+        pass
+
     return jsonify({"signal": None})
+
 
 @app.route('/check', methods=['GET'])
 def check():
@@ -36,17 +55,16 @@ def check():
         resp = requests.get(url, timeout=5).json()
         data = resp['data']
         
-        # التعديل هنا: المقارنة بين إغلاق الشمعة 0 وفتح الشمعة 4
         current_close = float(data[0]['open'])
-        start_open = float(data[1]['open'])
+        prev_open = float(data[2]['open'])
         
-        # فحص النتيجة بناءً على اتجاه الـ 5 دقائق بالكامل
-        won = (direction == "UP" and current_close > start_open) or \
-              (direction == "DOWN" and current_close < start_open)
+        won = (direction == "UP" and current_close > prev_open) or \
+              (direction == "DOWN" and current_close < prev_open)
               
         return jsonify({"result": "WIN" if won else "LOSS"})
     except:
         return jsonify({"result": "ERROR"})
+
 
 if __name__ == '__main__':
     import os
