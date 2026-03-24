@@ -13,7 +13,7 @@ def calculate_ema(df, period):
 def analyze():
     pair = request.args.get('pair')
     try:
-        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=30"
+        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=60"
         resp = requests.get(url, timeout=5).json()
         
         if not resp.get("success"):
@@ -21,27 +21,30 @@ def analyze():
         
         data = resp["data"]
 
-        # تحويل البيانات
         df = pd.DataFrame(data)
         df['close'] = df['close'].astype(float)
 
-        # 🔥 إصلاح ترتيب الشموع
+        # ترتيب الشموع
         df = df.iloc[::-1].reset_index(drop=True)
 
-        # حساب EMA2 و EMA5
-        df['ema2'] = calculate_ema(df, 2)
+        # ✅ EMA 5 و EMA 10 و EMA 50
         df['ema5'] = calculate_ema(df, 5)
+        df['ema10'] = calculate_ema(df, 10)
+        df['ema50'] = calculate_ema(df, 50)
 
-        # آخر شمعتين
         prev = df.iloc[-2]
         curr = df.iloc[-1]
 
-        # ✅ تقاطع صعود (EMA2 يقطع EMA5 للأعلى)
-        if prev['ema2'] < prev['ema5'] and curr['ema2'] > curr['ema5']:
+        # 🔼 تقاطع صعود + فلتر EMA50
+        if (prev['ema5'] < prev['ema10'] and 
+            curr['ema5'] > curr['ema10'] and 
+            curr['close'] > curr['ema50']):
             return jsonify({"signal": "UP"})
 
-        # ✅ تقاطع هبوط (EMA2 يقطع EMA5 للأسفل)
-        elif prev['ema2'] > prev['ema5'] and curr['ema2'] < curr['ema5']:
+        # 🔽 تقاطع هبوط + فلتر EMA50
+        elif (prev['ema5'] > prev['ema10'] and 
+              curr['ema5'] < curr['ema10'] and 
+              curr['close'] < curr['ema50']):
             return jsonify({"signal": "DOWN"})
 
     except:
@@ -60,7 +63,7 @@ def check():
         resp = requests.get(url, timeout=5).json()
         data = resp['data']
 
-        current_close = float(data[0]['open'])
+        current_close = float(data[1]['open'])
         prev_open = float(data[3]['open'])
 
         won = (direction == "UP" and current_close > prev_open) or \
