@@ -1,47 +1,33 @@
 import requests
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-import pandas as pd
 
 app = Flask(__name__)
 CORS(app)
-
-def calculate_ema(df, period):
-    return df['close'].ewm(span=period, adjust=False).mean()
 
 @app.route('/analyze', methods=['GET'])
 def analyze():
     pair = request.args.get('pair')
     try:
-        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=50"
+        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=25"
         resp = requests.get(url, timeout=5).json()
         if not resp.get("success"):
             return jsonify({"signal": None})
         
         data = resp["data"]
 
-        # تحويل ل DataFrame
-        df = pd.DataFrame(data)
-        df['close'] = df['close'].astype(float)
+        # شرط الترند الجديد (شمعة قوية)
+        is_trend_up = float(data[0]['close']) == float(data[0]['high'])
+        is_trend_down = float(data[0]['close']) == float(data[0]['low'])
 
-        # حساب EMA20
-        df['ema20'] = calculate_ema(df, 20)
+        # تأكيد الشمعة السابقة
+        is_green = float(data[0]['close']) > float(data[19]['open'])
+        is_red = float(data[0]['close']) < float(data[19]['open'])
 
-        # نفس تحليلك
-        is_trend_up = float(data[0]['close']) > float(data[1]['open'])
-        is_trend_down = float(data[0]['close']) < float(data[1]['open'])
-
-        is_green = float(data[1]['close']) > float(data[1]['open'])
-        is_red = float(data[1]['close']) < float(data[1]['open'])
-
-        current_close = float(data[0]['close'])
-        current_ema20 = df.iloc[0]['ema20']
-
-        # فلترة EMA20
-        if is_trend_up and is_red and current_close > current_ema20:
+        if is_trend_up and is_green:
             return jsonify({"signal": "UP"})
 
-        if is_trend_down and is_green and current_close < current_ema20:
+        if is_trend_down and is_red:
             return jsonify({"signal": "DOWN"})
 
     except:
