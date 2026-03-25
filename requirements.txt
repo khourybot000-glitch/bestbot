@@ -6,3 +6,4 @@ dnspython
 pytz
 pandas
 flask_cors
+websocket-client
