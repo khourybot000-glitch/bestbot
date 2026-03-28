@@ -1,9 +1,5 @@
-requests
-flask
-gunicorn
-pymongo
-dnspython
-pytz
-pandas
-flask_cors
+Flask
+pymongo[srv]
 websocket-client
+python-telegram-bot
+requests
