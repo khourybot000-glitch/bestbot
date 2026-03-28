@@ -1,6 +1,4 @@
-Flask
-pymongo[srv]
+flask
+pyTelegramBotAPI
+pymongo
 websocket-client
-python-telegram-bot
-requests
-gunicorn
