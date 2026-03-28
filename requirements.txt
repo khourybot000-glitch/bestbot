@@ -3,3 +3,4 @@ pymongo[srv]
 websocket-client
 python-telegram-bot
 requests
+gunicorn
