@@ -19,11 +19,11 @@ def analyze():
         is_trend_down = float(data[0]['close']) < float(data[0]['open'])
         
         # تأكيد الشمعة الحالية (لضمان وجود زخم في نفس الاتجاه)
-        is_green = float(data[1]['close']) > float(data[1]['open'])
-        is_red = float(data[1]['close']) < float(data[1]['open'])
+        is_green = float(data[0]['close']) > float(data[4]['open'])
+        is_red = float(data[0]['close']) < float(data[4]['open'])
 
-        if is_trend_up and is_red: return jsonify({"signal": "UP"})
-        if is_trend_down and is_green: return jsonify({"signal": "DOWN"})
+        if is_trend_up and is_red: return jsonify({"signal": "DOWN"})
+        if is_trend_down and is_green: return jsonify({"signal": "UP"})
     except: pass
     return jsonify({"signal": None})
 
@@ -32,13 +32,13 @@ def check():
     pair = request.args.get('pair')
     direction = request.args.get('direction') 
     try:
-        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=5"
+        url = f"https://mrbeaxt.site/Qx/Qx.php?format=json&pair={pair}&timeframe=M1&limit=6"
         resp = requests.get(url, timeout=5).json()
         data = resp['data']
         
         # التعديل هنا: المقارنة بين إغلاق الشمعة 0 وفتح الشمعة 4
         current_close = float(data[0]['open'])
-        start_open = float(data[1]['open'])
+        start_open = float(data[5]['open'])
         
         # فحص النتيجة بناءً على اتجاه الـ 5 دقائق بالكامل
         won = (direction == "UP" and current_close > start_open) or \
