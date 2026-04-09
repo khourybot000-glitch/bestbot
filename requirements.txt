@@ -2,3 +2,4 @@ flask
 pyTelegramBotAPI
 pymongo
 websocket-client
+flask_cors
